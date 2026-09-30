@@ -133,7 +133,9 @@ def schedule(x: np.ndarray, sr: int, p: Params, bpm: float, sub_event_bias: floa
         for s in range(count):
             offset = (s / count) * step * (0.9 if p.mode != "INPUT" else 0.5)
             start = int((t + offset) * sr)
-            if start >= n:
+            # FLUX jitter can displace the first step before the start of the
+            # render, which is not a position the reactor can fire at.
+            if not 0 <= start < n:
                 continue
             events.append(
                 Event(

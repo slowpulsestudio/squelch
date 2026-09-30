@@ -92,8 +92,8 @@ def _shift(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) ->
 PROFILES = {
     "RADIATION": ReactionProfile(
         name="RADIATION",
-        cutoff_lo_hz=180.0,
-        cutoff_hi_hz=4200.0,
+        cutoff_lo_hz=420.0,
+        cutoff_hi_hz=6000.0,
         decay_lo_s=0.03,
         decay_hi_s=0.35,
         resonance_lo=2.0,
@@ -105,8 +105,8 @@ PROFILES = {
     ),
     "FISSION": ReactionProfile(
         name="FISSION",
-        cutoff_lo_hz=150.0,
-        cutoff_hi_hz=2600.0,
+        cutoff_lo_hz=340.0,
+        cutoff_hi_hz=3600.0,
         decay_lo_s=0.08,
         decay_hi_s=0.60,
         resonance_lo=1.5,
@@ -118,8 +118,8 @@ PROFILES = {
     ),
     "TOXIC SLUDGE": ReactionProfile(
         name="TOXIC SLUDGE",
-        cutoff_lo_hz=70.0,
-        cutoff_hi_hz=900.0,
+        cutoff_lo_hz=150.0,
+        cutoff_hi_hz=1300.0,
         decay_lo_s=0.25,
         decay_hi_s=1.60,
         resonance_lo=2.0,
@@ -131,8 +131,8 @@ PROFILES = {
     ),
     "BEAKER": ReactionProfile(
         name="BEAKER",
-        cutoff_lo_hz=220.0,
-        cutoff_hi_hz=3000.0,
+        cutoff_lo_hz=480.0,
+        cutoff_hi_hz=4200.0,
         decay_lo_s=0.02,
         decay_hi_s=0.25,
         resonance_lo=4.0,
@@ -144,8 +144,8 @@ PROFILES = {
     ),
     "ALIEN": ReactionProfile(
         name="ALIEN",
-        cutoff_lo_hz=200.0,
-        cutoff_hi_hz=5200.0,
+        cutoff_lo_hz=440.0,
+        cutoff_hi_hz=6500.0,
         decay_lo_s=0.04,
         decay_hi_s=0.50,
         resonance_lo=3.0,

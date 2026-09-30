@@ -18,6 +18,9 @@ from .scheduler import Event, schedule
 #: Envelope attack, long enough to avoid a click on the filter sweep.
 ATTACK_S = 0.002
 
+#: Fraction of a reaction's spectral span still travelled at RANGE = 0.
+MIN_EXCURSION = 0.30
+
 
 def _event_envelope(length: int, attack: int, tau: float) -> np.ndarray:
     t = np.arange(length, dtype=float)
@@ -61,12 +64,19 @@ def build_controls(
     decay_s = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
     hold = p.half_life * 0.85
 
+    # RANGE never closes the sweep down to nothing. At zero the reactor still
+    # travels a fraction of its span, so the filter is never parked at its
+    # resting cutoff stripping everything above it — prompt.md requires the
+    # processed signal to keep a relationship to the input.
+    excursion = span_oct * (MIN_EXCURSION + (1.0 - MIN_EXCURSION) * p.range)
+    excursion *= 0.55 + 0.45 * squelch_depth
+    excursion *= 1.0 - 0.5 * damping
+
     prev_peak = base_oct
     prev_q = q_lo
 
     for ev in events:
         this_decay = max(decay_s * ev.decay_scale, 0.005)
-        excursion = span_oct * p.range * squelch_depth * (1.0 - 0.75 * damping)
         peak = base_oct + excursion * (0.35 + 0.65 * ev.tone) * ev.intensity
         peak = hold * prev_peak + (1.0 - hold) * peak
 

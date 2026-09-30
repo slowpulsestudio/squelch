@@ -32,13 +32,22 @@ VIOLENT_ANCHOR = dict(
 
 
 def _random_params(reaction: str, seed: int, index: int) -> Params:
-    values = {name: rng.urand(seed, 10, index, i) for i, name in enumerate(CONTINUOUS)}
-    mode = MODES[int(rng.urand(seed, 11, index) * len(MODES))]
-    grid = GRID_NAMES[int(rng.urand(seed, 12, index) * len(GRID_NAMES))]
+    # The reaction is part of every draw, otherwise each reaction gets an
+    # identical sequence of settings and the sweep only explores a handful of
+    # distinct combinations.
+    r = REACTIONS.index(reaction)
+    values = {name: rng.urand(seed, 10, r, index, i) for i, name in enumerate(CONTINUOUS)}
+    mode = MODES[int(rng.urand(seed, 11, r, index) * len(MODES))]
+    grid = GRID_NAMES[int(rng.urand(seed, 12, r, index) * len(GRID_NAMES))]
     return Params(reaction=reaction, mode=mode, grid=grid, seed=index, **values)
 
 
 def variants(reaction: str, count: int, seed: int) -> list[Params]:
+    """Both extremes plus random full sets in between.
+
+    The two anchors are identical across reactions on purpose, so the character
+    of each reaction can be compared at matched settings.
+    """
     base = Params(reaction=reaction, mode="GRID", grid="1/16", seed=0)
     out = [replace(base, **QUIET_ANCHOR, seed=0)]
     for i in range(1, count - 1):
