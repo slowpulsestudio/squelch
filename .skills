@@ -10,6 +10,4 @@ workflow/general
 workflow/architecture
 workflow/git
 workflow/testing
-workflow/figma-read-from-mcp
-workflow/figma-write-to-canvas
 workflow/dsp-prototyping
