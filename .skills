@@ -1,0 +1,15 @@
+# This file is only a pseudo-import list for the Up-Skill mechanism — like a
+# requirements.txt for skills. It just names reusable skill files to fetch.
+# It carries NO information about what this project actually is or does.
+# The project's real identity, purpose, and requirements come from the
+# original build/meta-prompt used to create it — not from this file, and
+# not from the generated master-skills.md. Never infer project intent from
+# the skill names listed below.
+platform/juce-vst3-plugin
+workflow/general
+workflow/architecture
+workflow/git
+workflow/testing
+workflow/figma-read-from-mcp
+workflow/figma-write-to-canvas
+workflow/dsp-prototyping
