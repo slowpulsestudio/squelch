@@ -1,0 +1,20 @@
+# Build output
+build/
+
+# Local working audio — binary, churns constantly
+Input/
+Output/
+
+# DAW smoke-test project (Ableton auto-generates Backup/ and Samples/)
+Testing/
+
+# Python prototyping
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# macOS
+.DS_Store
