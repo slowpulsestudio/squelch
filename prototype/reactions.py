@@ -15,7 +15,7 @@ import numpy as np
 from scipy.ndimage import maximum_filter1d
 from scipy.signal import lfilter
 
-from . import filters, rng
+from . import filters, rng, saturation
 from .controls import Controls
 from .params import Params
 
@@ -276,16 +276,17 @@ def contaminate(
     follower = _input_follower(dry, sr)
     bed = bed * (1.0 - SIDECHAIN_DEPTH + SIDECHAIN_DEPTH * follower)[:, None]
 
-    # Normalising the bed against its own whole-buffer RMS is what makes
-    # CONTAMINATION map to a predictable level in dB, but it also means a
-    # MELTDOWN late in a render scales the bed earlier in that render. It is a
-    # property of rendering offline in one pass; a streaming port has no such
-    # reach backwards. Measured at roughly -25 dB, so it is left alone.
-    bed_rms = np.sqrt(np.mean(bed**2))
+    # Normalising the bed against its own RMS is what makes CONTAMINATION map
+    # to a predictable level in dB. Measured before the gate when a MELTDOWN is
+    # armed, so a loud passage later in the render cannot scale the bed earlier
+    # in it — the same reach-backwards the output stage's level match had.
+    until = int(p.meltdown_at * sr) if (md is not None and md.active) else 0
+    window = slice(0, until) if until > sr // 4 else slice(None)
+    bed_rms = np.sqrt(np.mean(bed[window] ** 2))
     if bed_rms < 1e-12:
         return wet
 
-    bed *= (np.sqrt(np.mean(wet**2)) + 1e-12) / bed_rms
+    bed *= (np.sqrt(np.mean(wet[window] ** 2)) + 1e-12) / bed_rms
     level = profile.noise_full_level * amount**2 * (1.0 - 0.5 * c.damping)
     return wet + bed * level[:, None]
 
@@ -324,7 +325,10 @@ def _sludge(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -
     y = filters.varying_notch(body, notch, 1.6, sr)
     y = filters.varying_notch(y, notch * 1.9, 1.6, sr)
     y = filters.static_lowpass(y, 900.0 + 1200.0 * p.toxicity, sr, q=0.7)
-    return np.tanh(y * (1.0 + 1.2 * p.toxicity)) / (1.0 + 0.7 * p.toxicity)
+    thick = saturation.oversampled(
+        y * (1.0 + 1.2 * p.toxicity), saturation.soft_clip
+    )
+    return thick / (1.0 + 0.7 * p.toxicity)
 
 
 def _bubble(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:

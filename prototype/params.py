@@ -94,6 +94,11 @@ class Params:
     ionize: bool = False
     ionize_amount: float = 0.7
 
+    #: Output-section toggle: a hard ceiling instead of the lookahead limiter.
+    #: Lives with the output controls, so like them it is kept out of presets
+    #: and out of Randomise.
+    clip: bool = False
+
     #: MELTDOWN is momentary: held from meltdown_at for meltdown_hold seconds.
     #: Negative start or zero hold means it never fires.
     meltdown_at: float = -1.0

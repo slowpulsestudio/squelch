@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import maximum_filter1d
 
-from . import filters, rng
+from . import filters, rng, saturation
 from .controls import Controls
 from .params import Params
 from .reverb import reverb
@@ -33,6 +33,7 @@ AFTERGLOW_LEVEL = 0.9
 
 LIMITER_LOOKAHEAD_S = 0.005
 LIMITER_CEILING = 0.97
+LIMITER_RELEASE_S = 0.050
 
 #: Pultec-style voicing, applied to every reaction. Tuned for future garage /
 #: breaks / warm techno: weight low down, mud pulled out above it, the harsh
@@ -48,25 +49,30 @@ VOICE_AIR_HZ = 15000.0
 VOICE_AIR_DB = 1.0
 
 
-def drive(x: np.ndarray, p: Params, weight: float = 1.0, amount_ctrl=None) -> np.ndarray:
+def drive(
+    x: np.ndarray, p: Params, weight: float = 1.0, amount_ctrl=None, until: int = 0
+) -> np.ndarray:
     """Saturation with the level change taken back out.
 
     DRIVE is a contamination control, not a gain control, so the RMS it adds is
     removed afterwards. The weight is the reaction's own appetite for it.
 
-    Makeup is referenced to the knob position, not to the realised output, so a
-    MELTDOWN cannot reach backwards and change the level before it fired. It
-    also means the gesture is allowed to get louder, which it should.
+    Makeup is referenced to the knob position and measured over the material
+    before any MELTDOWN, so the gesture cannot reach backwards and change the
+    level before it fired. It also means the gesture is allowed to get louder,
+    which it should.
     """
     amount = np.full(len(x), p.drive) if amount_ctrl is None else amount_ctrl
     if amount.max() <= 0.0:
         return x
 
+    window = slice(0, until) if until > len(x) // 20 else slice(None)
     gain = 1.0 + 11.0 * (np.power(amount, 0.6) * weight)
     reference = 1.0 + 11.0 * (np.power(p.drive, 0.6) * weight)
-    before = np.sqrt(np.mean(x**2)) + 1e-12
-    after = np.sqrt(np.mean(np.tanh(x * reference) ** 2)) + 1e-12
-    return np.tanh(x * gain[:, None]) * (before / after)
+    before = np.sqrt(np.mean(x[window] ** 2)) + 1e-12
+    after = np.sqrt(np.mean(saturation.soft_clip(x[window], reference) ** 2)) + 1e-12
+    y = saturation.oversampled(x * gain[:, None], saturation.soft_clip)
+    return y * (before / after)
 
 
 def collimate(x: np.ndarray, sr: int, p: Params) -> np.ndarray:
@@ -178,18 +184,42 @@ def peak_limit(x: np.ndarray, sr: int) -> np.ndarray:
 
     Gain is derived from a rolling forward-looking max and applied to audio
     delayed by the same window, so single-sample transients are caught rather
-    than slipping through ahead of the envelope.
+    than slipping through ahead of the envelope. Gain falls instantly but
+    recovers over LIMITER_RELEASE_S: without a release it snapped back at over
+    4000 dB per second, which is itself a distortion.
     """
     window = max(int(LIMITER_LOOKAHEAD_S * sr), 1)
     magnitude = np.max(np.abs(x), axis=1)
     padded = np.concatenate([magnitude, np.zeros(window)])
     rolling = maximum_filter1d(padded, size=2 * window + 1, mode="nearest")[:len(magnitude)]
 
-    gain = np.minimum(1.0, LIMITER_CEILING / np.maximum(rolling, 1e-9))
+    target = np.minimum(1.0, LIMITER_CEILING / np.maximum(rolling, 1e-9))
+    coeff = float(np.exp(-1.0 / max(LIMITER_RELEASE_S * sr, 1.0)))
+    gain = np.empty_like(target)
+    held = 1.0
+    for i, want in enumerate(target):
+        held = want if want < held else want + (held - want) * coeff
+        gain[i] = held
 
     delayed = np.zeros_like(x)
     delayed[window:] = x[: len(x) - window]
     return delayed * gain[:, None]
+
+
+def clip(x: np.ndarray) -> np.ndarray:
+    """Hard ceiling with no lookahead, oversampled so it does not alias.
+
+    Costs none of the limiter's 5ms delay, and sounds like what it is.
+
+    Clipping at the higher rate removes the aliasing, but the filter that comes
+    back down rings, and that ring lands on top of a signal already sitting
+    flat on the ceiling: measured 1.08, which is over full scale and the one
+    thing a ceiling may never do. The final clamp catches that overshoot. It
+    reintroduces a little aliasing, but only on the few samples that overshot,
+    which is a far better trade than handing the host a clipped output.
+    """
+    loud = saturation.oversampled(x, lambda u: saturation.hard_clip(u, LIMITER_CEILING))
+    return saturation.hard_clip(loud, LIMITER_CEILING)
 
 
 def process(
@@ -208,7 +238,8 @@ def process(
     reaction decorrelates phase against the dry signal, so the mix can peak
     higher than either part on its own.
     """
-    y = drive(wet, p, profile.drive_weight, md.samples("drive") if md else None)
+    until = int(p.meltdown_at * sr) if (md is not None and md.active) else 0
+    y = drive(wet, p, profile.drive_weight, md.samples("drive") if md else None, until)
     y = collimate(y, sr, p)
 
     # Placement runs after the saturation, not before it. A hard-panned event
@@ -226,7 +257,6 @@ def process(
 
     y = fallout(y, sr, p, profile, c)
     y = voice(y, sr)
-    until = int(p.meltdown_at * sr) if (md is not None and md.active) else None
-    y = match_rms(y, dry, until if until and until > sr // 4 else None)
+    y = match_rms(y, dry, until if until > sr // 4 else None)
     y = (1.0 - mix) * dry + mix * y
-    return peak_limit(y, sr)
+    return clip(y) if p.clip else peak_limit(y, sr)

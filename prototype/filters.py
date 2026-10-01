@@ -10,6 +10,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.signal import hilbert, lfilter, lfilter_zi
 
+from . import saturation
+
 #: Samples per control block. At 32 the envelope stepped far enough per block to
 #: click audibly on short high-Q events, leaving the artefact only 4.5 dB under
 #: the output peak; 8 puts it 26.8 dB under, which is inaudible.
@@ -212,7 +214,7 @@ def varying_ladder(
         b1, a1 = _rbj_lowpass(fc_ctrl[i], q_ctrl[i], sr)
         seg, zi[0] = lfilter(b0, a0, seg, axis=0, zi=zi[0])
         if sat[i] > 0.0:
-            seg = np.tanh(seg * (1.0 + sat[i] * 6.0)) / (1.0 + sat[i] * 2.0)
+            seg = saturation.soft_clip(seg, 1.0 + sat[i] * 6.0) / (1.0 + sat[i] * 2.0)
         seg, zi[1] = lfilter(b1, a1, seg, axis=0, zi=zi[1])
         y[i * BLOCK : (i + 1) * BLOCK] = seg
     return y

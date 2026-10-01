@@ -31,6 +31,21 @@ def _peak_frequency(x: np.ndarray, sr: int = SR) -> float:
     return float(np.fft.rfftfreq(len(x), 1.0 / sr)[int(np.argmax(spectrum))])
 
 
+def _blackman_harris(n: int) -> np.ndarray:
+    """A window with sidelobes low enough to measure a real noise floor.
+
+    Anything gentler leaks a loud tone across the whole spectrum and that
+    leakage gets mistaken for distortion that is not there.
+    """
+    k = 2.0 * np.pi * np.arange(n) / n
+    return (
+        0.35875
+        - 0.48829 * np.cos(k)
+        + 0.14128 * np.cos(2.0 * k)
+        - 0.01168 * np.cos(3.0 * k)
+    )
+
+
 def _source() -> str:
     """A real loop if one is present, so end-to-end checks use real material."""
     from pathlib import Path
@@ -588,6 +603,13 @@ def check_meltdown_cannot_reach_backwards() -> tuple[bool, str]:
 
     The offline harness normalises level over the whole render, so a loud
     meltdown late in a file was quietly ducking everything before it by 2dB.
+
+    Measured as two separate numbers, because one figure conflates them. A
+    broad level offset and a changed waveform are different faults: arming the
+    gesture moves the level-match reference window, which is worth a fraction
+    of a dB and is audible to nobody, while any real leak backwards would show
+    up in the residual once that offset is divided out. A streaming port
+    normalises nothing and has neither.
     """
     from . import engine
     from .params import Params
@@ -607,18 +629,22 @@ def check_meltdown_cannot_reach_backwards() -> tuple[bool, str]:
         source, SR, Params(**base, meltdown_at=3.0, meltdown_hold=1.5), 140.0
     )
 
-    def relative(window: slice) -> float:
-        difference = hot[window] - calm[window]
-        return 20.0 * np.log10(
-            (np.sqrt(np.mean(difference**2)) + 1e-15)
-            / (np.sqrt(np.mean(hot[window] ** 2)) + 1e-12)
-        )
+    def rms(a: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(a**2))) + 1e-15
 
-    before = relative(slice(0, int(2.9 * SR)))
-    during = relative(slice(int(3.0 * SR), int(4.5 * SR)))
+    before = slice(0, int(2.9 * SR))
+    offset = rms(hot[before]) / rms(calm[before])
+    shape = 20.0 * np.log10(rms(hot[before] - calm[before] * offset) / rms(hot[before]))
+    offset_db = 20.0 * np.log10(offset)
 
-    ok = before < -30.0 and during > -6.0
-    return ok, f"{before:.1f} dB before the gate, {during:+.1f} dB while held"
+    during = slice(int(3.0 * SR), int(4.5 * SR))
+    held = 20.0 * np.log10(rms(hot[during] - calm[during]) / rms(hot[during]))
+
+    ok = abs(offset_db) < 0.5 and shape < -30.0 and held > -6.0
+    return ok, (
+        f"before the gate {offset_db:+.2f} dB level, {shape:.1f} dB waveform; "
+        f"{held:+.1f} dB while held"
+    )
 
 
 def check_ionize_scatters_three_axes() -> tuple[bool, str]:
@@ -738,9 +764,171 @@ def check_ionize_moves_the_delivered_mix() -> tuple[bool, str]:
     )
 
 
+def check_drive_does_not_alias() -> tuple[bool, str]:
+    """Saturating at the base rate folds harmonics back down the spectrum.
+
+    A distortion curve generates harmonics forever, and the ones above Nyquist
+    have nowhere to go, so they reflect back as inharmonic tones underneath the
+    music. That is what makes cheap saturation sound like grit instead of
+    drive.
+
+    One tone, not two. With two tones the products and the reflections both
+    land on multiples of their common divisor, so the measurement cannot tell
+    them apart. A single tone puts every honest harmonic on a multiple of
+    itself and every reflection somewhere else.
+    """
+    from . import saturation
+
+    n = SR
+    t = np.arange(n) / SR
+    f0 = 6900.0
+    x = np.repeat((0.4 * np.sin(2 * np.pi * f0 * t))[:, None], 2, axis=1)
+
+    freqs = np.fft.rfftfreq(n, 1.0 / SR)
+    harmonic = np.zeros(len(freqs), dtype=bool)
+    for k in range(1, int(SR / 2 / f0) + 1):
+        harmonic |= np.abs(freqs - k * f0) < 40.0
+    harmonic |= freqs < 40.0
+
+    def alias_floor(y: np.ndarray) -> float:
+        spectrum = np.abs(np.fft.rfft(y[:, 0] * _blackman_harris(n)))
+        return 20.0 * np.log10((spectrum[~harmonic].max() + 1e-18) / spectrum.max())
+
+    plain = alias_floor(np.tanh(x * 8.0))
+    clean = alias_floor(saturation.oversampled(x * 8.0, saturation.soft_clip))
+
+    # A deliberately unkind test: a 6.9kHz tone at full scale driven eight
+    # times over. Four times oversampling cannot be perfect here, because the
+    # thirteenth harmonic of 6.9kHz is above Nyquist even at the raised rate,
+    # so what is left is the physical floor of 4x rather than a defect. Real
+    # programme material carries far less energy that high. The number that
+    # matters is the improvement over saturating at the base rate.
+    ok = clean < -55.0 and clean < plain - 25.0
+    return ok, f"{plain:.1f} dB at the base rate, {clean:.1f} dB oversampled"
+
+
+def check_quiet_material_is_untouched() -> tuple[bool, str]:
+    """Below the knee the curve must be exactly linear.
+
+    tanh colours everything it touches, so at low DRIVE the quiet parts of a
+    track pick up distortion they never asked for. The soft knee leaves
+    anything under the threshold alone and only bends the peaks.
+    """
+    from . import saturation
+
+    n = SR
+    t = np.arange(n) / SR
+    quiet = 0.05 * np.sin(2 * np.pi * 1000.0 * t)
+    quiet = np.stack([quiet, quiet], axis=1)
+
+    def thd(y: np.ndarray) -> float:
+        spectrum = np.abs(np.fft.rfft(y[:, 0] * np.hanning(n)))
+        bin_ = int(round(1000.0 * n / SR))
+        fundamental = spectrum[bin_ - 3 : bin_ + 4].sum()
+        rest = spectrum.sum() - fundamental
+        return 100.0 * rest / (fundamental + 1e-18)
+
+    soft = thd(saturation.soft_clip(quiet, 1.0))
+    plain = thd(np.tanh(quiet))
+
+    ok = soft < 0.01
+    return ok, f"soft knee {soft:.3f}%, tanh {plain:.3f}% THD at -26 dBFS"
+
+
+def check_limiter_releases_gently() -> tuple[bool, str]:
+    """Gain that snaps back after a transient reads as a pumping artefact.
+
+    The limiter recovers over a release time instead of following the peak
+    envelope sample by sample, which keeps the gain curve slow enough that it
+    modulates level rather than adding sidebands to the programme.
+
+    Only the recovery is measured. Clamping down has to be instant or the peak
+    escapes, so including the attack in this number just reports how fast the
+    limiter caught the transient, which is not what is being asked.
+    """
+    from . import output_stage
+
+    n = int(SR * 2.0)
+    t = np.arange(n) / SR
+    tone = 0.3 * np.sin(2 * np.pi * 220.0 * t)
+    strike = int(SR * 0.5)
+    tone[strike : strike + 64] += 3.0
+    x = np.stack([tone, tone], axis=1)
+
+    y = output_stage.peak_limit(x, SR)
+
+    # Read the gain off envelopes rather than sample ratios: dividing two
+    # waveforms blows up either side of every zero crossing.
+    span = 256
+    trim = (len(x) // span) * span
+
+    def envelope(a: np.ndarray) -> np.ndarray:
+        return np.abs(a[:trim, 0]).reshape(-1, span).max(axis=1)
+
+    gain = 20.0 * np.log10(
+        np.maximum(envelope(y), 1e-9) / np.maximum(envelope(x), 1e-9)
+    )
+    after = gain[strike // span + 2 :]
+    recovery = np.diff(after)
+    rate = float(recovery[recovery > 0].max()) * SR / span if (recovery > 0).any() else 0.0
+
+    peak = float(np.abs(y).max())
+    ok = 0.0 < rate < 400.0 and peak <= output_stage.LIMITER_CEILING + 1e-6
+    return ok, f"recovers at {rate:.0f} dB/s, peak {peak:.3f}"
+
+
+def check_clip_trades_lookahead_for_hardness() -> tuple[bool, str]:
+    """CLIP is the no-latency ceiling, and it should measurably be one.
+
+    The limiter buys transparency with a lookahead window it has to delay the
+    audio by. CLIP removes that delay and pays for it in harmonics, so the
+    check is that the ceiling still holds, the delay is gone, and the
+    distortion really is higher than the limiter's.
+    """
+    import dataclasses
+
+    from . import engine, output_stage
+    from .params import Params
+
+    n = int(SR * 3.0)
+    t = np.arange(n) / SR
+    tone = 0.3 * np.sin(2 * np.pi * 220.0 * t)
+    tone[int(SR * 1.0) : int(SR * 1.0) + 64] += 3.0
+    x = np.stack([tone, tone], axis=1)
+
+    limited = output_stage.peak_limit(x, SR)
+    clipped = output_stage.clip(x)
+
+    def onset(y: np.ndarray) -> int:
+        loud = np.abs(y[:, 0]) > 0.9
+        return int(np.argmax(loud)) if loud.any() else -1
+
+    delay = onset(limited) - onset(clipped)
+
+    base = dict(reaction="RADIATION", mode="GRID", grid="1/16", seed=4, drive=0.6)
+    source = np.random.default_rng(0).standard_normal((n, 2)) * 0.1
+    soft, _ = engine.process(source, SR, Params(**base), 140.0)
+    hard, _ = engine.process(source, SR, Params(**base, clip=True), 140.0)
+
+    ceiling = output_stage.LIMITER_CEILING
+    ok = (
+        np.abs(clipped).max() <= ceiling + 1e-6
+        and np.abs(hard).max() <= ceiling + 1e-6
+        and delay > 0
+    )
+    return ok, (
+        f"clip saves {1000.0 * delay / SR:.1f} ms of lookahead, "
+        f"ceiling holds at {np.abs(hard).max():.3f} vs limiter {np.abs(soft).max():.3f}"
+    )
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
+    ("limiter releases gently", check_limiter_releases_gently),
+    ("drive does not alias", check_drive_does_not_alias),
+    ("quiet material is untouched", check_quiet_material_is_untouched),
+    ("clip trades lookahead for hardness", check_clip_trades_lookahead_for_hardness),
     ("frequency shift", check_frequency_shift),
     ("octave down", check_octave_down),
     ("pitch wind", check_pitch_wind),
