@@ -23,8 +23,9 @@ ATTACK_S = 0.005
 #: squelch movement intact but long enough to take the staircase off each step.
 ANTI_STEP_S = 0.0015
 
-#: Fraction of a reaction's spectral span still travelled at RANGE = 0.
-MIN_EXCURSION = 0.45
+#: Where a fully-closed sweep rests, as a fraction up the reaction's span. A
+#: static filter parked at the bottom of its range is just mud.
+STATIC_CENTRE = 0.45
 
 #: Delay swing available to the pitch wind, and how heavily the wind envelope is
 #: slowed before driving it. Pitch change is the delay's rate of change, so the
@@ -75,22 +76,23 @@ def build_controls(
     span_oct = np.log2(profile.cutoff_hi_hz / profile.cutoff_lo_hz)
     q_lo, q_hi = profile.resonance_lo, profile.resonance_hi
 
+    # As RANGE closes the sweep down, the filter's resting point rises to meet
+    # it, so a static filter sits in the middle of its range rather than parked
+    # at the bottom stripping everything above it.
+    resting_oct = base_oct + span_oct * STATIC_CENTRE * (1.0 - p.range)
+
     env_total = np.zeros(nb)
-    cut_oct = np.full(nb, base_oct)
+    cut_oct = np.full(nb, resting_oct)
     resonance = np.zeros(nb)
 
     decay_s = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
     hold = p.half_life * 0.85
 
-    # RANGE never closes the sweep down to nothing. At zero the reactor still
-    # travels a fraction of its span, so the filter is never parked at its
-    # resting cutoff stripping everything above it — prompt.md requires the
-    # processed signal to keep a relationship to the input.
-    excursion = span_oct * (MIN_EXCURSION + (1.0 - MIN_EXCURSION) * p.range)
+    excursion = span_oct * p.range
     excursion *= 0.55 + 0.45 * squelch_depth
     excursion *= 1.0 - 0.5 * damping
 
-    prev_peak = base_oct
+    prev_peak = resting_oct
     prev_q = q_lo
 
     # How far this reaction throws cutoff and Q around from event to event,
@@ -98,14 +100,14 @@ def build_controls(
     chaos = profile.chaos * p.volatility
     acid = profile.voice == "acid"
     slide_blocks = max(int(SLIDE_S * ctrl_sr), 1)
-    held_oct = base_oct
+    held_oct = resting_oct
 
     for ev in events:
         this_decay = max(decay_s * ev.decay_scale, 0.005)
-        peak = base_oct + excursion * (0.35 + 0.65 * ev.tone) * ev.intensity
-        peak += span_oct * chaos * 0.6 * rng.ubipolar(p.seed, 20, ev.index)
+        peak = resting_oct + excursion * (0.35 + 0.65 * ev.tone) * ev.intensity
+        peak += span_oct * chaos * 0.6 * p.range * rng.ubipolar(p.seed, 20, ev.index)
         if acid and ev.accent:
-            peak = base_oct + (peak - base_oct) * ACCENT_ENV_MOD
+            peak = resting_oct + (peak - resting_oct) * ACCENT_ENV_MOD
         peak = hold * prev_peak + (1.0 - hold) * peak
         peak = float(np.clip(peak, base_oct - 0.5, base_oct + span_oct + 0.5))
 
@@ -137,7 +139,7 @@ def build_controls(
         if acid:
             # Monophonic, like the machine this imitates: each note retriggers
             # the filter envelope and owns the line until the next one starts.
-            curve = base_oct + (peak - base_oct) * env
+            curve = resting_oct + (peak - resting_oct) * env
             if ev.slide:
                 glide = min(slide_blocks, len(curve))
                 ramp = np.linspace(0.0, 1.0, glide)
@@ -149,7 +151,7 @@ def build_controls(
             # Overlapping events take the most extreme value rather than
             # averaging. Averaging meant raising REACTIVITY diluted the sweep
             # instead of intensifying it, capping it at ~55% of its span.
-            cut_oct[c0:c1] = np.maximum(cut_oct[c0:c1], base_oct + (peak - base_oct) * env)
+            cut_oct[c0:c1] = np.maximum(cut_oct[c0:c1], resting_oct + (peak - resting_oct) * env)
             resonance[c0:c1] = np.maximum(resonance[c0:c1], q * env)
 
     # Anti-step smoothing runs always; RODS adds much heavier damping on top.
