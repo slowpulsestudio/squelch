@@ -11,6 +11,7 @@ import numpy as np
 
 from . import filters, rng
 from .controls import Controls
+from .meltdown import Meltdown
 from .params import Params
 from .reactions import PROFILES, ReactionProfile, contaminate
 from .scheduler import Event, schedule
@@ -66,14 +67,23 @@ def _one_pole_smooth(x: np.ndarray, coeff: float) -> np.ndarray:
 
 
 def build_controls(
-    events: list[Event], n_samples: int, sr: int, p: Params, profile: ReactionProfile
+    events: list[Event],
+    n_samples: int,
+    sr: int,
+    p: Params,
+    profile: ReactionProfile,
+    md: Meltdown | None = None,
 ) -> Controls:
     nb = filters.n_blocks(n_samples)
     ctrl_sr = sr / filters.BLOCK
 
-    damping = p.containment
-    squelch_depth = 0.40 + 0.60 * p.toxicity
-    exposure_curve = np.power(p.exposure, 0.8)
+    # An unfired MELTDOWN is inert, so every parameter reads as its knob value.
+    md = md or Meltdown(p, n_samples, sr)
+
+    spread_ctrl = md.ctrl("spread")
+    toxicity_ctrl = md.ctrl("toxicity")
+    containment_ctrl = md.ctrl("containment")
+    exposure_ctrl = md.ctrl("exposure")
 
     base_oct = np.log2(profile.cutoff_lo_hz)
     span_oct = np.log2(profile.cutoff_hi_hz / profile.cutoff_lo_hz)
@@ -82,37 +92,40 @@ def build_controls(
     # As SPREAD closes the sweep down, the filter's resting point rises to meet
     # it, so a static filter sits in the middle of its range rather than parked
     # at the bottom stripping everything above it.
-    resting_oct = base_oct + span_oct * STATIC_CENTRE * (1.0 - p.spread)
+    resting_ctrl = base_oct + span_oct * STATIC_CENTRE * (1.0 - spread_ctrl)
 
     env_total = np.zeros(nb)
     env_stereo = np.zeros((nb, 2))
-    cut_oct = np.full(nb, resting_oct)
+    cut_oct = resting_ctrl.copy()
     resonance = np.zeros(nb)
 
     decay_s = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
     hold = p.half_life * 0.85 * profile.persistence
 
-    excursion = span_oct * p.spread
-    excursion *= 0.55 + 0.45 * squelch_depth
-    excursion *= 1.0 - 0.5 * damping
-
-    prev_peak = resting_oct
+    prev_peak = float(resting_ctrl[0])
     prev_q = q_lo
 
-    # How far this reaction throws cutoff and Q around from event to event,
-    # on top of the ordinary VOLATILITY deviation.
-    chaos = profile.chaos * p.volatility
     acid = profile.voice == "acid"
     slide_blocks = max(int(SLIDE_S * ctrl_sr), 1)
-    held_oct = resting_oct
-
-    # prompt.md lists stereo position among the things VOLATILITY varies.
-    pan_spread = p.volatility * (1.0 - 0.7 * damping)
+    held_oct = prev_peak
 
     for ev in events:
+        block = min(max(ev.start // filters.BLOCK, 0), nb - 1)
+        spread = float(spread_ctrl[block])
+        toxicity = float(toxicity_ctrl[block])
+        damping = float(containment_ctrl[block])
+        resting_oct = float(resting_ctrl[block])
+
+        # How far this reaction throws cutoff and Q around from event to event,
+        # on top of the ordinary VOLATILITY deviation.
+        chaos = profile.chaos * p.volatility
+        excursion = span_oct * spread
+        excursion *= 0.55 + 0.45 * (0.40 + 0.60 * toxicity)
+        excursion *= 1.0 - 0.5 * damping
+
         this_decay = max(decay_s * ev.decay_scale, 0.005)
         peak = resting_oct + excursion * (0.35 + 0.65 * ev.tone) * ev.intensity
-        peak += span_oct * chaos * 0.6 * p.spread * rng.ubipolar(p.seed, 20, ev.index)
+        peak += span_oct * chaos * 0.6 * spread * rng.ubipolar(p.seed, 20, ev.index)
         if acid and ev.accent:
             peak = resting_oct + (peak - resting_oct) * ACCENT_ENV_MOD
         peak = hold * prev_peak + (1.0 - hold) * peak
@@ -121,14 +134,17 @@ def build_controls(
         # Q is reduced once, gently, by each of intensity, TOXICITY and
         # CONTAINMENT. Stacking three aggressive reductions collapsed it to
         # Q~1.2, which is no resonance at all and left nothing to squelch.
-        q = q_lo * np.power(q_hi / q_lo, exposure_curve)
+        q = q_lo * np.power(q_hi / q_lo, np.power(float(exposure_ctrl[block]), 0.8))
         q *= 0.85 + 0.15 * ev.intensity
-        q *= 0.80 + 0.20 * p.toxicity
+        q *= 0.80 + 0.20 * toxicity
         q *= 1.0 - 0.45 * damping
         q *= 1.0 + chaos * 0.9 * rng.ubipolar(p.seed, 21, ev.index)
         if acid and ev.accent:
             q *= ACCENT_RESONANCE
         q = float(np.clip(hold * prev_q + (1.0 - hold) * q, 0.7, q_hi * 1.4))
+
+        # prompt.md lists stereo position among the things VOLATILITY varies.
+        pan_spread = p.volatility * (1.0 - 0.7 * damping)
 
         prev_peak, prev_q = peak, q
 
@@ -182,7 +198,7 @@ def build_controls(
         axis=1,
     )
 
-    smoothing = 0.92 * damping
+    smoothing = 0.92 * float(containment_ctrl.min())
     cut_oct = _one_pole_smooth(cut_oct, smoothing)
     resonance = _one_pole_smooth(resonance, smoothing)
 
@@ -194,19 +210,23 @@ def build_controls(
         cutoff=np.power(2.0, cut_oct),
         resonance=resonance,
         starts=starts,
-        damping=damping,
+        damping=p.containment,
     )
 
 
 def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, Controls]:
     profile = PROFILES[p.reaction]
-    events = schedule(x, sr, p, bpm, sub_event_bias=profile.sub_event_bias)
-    controls = build_controls(events, len(x), sr, p, profile)
+    md = Meltdown(p, len(x), sr)
+    events = schedule(x, sr, p, bpm, sub_event_bias=profile.sub_event_bias, md=md)
+    controls = build_controls(events, len(x), sr, p, profile, md)
 
-    inner_sat = profile.inner_sat * (0.3 + 0.7 * p.toxicity) * (1.0 - 0.7 * p.containment)
+    toxicity = md.ctrl("toxicity")
+    containment = md.ctrl("containment")
+
+    inner_sat = profile.inner_sat * (0.3 + 0.7 * toxicity) * (1.0 - 0.7 * containment)
     wet = filters.varying_ladder(x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat)
 
-    depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * p.toxicity) * (1.0 - 0.6 * p.containment)
+    depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * toxicity) * (1.0 - 0.6 * containment)
     amp = np.stack(
         [filters.to_sample_rate(1.0 - depth + depth * controls.env_stereo[:, ch], len(x))
          for ch in (0, 1)],
@@ -216,11 +236,11 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
 
     # SPREAD is how far a reaction travels in pitch, so it drives the wind as
     # well as the filter excursion.
-    wind_depth = p.spread * profile.wind_depth * (1.0 - 0.6 * p.containment)
-    if wind_depth > 0.0:
+    wind_depth = md.ctrl("spread") * profile.wind_depth * (1.0 - 0.6 * containment)
+    if wind_depth.max() > 0.0:
         wind = filters.smooth(controls.env, WIND_SMOOTH_S, sr) * wind_depth
         wet = filters.pitch_wind(wet, wind, sr, MAX_WIND_S)
 
     wet = profile.post(wet, x, controls, p, sr)
-    wet = contaminate(wet, x, controls, p, profile, sr)
-    return wet, controls
+    wet = contaminate(wet, x, controls, p, profile, sr, md)
+    return wet, controls, md

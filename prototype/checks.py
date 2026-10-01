@@ -525,6 +525,93 @@ def check_volatility_moves_timing() -> tuple[bool, str]:
     return ok, f"{offsets[0]:.2f} ms off-grid at VOLATILITY 0, {offsets[1]:.2f} ms at 1"
 
 
+def check_meltdown_stages_in_order() -> tuple[bool, str]:
+    """MELTDOWN must stage in, not snap, and in the order the metaphor implies.
+
+    The rods come out first because that is what causes it; the fallout arrives
+    last and outlives everything else.
+    """
+    from .meltdown import STAGES, Meltdown
+    from .params import Params
+
+    n = SR * 8
+    p = Params(
+        containment=0.6, spread=0.2, toxicity=0.2, drive=0.2, exposure=0.2,
+        contamination=0.1, meltdown_at=1.0, meltdown_hold=2.0,
+    )
+    md = Meltdown(p, n, SR)
+    time = np.arange(md.ctrl("drive").shape[0]) * filters.BLOCK / SR
+
+    def crosses_half(name: str) -> float:
+        values = md.ctrl(name)
+        base, target = getattr(p, name), STAGES[name].target
+        halfway = base + (target - base) * 0.5
+        reached = np.where(values >= halfway)[0] if target > base else np.where(values <= halfway)[0]
+        return float(time[reached[0]]) if len(reached) else np.inf
+
+    def settles(name: str) -> float:
+        values = md.ctrl(name)
+        base = getattr(p, name)
+        moved = np.where(np.abs(values - base) > abs(STAGES[name].target - base) * 0.05)[0]
+        return float(time[moved[-1]]) if len(moved) else 0.0
+
+    order = ["containment", "drive", "toxicity", "exposure", "contamination"]
+    arrivals = [crosses_half(name) for name in order]
+    staged = all(a < b for a, b in zip(arrivals, arrivals[1:]))
+
+    # SPREAD has to actually reach its maximum while held.
+    spread_tops = float(md.ctrl("spread").max())
+    containment_bottom = float(md.ctrl("containment").min())
+
+    lingers = settles("contamination") > max(settles(n) for n in order[:-1])
+    inert = not Meltdown(Params(), n, SR).active
+
+    ok = staged and lingers and inert and spread_tops > 0.97 and containment_bottom < 0.03
+    return ok, (
+        "arrive at " + ", ".join(f"{n[:4]} {a:.2f}s" for n, a in zip(order, arrivals))
+        + f"; contamination settles last at {settles('contamination'):.1f}s; "
+        f"spread tops {spread_tops:.2f}, containment bottoms {containment_bottom:.2f}"
+    )
+
+
+def check_meltdown_cannot_reach_backwards() -> tuple[bool, str]:
+    """A momentary gesture must not alter the audio before it fires.
+
+    The offline harness normalises level over the whole render, so a loud
+    meltdown late in a file was quietly ducking everything before it by 2dB.
+    """
+    from . import engine
+    from .params import Params
+
+    seconds = 6.0
+    n = int(SR * seconds)
+    rng_ = np.random.default_rng(0)
+    source = rng_.standard_normal((n, 2)) * 0.1
+
+    base = dict(
+        reaction="RADIATION", mode="GRID", grid="1/16", toxicity=0.25,
+        exposure=0.3, spread=0.25, drive=0.2, contamination=0.15,
+        containment=0.55, decay=0.3, seed=4,
+    )
+    calm, _ = engine.process(source, SR, Params(**base), 140.0)
+    hot, _ = engine.process(
+        source, SR, Params(**base, meltdown_at=3.0, meltdown_hold=1.5), 140.0
+    )
+
+    def relative(window: slice) -> float:
+        difference = hot[window] - calm[window]
+        return 20.0 * np.log10(
+            (np.sqrt(np.mean(difference**2)) + 1e-15)
+            / (np.sqrt(np.mean(hot[window] ** 2)) + 1e-12)
+        )
+
+    before = relative(slice(0, int(2.9 * SR)))
+    during = relative(slice(int(3.0 * SR), int(4.5 * SR)))
+
+    ok = before < -30.0 and during > -6.0
+    return ok, f"{before:.1f} dB before the gate, {during:+.1f} dB while held"
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
@@ -537,6 +624,8 @@ CHECKS = [
     ("events are panned", check_events_are_panned),
     ("containment thins events", check_containment_thins_events),
     ("volatility moves timing", check_volatility_moves_timing),
+    ("meltdown stages in order", check_meltdown_stages_in_order),
+    ("meltdown cannot reach backwards", check_meltdown_cannot_reach_backwards),
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("range drives each character", check_range_drives_each_character),

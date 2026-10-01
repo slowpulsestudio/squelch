@@ -185,7 +185,7 @@ def varying_ladder(
     fc_ctrl: np.ndarray,
     q_ctrl: np.ndarray,
     sr: int,
-    inner_sat: float = 0.0,
+    inner_sat: np.ndarray | float = 0.0,
 ) -> np.ndarray:
     """Two cascaded RBJ lowpass stages with optional saturation between them.
 
@@ -197,6 +197,11 @@ def varying_ladder(
     acid grit rather than a clean analytic ring.
     """
     n, ch = x.shape
+    sat = (
+        inner_sat
+        if isinstance(inner_sat, np.ndarray)
+        else np.full(len(fc_ctrl), float(inner_sat))
+    )
     y = np.zeros_like(x)
     zi = [np.zeros((2, ch)) for _ in range(2)]
     for i in range(len(fc_ctrl)):
@@ -206,8 +211,8 @@ def varying_ladder(
         b0, a0 = _rbj_lowpass(fc_ctrl[i], 0.707, sr)
         b1, a1 = _rbj_lowpass(fc_ctrl[i], q_ctrl[i], sr)
         seg, zi[0] = lfilter(b0, a0, seg, axis=0, zi=zi[0])
-        if inner_sat > 0.0:
-            seg = np.tanh(seg * (1.0 + inner_sat * 6.0)) / (1.0 + inner_sat * 2.0)
+        if sat[i] > 0.0:
+            seg = np.tanh(seg * (1.0 + sat[i] * 6.0)) / (1.0 + sat[i] * 2.0)
         seg, zi[1] = lfilter(b1, a1, seg, axis=0, zi=zi[1])
         y[i * BLOCK : (i + 1) * BLOCK] = seg
     return y

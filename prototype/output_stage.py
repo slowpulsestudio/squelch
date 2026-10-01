@@ -42,20 +42,25 @@ VOICE_AIR_HZ = 15000.0
 VOICE_AIR_DB = 1.0
 
 
-def drive(x: np.ndarray, p: Params, weight: float = 1.0) -> np.ndarray:
+def drive(x: np.ndarray, p: Params, weight: float = 1.0, amount_ctrl=None) -> np.ndarray:
     """Saturation with the level change taken back out.
 
     DRIVE is a contamination control, not a gain control, so the RMS it adds is
     removed afterwards. The weight is the reaction's own appetite for it.
+
+    Makeup is referenced to the knob position, not to the realised output, so a
+    MELTDOWN cannot reach backwards and change the level before it fired. It
+    also means the gesture is allowed to get louder, which it should.
     """
-    if p.drive <= 0.0:
+    amount = np.full(len(x), p.drive) if amount_ctrl is None else amount_ctrl
+    if amount.max() <= 0.0:
         return x
-    amount = np.power(p.drive, 0.6) * weight
-    gain = 1.0 + 11.0 * amount
+
+    gain = 1.0 + 11.0 * (np.power(amount, 0.6) * weight)
+    reference = 1.0 + 11.0 * (np.power(p.drive, 0.6) * weight)
     before = np.sqrt(np.mean(x**2)) + 1e-12
-    y = np.tanh(x * gain)
-    after = np.sqrt(np.mean(y**2)) + 1e-12
-    return y * (before / after)
+    after = np.sqrt(np.mean(np.tanh(x * reference) ** 2)) + 1e-12
+    return np.tanh(x * gain[:, None]) * (before / after)
 
 
 def collimate(x: np.ndarray, sr: int, p: Params) -> np.ndarray:
@@ -131,9 +136,16 @@ def fallout(x: np.ndarray, sr: int, p: Params, profile, c: Controls) -> np.ndarr
     return _mid_wobble(y, sr, p.fallout * profile.wobble_weight, c)
 
 
-def match_rms(y: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    target = np.sqrt(np.mean(reference**2)) + 1e-12
-    current = np.sqrt(np.mean(y**2)) + 1e-12
+def match_rms(y: np.ndarray, reference: np.ndarray, until: int | None = None) -> np.ndarray:
+    """Hold the output at the input's level, measuring over a causal window.
+
+    When MELTDOWN fires, the match is taken from the material before it: a gain
+    derived from the whole buffer would let the loud part quietly duck
+    everything that came before it, which a momentary gesture must not do.
+    """
+    window = slice(0, until) if until else slice(None)
+    target = np.sqrt(np.mean(reference[window] ** 2)) + 1e-12
+    current = np.sqrt(np.mean(y[window] ** 2)) + 1e-12
     return y * (target / current)
 
 
@@ -180,6 +192,7 @@ def process(
     profile,
     c: Controls,
     mix: float = 1.0,
+    md=None,
 ) -> np.ndarray:
     """Run the output chain, blend with dry, then protect the peaks.
 
@@ -187,10 +200,11 @@ def process(
     reaction decorrelates phase against the dry signal, so the mix can peak
     higher than either part on its own.
     """
-    y = drive(wet, p, profile.drive_weight)
+    y = drive(wet, p, profile.drive_weight, md.samples("drive") if md else None)
     y = collimate(y, sr, p)
     y = fallout(y, sr, p, profile, c)
     y = voice(y, sr)
-    y = match_rms(y, dry)
+    until = int(p.meltdown_at * sr) if (md is not None and md.active) else None
+    y = match_rms(y, dry, until if until and until > sr // 4 else None)
     y = (1.0 - mix) * dry + mix * y
     return peak_limit(y, sr)

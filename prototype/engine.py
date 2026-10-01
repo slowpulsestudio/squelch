@@ -14,6 +14,6 @@ def process(
     x: np.ndarray, sr: int, p: Params, bpm: float, mix: float = 1.0
 ) -> tuple[np.ndarray, Controls]:
     """INPUT -> reactor -> DRIVE -> COLLIMATOR -> FALLOUT -> mix -> peak safety."""
-    wet, controls = reactor.process(x, sr, p, bpm)
-    y = output_stage.process(wet, x, sr, p, PROFILES[p.reaction], controls, mix=mix)
+    wet, controls, md = reactor.process(x, sr, p, bpm)
+    y = output_stage.process(wet, x, sr, p, PROFILES[p.reaction], controls, mix=mix, md=md)
     return y, controls

@@ -252,7 +252,13 @@ def _input_follower(dry: np.ndarray, sr: int) -> np.ndarray:
 
 
 def contaminate(
-    wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, profile: ReactionProfile, sr: int
+    wet: np.ndarray,
+    dry: np.ndarray,
+    c: Controls,
+    p: Params,
+    profile: ReactionProfile,
+    sr: int,
+    md=None,
 ) -> np.ndarray:
     """Add this reaction's noise bed at a predictable delivered level.
 
@@ -262,20 +268,26 @@ def contaminate(
     to whatever the gain chain happened to leave. Squaring the control puts
     full travel 12dB above half.
     """
-    if p.contamination <= 0.0:
+    amount = md.samples("contamination") if md else np.full(len(wet), p.contamination)
+    if amount.max() <= 0.0:
         return wet
 
     bed = profile.noise(wet, c, p, sr)
     follower = _input_follower(dry, sr)
     bed = bed * (1.0 - SIDECHAIN_DEPTH + SIDECHAIN_DEPTH * follower)[:, None]
 
+    # Normalising the bed against its own whole-buffer RMS is what makes
+    # CONTAMINATION map to a predictable level in dB, but it also means a
+    # MELTDOWN late in a render scales the bed earlier in that render. It is a
+    # property of rendering offline in one pass; a streaming port has no such
+    # reach backwards. Measured at roughly -25 dB, so it is left alone.
     bed_rms = np.sqrt(np.mean(bed**2))
     if bed_rms < 1e-12:
         return wet
 
     bed *= (np.sqrt(np.mean(wet**2)) + 1e-12) / bed_rms
-    level = profile.noise_full_level * p.contamination**2 * (1.0 - 0.5 * c.damping)
-    return wet + bed * level
+    level = profile.noise_full_level * amount**2 * (1.0 - 0.5 * c.damping)
+    return wet + bed * level[:, None]
 
 
 def _phaser(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:

@@ -50,6 +50,12 @@ CONTINUOUS = [
     "fallout",
 ]
 
+#: Momentary performance gestures. Every one of these is excluded from presets
+#: and from Randomise by default — they are played, not stored.
+PERFORMATIVE = [
+    "meltdown",
+]
+
 
 @dataclass
 class Params:
@@ -74,6 +80,11 @@ class Params:
     exposure: float = 0.5
     collimator: float = 0.0
     fallout: float = 0.3
+
+    #: MELTDOWN is momentary: held from meltdown_at for meltdown_hold seconds.
+    #: Negative start or zero hold means it never fires.
+    meltdown_at: float = -1.0
+    meltdown_hold: float = 0.0
 
     seed: int = 0
 

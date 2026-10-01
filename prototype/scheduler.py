@@ -130,27 +130,37 @@ def _base_times(x: np.ndarray, sr: int, p: Params, bpm: float) -> list[tuple[int
     raise ValueError(f"unknown MODE: {p.mode}")
 
 
-def schedule(x: np.ndarray, sr: int, p: Params, bpm: float, sub_event_bias: float = 1.0) -> list[Event]:
+def schedule(
+    x: np.ndarray,
+    sr: int,
+    p: Params,
+    bpm: float,
+    sub_event_bias: float = 1.0,
+    md=None,
+) -> list[Event]:
     """Produce every reaction event for this render.
 
     PROBABILITY gates whether a step fires at all; REACTIVITY decides how many
     sub-events it fans out into; VOLATILITY sets how far each one deviates from
-    the last.
+    the last. MELTDOWN can move all three as the render plays.
     """
     n = len(x)
     step = _step_seconds(p, bpm)
     events: list[Event] = []
 
-    # CONTAINMENT suppresses the reactor, and prompt.md lists event density
-    # among the things it damps, not just the depth of what fires.
-    probability = p.probability * (1.0 - DENSITY_SUPPRESSION * p.containment)
-    density = 1.0 - DENSITY_SUPPRESSION * p.containment
-
     for k, t in _base_times(x, sr, p, bpm):
+        moment = int(t * sr)
+        containment = md.at("containment", moment) if md else p.containment
+        # CONTAINMENT suppresses the reactor, and prompt.md lists event density
+        # among the things it damps, not just the depth of what fires.
+        density = 1.0 - DENSITY_SUPPRESSION * containment
+        probability = (md.at("probability", moment) if md else p.probability) * density
+        reactivity = md.at("reactivity", moment) if md else p.reactivity
+
         if rng.urand(p.seed, 1, k) >= probability:
             continue
 
-        count = 1 + int(round(p.reactivity * sub_event_bias * density * (MAX_SUB_EVENTS - 1)))
+        count = 1 + int(round(reactivity * sub_event_bias * density * (MAX_SUB_EVENTS - 1)))
         for s in range(count):
             offset = (s / count) * step * (0.9 if p.mode != "INPUT" else 0.5)
             # VOLATILITY unsettles the timing itself, not only the sound. This

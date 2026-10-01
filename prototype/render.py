@@ -23,13 +23,21 @@ def main() -> None:
     parser.add_argument("--mode", choices=MODES, default="GRID")
     parser.add_argument("--grid", choices=GRID_NAMES, default="1/16")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--meltdown-at", type=float, default=-1.0, help="seconds, -1 for off")
+    parser.add_argument("--meltdown-hold", type=float, default=0.0, help="seconds held")
     for name in CONTINUOUS:
         parser.add_argument(f"--{name.replace('_', '-')}", type=float, default=None)
     args = parser.parse_args()
 
     overrides = {n: getattr(args, n) for n in CONTINUOUS if getattr(args, n) is not None}
     p = Params(
-        reaction=args.reaction, mode=args.mode, grid=args.grid, seed=args.seed, **overrides
+        reaction=args.reaction,
+        mode=args.mode,
+        grid=args.grid,
+        seed=args.seed,
+        meltdown_at=args.meltdown_at,
+        meltdown_hold=args.meltdown_hold,
+        **overrides,
     )
 
     dry, sr = audio_io.load(args.source)
