@@ -73,6 +73,10 @@ class ReactionProfile:
     #: Delivered level of this reaction's noise bed at full CONTAMINATION,
     #: relative to the output's own RMS. Half travel lands 12dB below it.
     noise_full_level: float
+    #: The bed generators make noise at their own fixed level rather than
+    #: scaling with the input, so this is what each one measures at. The bed is
+    #: divided by it and multiplied by the programme level instead.
+    noise_unit_rms: float
     #: Builds this reaction's noise bed. Level is applied by contaminate().
     noise: Callable[[np.ndarray, Controls, Params, int], np.ndarray]
     post: Callable[[np.ndarray, np.ndarray, Controls, Params, int], np.ndarray]
@@ -247,12 +251,17 @@ def _input_follower(dry: np.ndarray, sr: int) -> np.ndarray:
 
     Fast attack via a rolling peak, slow release via a one-pole, so the beds
     arrive with the source and fall away in the gaps.
+
+    Both halves look backwards only. A centred rolling peak reads a couple of
+    milliseconds into the future, and dividing by the envelope's whole-buffer
+    mean reads all of it.
     """
     magnitude = np.abs(dry).max(axis=1)
-    peak = maximum_filter1d(magnitude, size=max(int(SIDECHAIN_ATTACK_S * sr), 1))
+    size = max(int(SIDECHAIN_ATTACK_S * sr), 1)
+    peak = maximum_filter1d(magnitude, size=size, origin=(size - 1) // 2)
     coeff = float(np.exp(-1.0 / max(SIDECHAIN_RELEASE_S * sr, 1.0)))
     envelope = lfilter([1.0 - coeff], [1.0, -coeff], peak)
-    return envelope / (envelope.mean() + 1e-12)
+    return envelope / np.maximum(filters.running_mean(envelope, sr, BED_MATCH_S), 1e-12)
 
 
 def contaminate(
@@ -285,12 +294,16 @@ def contaminate(
     # the gain chain happened to leave. Both levels are tracked by the same
     # slow one-pole the output stage uses, so nothing here measures a part of
     # the render that has not played yet.
-    bed_level = filters.running_rms(bed, sr, BED_MATCH_S)
+    # The bed is referenced to the programme's level and to a constant, never
+    # to its own running level. Dividing by its own level sounds reasonable and
+    # is not: a sparse bed like RADIATION's ticks decays towards silence
+    # between them, so the gain runs away in the gaps and the next tick arrives
+    # enormous. Measured across the five beds, no single time constant worked
+    # for all of them — RADIATION wanted two minutes and CHEMICAL wanted a
+    # second and a half — which is the sign that the mechanism is wrong rather
+    # than the tuning.
     wet_level = filters.running_rms(wet, sr, BED_MATCH_S)
-    if float(np.max(bed_level)) < 1e-12:
-        return wet
-
-    bed = bed * (wet_level / np.maximum(bed_level, 1e-12))[:, None]
+    bed = bed * (wet_level / profile.noise_unit_rms)[:, None]
     level = profile.noise_full_level * amount**2 * (1.0 - 0.5 * c.damping)
     return wet + bed * level[:, None]
 
@@ -367,6 +380,7 @@ PROFILES = {
         drive_weight=0.90,
         persistence=0.90,
         noise_full_level=0.0229,
+        noise_unit_rms=0.005499,
         noise=_geiger_ticks,
         post=_passthrough,
     ),
@@ -389,6 +403,7 @@ PROFILES = {
         drive_weight=0.70,
         persistence=0.60,
         noise_full_level=0.0902,
+        noise_unit_rms=0.069393,
         noise=_fission_shimmer,
         post=_phaser,
     ),
@@ -411,6 +426,7 @@ PROFILES = {
         drive_weight=1.30,
         persistence=1.00,
         noise_full_level=0.1373,
+        noise_unit_rms=0.099999,
         noise=_sludge_rumble,
         post=_sludge,
     ),
@@ -437,6 +453,7 @@ PROFILES = {
         # Dense continuous fizz in the most sensitive part of the ear's range
         # reads louder than its level suggests, so it sits below the others.
         noise_full_level=0.0530,
+        noise_unit_rms=0.033510,
         noise=_chemical_fizz,
         post=_bubble,
     ),
@@ -459,6 +476,7 @@ PROFILES = {
         drive_weight=0.80,
         persistence=0.70,
         noise_full_level=0.1147,
+        noise_unit_rms=0.045540,
         noise=_alien_whirr,
         post=_shift,
     ),

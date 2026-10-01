@@ -17,6 +17,10 @@ from . import saturation
 #: the output peak; 8 puts it 26.8 dB under, which is inaudible.
 BLOCK = 8
 
+#: Smoothing applied to a matching gain, only enough to take the step out of a
+#: hold ending. The level trackers supply the slowness.
+GAIN_SMOOTH_S = 0.05
+
 
 def n_blocks(n_samples: int) -> int:
     return int(np.ceil(n_samples / BLOCK))
@@ -42,14 +46,96 @@ def running_rms(x: np.ndarray, sr: int, time_s: float) -> np.ndarray:
     """Level as a plugin would measure it: a one-pole on power, looking back.
 
     Used anywhere the offline prototype would reach for the RMS of the whole
-    render. It starts settled on the opening instead of ramping up from
-    silence, so the first second of a render is measured as well as the rest.
+    render.
+
+    Starting a one-pole at zero would ramp the level up over the first second
+    and a half of every render. Priming it from the opening 50ms fixes that but
+    reads ahead, and priming it from the first block instead makes the result
+    depend on the host's buffer size. So it averages everything heard so far
+    until the window is full, then carries on exponentially: no reading ahead,
+    and the same answer at any block size.
     """
     coeff = float(np.exp(-1.0 / max(time_s * sr, 1.0)))
-    power = np.mean(np.atleast_2d(x.T).T ** 2, axis=1)
-    start = float(np.mean(power[: max(int(0.05 * sr), 1)]))
-    smoothed = lfilter([1.0 - coeff], [1.0, -coeff], power, zi=np.array([coeff * start]))
-    return np.sqrt(np.maximum(smoothed[0], 1e-20))
+    power = np.mean(x**2, axis=1)
+
+    # The cumulative mean and the one-pole weight each new sample by 1/(i+1)
+    # and (1-coeff). The crossover is where those are equal.
+    warmup = min(int(round(1.0 / max(1.0 - coeff, 1e-12))), len(power))
+
+    settled = np.cumsum(power[:warmup]) / np.arange(1, warmup + 1)
+    if warmup >= len(power):
+        return np.sqrt(np.maximum(settled, 1e-20))
+
+    rest = lfilter(
+        [1.0 - coeff], [1.0, -coeff], power[warmup:], zi=np.array([coeff * settled[-1]])
+    )[0]
+    return np.sqrt(np.maximum(np.concatenate([settled, rest]), 1e-20))
+
+
+def running_mean(x: np.ndarray, sr: int, time_s: float) -> np.ndarray:
+    """A plain average of a one-dimensional signal, warmed up the same way.
+
+    Used where the offline code would have divided by the mean of a whole
+    buffer. Same crossover as running_rms: equal weights until the exponential
+    window is full, exponential after.
+    """
+    coeff = float(np.exp(-1.0 / max(time_s * sr, 1.0)))
+    warmup = min(int(round(1.0 / max(1.0 - coeff, 1e-12))), len(x))
+
+    settled = np.cumsum(x[:warmup]) / np.arange(1, warmup + 1)
+    if warmup >= len(x):
+        return settled
+
+    rest = lfilter(
+        [1.0 - coeff], [1.0, -coeff], x[warmup:], zi=np.array([coeff * settled[-1]])
+    )[0]
+    return np.concatenate([settled, rest])
+
+
+def matching_gain(
+    target: np.ndarray,
+    source: np.ndarray,
+    sr: int,
+    time_s: float,
+    range_db: float,
+    gate_db: float = -60.0,
+) -> np.ndarray:
+    """The gain that puts one running level onto another, safely.
+
+    Dividing two level trackers is the easy part. The rest is what stops it
+    doing something stupid: at the very start both are still filling, so the
+    ratio of two near-silent numbers is meaningless, and in a gap it asks for
+    enormous gain to lift noise to the level of music. Below the gate it holds
+    the last sensible figure instead, and unity until there has been one.
+
+    The gate asks whether there is anything to match to, so it reads the
+    target. Reading the source instead refuses to work on exactly the material
+    that needs it most: a noise bed before normalisation is legitimately far
+    below any sensible threshold, and gating on that leaves it unnormalised.
+
+    The gate is absolute rather than relative to the material's own average,
+    because an average over the whole render is exactly the look-ahead this
+    exists to avoid.
+    """
+    gate = 10.0 ** (gate_db / 20.0)
+    ceiling = 10.0 ** (range_db / 20.0)
+
+    gain = np.clip(target / np.maximum(source, 1e-12), 1.0 / ceiling, ceiling)
+
+    sounding = target > gate
+    index = np.where(sounding, np.arange(len(gain)), -1)
+    held = np.maximum.accumulate(index)
+    gain = np.where(held >= 0, gain[np.maximum(held, 0)], 1.0)
+
+    # Only enough smoothing to take the step out of a hold ending. The level
+    # trackers are already slow, so smoothing over the same window again would
+    # double it up.
+    #
+    # Started at unity, not at the first computed gain. At sample zero both
+    # trackers have seen one sample each, so their ratio is noise, and seeding
+    # the filter with it drags that figure across the opening seconds.
+    coeff = float(np.exp(-1.0 / max(GAIN_SMOOTH_S * sr, 1.0)))
+    return lfilter([1.0 - coeff], [1.0, -coeff], gain, zi=np.array([coeff]))[0]
 
 
 

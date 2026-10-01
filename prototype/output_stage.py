@@ -39,12 +39,19 @@ LIMITER_RELEASE_S = 0.050
 #: How slowly the streaming level match tracks. Long on purpose: anything near
 #: the speed of the programme turns a level match into a compressor.
 LEVEL_MATCH_S = 1.5
+#: DRIVE's makeup tracks faster than the output match. It is correcting for a
+#: curve rather than for a mix, so it can follow the material more closely
+#: without reading as a compressor.
+DRIVE_MATCH_S = 0.4
 #: Material below this is held rather than matched. An absolute threshold on
 #: purpose: anything relative to the render's own average would be measuring
 #: the future, which is the thing this function exists to avoid.
 LEVEL_MATCH_GATE_DB = -60.0
-#: How far the match is allowed to push, either way.
-LEVEL_MATCH_RANGE_DB = 18.0
+#: How far the match is allowed to push, either way. Wide enough that ENRICHMENT
+#: can run to either end of its own 18 dB and still be levelled: a tighter
+#: ceiling clamps exactly when the control is doing the most. Runaway gain in
+#: the gaps is the gate's job, not the clamp's.
+LEVEL_MATCH_RANGE_DB = 36.0
 
 #: Pultec-style voicing, applied to every reaction. Tuned for future garage /
 #: breaks / warm techno: weight low down, mud pulled out above it, the harsh
@@ -61,29 +68,31 @@ VOICE_AIR_DB = 1.0
 
 
 def drive(
-    x: np.ndarray, p: Params, weight: float = 1.0, amount_ctrl=None, until: int = 0
+    x: np.ndarray, sr: int, p: Params, weight: float = 1.0, amount_ctrl=None
 ) -> np.ndarray:
     """Saturation with the level change taken back out.
 
     DRIVE is a contamination control, not a gain control, so the RMS it adds is
     removed afterwards. The weight is the reaction's own appetite for it.
 
-    Makeup is referenced to the knob position and measured over the material
-    before any MELTDOWN, so the gesture cannot reach backwards and change the
-    level before it fired. It also means the gesture is allowed to get louder,
-    which it should.
+    Makeup is referenced to the knob position rather than to the realised
+    output, so a MELTDOWN is allowed to get louder, which it should. Both
+    levels are tracked as the plugin would track them, so the gesture cannot
+    reach backwards and change the level before it fired.
     """
     amount = np.full(len(x), p.drive) if amount_ctrl is None else amount_ctrl
     if amount.max() <= 0.0:
         return x
 
-    window = slice(0, until) if until > len(x) // 20 else slice(None)
     gain = 1.0 + 11.0 * (np.power(amount, 0.6) * weight)
     reference = 1.0 + 11.0 * (np.power(p.drive, 0.6) * weight)
-    before = np.sqrt(np.mean(x[window] ** 2)) + 1e-12
-    after = np.sqrt(np.mean(saturation.soft_clip(x[window], reference) ** 2)) + 1e-12
+
+    before = filters.running_rms(x, sr, DRIVE_MATCH_S)
+    after = filters.running_rms(saturation.soft_clip(x, reference), sr, DRIVE_MATCH_S)
+    makeup = filters.matching_gain(before, after, sr, DRIVE_MATCH_S, LEVEL_MATCH_RANGE_DB)
+
     y = saturation.oversampled(x * gain[:, None], saturation.soft_clip)
-    return y * (before / after)
+    return y * makeup[:, None]
 
 
 def collimate(x: np.ndarray, sr: int, p: Params) -> np.ndarray:
@@ -194,19 +203,9 @@ def running_match(y: np.ndarray, reference: np.ndarray, sr: int) -> np.ndarray:
     coeff = float(np.exp(-1.0 / max(LEVEL_MATCH_S * sr, 1.0)))
     wet = filters.running_rms(y, sr, LEVEL_MATCH_S)
     dry = filters.running_rms(reference, sr, LEVEL_MATCH_S)
-
-    ceiling = 10.0 ** (LEVEL_MATCH_RANGE_DB / 20.0)
-    gain = np.clip(dry / np.maximum(wet, 1e-12), 1.0 / ceiling, ceiling)
-
-    gate = 10.0 ** (LEVEL_MATCH_GATE_DB / 20.0)
-    sounding = wet > gate
-    if not sounding.all():
-        # Hold through the gaps: carry the last gain forward rather than
-        # snapping to unity.
-        index = np.where(sounding, np.arange(len(gain)), 0)
-        gain = gain[np.maximum.accumulate(index)]
-
-    gain = lfilter([1.0 - coeff], [1.0, -coeff], gain, zi=np.array([coeff * gain[0]]))[0]
+    gain = filters.matching_gain(
+        dry, wet, sr, LEVEL_MATCH_S, LEVEL_MATCH_RANGE_DB, LEVEL_MATCH_GATE_DB
+    )
     return y * gain[:, None]
 
 
@@ -304,7 +303,7 @@ def process(
     the two can be rendered against each other. The plugin cannot use it.
     """
     until = int(p.meltdown_at * sr) if (md is not None and md.active) else 0
-    y = drive(wet, p, profile.drive_weight, md.samples("drive") if md else None, until)
+    y = drive(wet, sr, p, profile.drive_weight, md.samples("drive") if md else None)
     y = collimate(y, sr, p)
 
     # Placement runs after the saturation, not before it. A hard-panned event

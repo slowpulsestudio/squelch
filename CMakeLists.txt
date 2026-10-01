@@ -73,3 +73,9 @@ target_link_libraries(Squelch PRIVATE
     juce::juce_recommended_lto_flags
     juce::juce_recommended_warning_flags
 )
+
+# The comparison harness. Runs the same DSP the plugin runs and prints its
+# results for prototype/compare.py to check against the Python, because
+# "it builds" is not evidence that a filter is correct.
+add_executable(SquelchHarness Harness/Harness.cpp)
+target_compile_features(SquelchHarness PRIVATE cxx_std_17)
