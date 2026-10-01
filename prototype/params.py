@@ -42,7 +42,7 @@ CONTINUOUS = [
     "decay",
     "range",
     "squelch",
-    "rods",
+    "containment",
     "drive",
     "contamination",
     "exposure",
@@ -67,7 +67,7 @@ class Params:
     decay: float = 0.3
     range: float = 0.4
     squelch: float = 0.5
-    rods: float = 0.0
+    containment: float = 0.0
     drive: float = 0.3
     #: Noise/grain emitted by the reaction. Its texture is set by the REACTION.
     contamination: float = 0.25

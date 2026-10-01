@@ -23,5 +23,5 @@ class Controls:
     resonance: np.ndarray
     #: Per-event start samples, for reactions that key off the attack itself.
     starts: np.ndarray
-    #: Global suppression from RODS, 0..1, where 1 means fully damped.
+    #: Global suppression from CONTAINMENT, 0..1, where 1 means fully damped.
     damping: float

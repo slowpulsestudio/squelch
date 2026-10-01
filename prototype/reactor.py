@@ -2,7 +2,7 @@
 
 Turns scheduled events into control-rate filter movement, then runs the input
 through a resonant ladder driven by it. This is where DECAY, RANGE, EXPOSURE,
-VOLATILITY, HALF-LIFE, SQUELCH and RODS act.
+VOLATILITY, HALF-LIFE, SQUELCH and CONTAINMENT act.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ def build_controls(
     nb = filters.n_blocks(n_samples)
     ctrl_sr = sr / filters.BLOCK
 
-    damping = p.rods
+    damping = p.containment
     squelch_depth = 0.40 + 0.60 * p.squelch
     exposure_curve = np.power(p.exposure, 0.8)
 
@@ -115,9 +115,9 @@ def build_controls(
         peak = hold * prev_peak + (1.0 - hold) * peak
         peak = float(np.clip(peak, base_oct - 0.5, base_oct + span_oct + 0.5))
 
-        # Q is reduced once, gently, by each of intensity, SQUELCH and RODS.
-        # Stacking three aggressive reductions collapsed it to Q~1.2, which is
-        # no resonance at all and left nothing to squelch.
+        # Q is reduced once, gently, by each of intensity, SQUELCH and
+        # CONTAINMENT. Stacking three aggressive reductions collapsed it to
+        # Q~1.2, which is no resonance at all and left nothing to squelch.
         q = q_lo * np.power(q_hi / q_lo, exposure_curve)
         q *= 0.85 + 0.15 * ev.intensity
         q *= 0.80 + 0.20 * p.squelch
@@ -165,7 +165,7 @@ def build_controls(
             cut_oct[c0:c1] = np.maximum(cut_oct[c0:c1], resting_oct + (peak - resting_oct) * env)
             resonance[c0:c1] = np.maximum(resonance[c0:c1], q * env)
 
-    # Anti-step smoothing runs always; RODS adds much heavier damping on top.
+    # Anti-step smoothing runs always; CONTAINMENT adds heavier damping on top.
     cut_oct = filters.smooth(cut_oct, ANTI_STEP_S, sr)
     resonance = filters.smooth(np.maximum(resonance, q_lo * 0.6), ANTI_STEP_S, sr)
     env_total = filters.smooth(env_total, ANTI_STEP_S, sr)
@@ -196,10 +196,10 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
     events = schedule(x, sr, p, bpm, sub_event_bias=profile.sub_event_bias)
     controls = build_controls(events, len(x), sr, p, profile)
 
-    inner_sat = profile.inner_sat * (0.3 + 0.7 * p.squelch) * (1.0 - 0.7 * p.rods)
+    inner_sat = profile.inner_sat * (0.3 + 0.7 * p.squelch) * (1.0 - 0.7 * p.containment)
     wet = filters.varying_ladder(x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat)
 
-    depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * p.squelch) * (1.0 - 0.6 * p.rods)
+    depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * p.squelch) * (1.0 - 0.6 * p.containment)
     amp = np.stack(
         [filters.to_sample_rate(1.0 - depth + depth * controls.env_stereo[:, ch], len(x))
          for ch in (0, 1)],
@@ -209,7 +209,7 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
 
     # RANGE is how far a reaction travels in pitch, so it drives the wind as
     # well as the filter excursion.
-    wind_depth = p.range * profile.wind_depth * (1.0 - 0.6 * p.rods)
+    wind_depth = p.range * profile.wind_depth * (1.0 - 0.6 * p.containment)
     if wind_depth > 0.0:
         wind = filters.smooth(controls.env, WIND_SMOOTH_S, sr) * wind_depth
         wet = filters.pitch_wind(wet, wind, sr, MAX_WIND_S)
