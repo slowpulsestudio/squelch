@@ -179,6 +179,11 @@ def voice(x: np.ndarray, sr: int) -> np.ndarray:
 
 
 
+def lookahead_samples(sr: int) -> int:
+    """The latency the plugin reports, whichever ceiling is switched on."""
+    return max(int(LIMITER_LOOKAHEAD_S * sr), 1)
+
+
 def peak_limit(x: np.ndarray, sr: int) -> np.ndarray:
     """Lookahead peak limiter.
 
@@ -188,7 +193,7 @@ def peak_limit(x: np.ndarray, sr: int) -> np.ndarray:
     recovers over LIMITER_RELEASE_S: without a release it snapped back at over
     4000 dB per second, which is itself a distortion.
     """
-    window = max(int(LIMITER_LOOKAHEAD_S * sr), 1)
+    window = lookahead_samples(sr)
     magnitude = np.max(np.abs(x), axis=1)
     padded = np.concatenate([magnitude, np.zeros(window)])
     rolling = maximum_filter1d(padded, size=2 * window + 1, mode="nearest")[:len(magnitude)]
@@ -206,10 +211,14 @@ def peak_limit(x: np.ndarray, sr: int) -> np.ndarray:
     return delayed * gain[:, None]
 
 
-def clip(x: np.ndarray) -> np.ndarray:
-    """Hard ceiling with no lookahead, oversampled so it does not alias.
+def clip(x: np.ndarray, sr: int) -> np.ndarray:
+    """Hard ceiling, oversampled so it does not alias.
 
-    Costs none of the limiter's 5ms delay, and sounds like what it is.
+    A clipper needs no lookahead, but it is padded to the limiter's delay
+    anyway. Reporting a different latency makes the host re-sync the moment
+    CLIP is switched, which is audible as a pop in the middle of a take. The
+    delay is matched instead, so the toggle is seamless and the two ceilings
+    stay sample-aligned against each other.
 
     Clipping at the higher rate removes the aliasing, but the filter that comes
     back down rings, and that ring lands on top of a signal already sitting
@@ -219,7 +228,12 @@ def clip(x: np.ndarray) -> np.ndarray:
     which is a far better trade than handing the host a clipped output.
     """
     loud = saturation.oversampled(x, lambda u: saturation.hard_clip(u, LIMITER_CEILING))
-    return saturation.hard_clip(loud, LIMITER_CEILING)
+    loud = saturation.hard_clip(loud, LIMITER_CEILING)
+
+    window = lookahead_samples(sr)
+    delayed = np.zeros_like(loud)
+    delayed[window:] = loud[: len(loud) - window]
+    return delayed
 
 
 def process(
@@ -259,4 +273,4 @@ def process(
     y = voice(y, sr)
     y = match_rms(y, dry, until if until > sr // 4 else None)
     y = (1.0 - mix) * dry + mix * y
-    return clip(y) if p.clip else peak_limit(y, sr)
+    return clip(y, sr) if p.clip else peak_limit(y, sr)

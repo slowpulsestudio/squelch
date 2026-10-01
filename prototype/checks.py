@@ -878,47 +878,56 @@ def check_limiter_releases_gently() -> tuple[bool, str]:
 
 
 def check_clip_trades_lookahead_for_hardness() -> tuple[bool, str]:
-    """CLIP is the no-latency ceiling, and it should measurably be one.
+    """CLIP is the harder ceiling, and it must stay in step with the limiter.
 
-    The limiter buys transparency with a lookahead window it has to delay the
-    audio by. CLIP removes that delay and pays for it in harmonics, so the
-    check is that the ceiling still holds, the delay is gone, and the
-    distortion really is higher than the limiter's.
+    Measured on two different signals, because one cannot answer both
+    questions. Alignment is read from material quiet enough that neither
+    ceiling acts, so what is left is purely the delay. Hardness is read from a
+    tone sitting well over the ceiling, where the limiter rides the gain down
+    and keeps a clean sine while the clipper squares the top off.
     """
-    import dataclasses
-
     from . import engine, output_stage
     from .params import Params
 
-    n = int(SR * 3.0)
+    n = int(SR * 1.0)
     t = np.arange(n) / SR
-    tone = 0.3 * np.sin(2 * np.pi * 220.0 * t)
-    tone[int(SR * 1.0) : int(SR * 1.0) + 64] += 3.0
-    x = np.stack([tone, tone], axis=1)
+    expected = output_stage.lookahead_samples(SR)
 
-    limited = output_stage.peak_limit(x, SR)
-    clipped = output_stage.clip(x)
+    quiet = np.repeat((0.2 * np.sin(2 * np.pi * 220.0 * t))[:, None], 2, axis=1)
+    quiet[: int(SR * 0.25)] = 0.0
 
-    def onset(y: np.ndarray) -> int:
-        loud = np.abs(y[:, 0]) > 0.9
-        return int(np.argmax(loud)) if loud.any() else -1
+    def delay_of(y: np.ndarray) -> int:
+        correlation = np.correlate(y[:, 0], quiet[:, 0], mode="full")
+        return int(np.argmax(np.abs(correlation))) - (n - 1)
 
-    delay = onset(limited) - onset(clipped)
+    limiter_delay = delay_of(output_stage.peak_limit(quiet, SR))
+    clip_delay = delay_of(output_stage.clip(quiet, SR))
+
+    loud = np.repeat((1.6 * np.sin(2 * np.pi * 220.0 * t))[:, None], 2, axis=1)
+
+    def thd(y: np.ndarray) -> float:
+        settled = y[int(SR * 0.5) :, 0]
+        spectrum = np.abs(np.fft.rfft(settled * _blackman_harris(len(settled))))
+        bin_ = int(round(220.0 * len(settled) / SR))
+        fundamental = spectrum[bin_ - 4 : bin_ + 5].sum()
+        return 100.0 * (spectrum.sum() - fundamental) / (fundamental + 1e-18)
+
+    hard_thd = thd(output_stage.clip(loud, SR))
+    soft_thd = thd(output_stage.peak_limit(loud, SR))
 
     base = dict(reaction="RADIATION", mode="GRID", grid="1/16", seed=4, drive=0.6)
-    source = np.random.default_rng(0).standard_normal((n, 2)) * 0.1
-    soft, _ = engine.process(source, SR, Params(**base), 140.0)
-    hard, _ = engine.process(source, SR, Params(**base, clip=True), 140.0)
+    source = np.random.default_rng(0).standard_normal((int(SR * 3.0), 2)) * 0.1
+    rendered, _ = engine.process(source, SR, Params(**base, clip=True), 140.0)
 
     ceiling = output_stage.LIMITER_CEILING
     ok = (
-        np.abs(clipped).max() <= ceiling + 1e-6
-        and np.abs(hard).max() <= ceiling + 1e-6
-        and delay > 0
+        limiter_delay == clip_delay == expected
+        and np.abs(rendered).max() <= ceiling + 1e-6
+        and hard_thd > soft_thd * 3.0
     )
     return ok, (
-        f"clip saves {1000.0 * delay / SR:.1f} ms of lookahead, "
-        f"ceiling holds at {np.abs(hard).max():.3f} vs limiter {np.abs(soft).max():.3f}"
+        f"both delayed {clip_delay} samples ({1000.0 * expected / SR:.1f} ms); "
+        f"clip {hard_thd:.1f}% vs limiter {soft_thd:.1f}% THD over the ceiling"
     )
 
 
