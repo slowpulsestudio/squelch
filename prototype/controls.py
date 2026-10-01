@@ -15,8 +15,13 @@ import numpy as np
 class Controls:
     #: Combined event envelope, 0..1, one value per control block.
     env: np.ndarray
-    #: The same envelope split per channel by each event's stereo position.
-    env_stereo: np.ndarray
+    #: Per-channel placement gain, held across each event. Kept separate from
+    #: the amplitude envelope: folded into it, an event could only ever be a
+    #: few dB louder on one side, never actually thrown across the field.
+    pan_gain: np.ndarray
+    #: How much of each event is sent into AFTERGLOW. Uniform unless IONIZE is
+    #: scattering depth, in which case every event sits at its own distance.
+    send: np.ndarray
     #: Filter cutoff in Hz, one value per control block.
     cutoff: np.ndarray
     #: Filter Q, one value per control block.

@@ -42,6 +42,8 @@ class Event:
     pan: float
     #: Envelope curvature, 0..1. Low is a soft swell, high is a sharp pluck.
     shape: float
+    #: How far back in the space this event sits, when IONIZE scatters depth.
+    depth: float
     #: Hits harder — louder, with deeper filter envelope and more resonance.
     accent: bool
     #: Glides into this event's frequency instead of jumping to it.
@@ -180,6 +182,7 @@ def schedule(
                     tone=rng.urand(p.seed, 3, k, s),
                     pan=rng.ubipolar(p.seed, 4, k, s),
                     shape=rng.urand(p.seed, 8, k, s),
+                    depth=rng.urand(p.seed, 9, k, s),
                     accent=rng.urand(p.seed, 5, k, s) < ACCENT_CHANCE,
                     slide=rng.urand(p.seed, 6, k, s) < SLIDE_CHANCE,
                 )

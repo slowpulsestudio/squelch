@@ -25,6 +25,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--meltdown-at", type=float, default=-1.0, help="seconds, -1 for off")
     parser.add_argument("--meltdown-hold", type=float, default=0.0, help="seconds held")
+    parser.add_argument("--ionize", action="store_true", help="latch the scatter on")
     for name in CONTINUOUS:
         parser.add_argument(f"--{name.replace('_', '-')}", type=float, default=None)
     args = parser.parse_args()
@@ -37,6 +38,7 @@ def main() -> None:
         seed=args.seed,
         meltdown_at=args.meltdown_at,
         meltdown_hold=args.meltdown_hold,
+        ionize=args.ionize,
         **overrides,
     )
 

@@ -38,7 +38,8 @@ def _bed_controls(n: int):
     blocks = filters.n_blocks(n)
     return Controls(
         env=np.linspace(0.2, 1.0, blocks),
-        env_stereo=np.repeat(np.linspace(0.2, 1.0, blocks)[:, None], 2, axis=1),
+        pan_gain=np.ones((blocks, 2)),
+        send=np.linspace(0.2, 1.0, blocks),
         cutoff=np.full(blocks, 500.0),
         resonance=np.full(blocks, 4.0),
         starts=np.arange(0, n, SR // 8),
@@ -435,7 +436,7 @@ def check_events_are_panned() -> tuple[bool, str]:
         p = Params(reaction="RADIATION", mode="GRID", grid="1/16", seed=5, volatility=volatility)
         events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
         c = build_controls(events, n, SR, p, profile)
-        difference = c.env_stereo[:, 0] - c.env_stereo[:, 1]
+        difference = c.pan_gain[:, 0] - c.pan_gain[:, 1]
         spreads.append(float(np.sqrt(np.mean(difference**2))))
 
     ok = spreads[0] < 1e-6 and spreads[1] > 0.1
@@ -612,6 +613,80 @@ def check_meltdown_cannot_reach_backwards() -> tuple[bool, str]:
     return ok, f"{before:.1f} dB before the gate, {during:+.1f} dB while held"
 
 
+def check_ionize_scatters_three_axes() -> tuple[bool, str]:
+    """IONIZE must place each event separately in stereo, spectrum and depth.
+
+    Stereo is measured as consecutive events landing on opposite sides, which
+    is what separates ping-pong from merely wide.
+    """
+    from .params import Params
+    from .reactions import PROFILES
+    from .reactor import build_controls
+    from .scheduler import schedule
+
+    profile = PROFILES["RADIATION"]
+    n = SR * 4
+    silence = np.zeros((n, 2))
+    base = dict(
+        reaction="RADIATION", mode="GRID", grid="1/16", seed=5,
+        volatility=0.0, spread=0.5, afterglow=0.5,
+    )
+
+    measured = {}
+    for label, on in (("off", False), ("on", True)):
+        p = Params(**base, ionize=on, ionize_amount=0.9)
+        events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
+        c = build_controls(events, n, SR, p, profile)
+
+        difference = c.pan_gain[:, 0] - c.pan_gain[:, 1]
+        spectrum = float(np.std(np.log2(c.cutoff)) * 12.0)
+        depth = float(np.std(c.send))
+        measured[label] = (float(np.sqrt(np.mean(difference**2))), spectrum, depth)
+
+        if on:
+            # Consecutive events should alternate sides.
+            sides = []
+            for ev in events[:40]:
+                block = min(ev.start // filters.BLOCK, len(c.env) - 1)
+                sides.append(np.sign(c.pan_gain[block, 0] - c.pan_gain[block, 1]))
+            flips = sum(1 for a, b in zip(sides, sides[1:]) if a != b and a != 0 and b != 0)
+            alternates = flips / max(len(sides) - 1, 1)
+
+    off, on = measured["off"], measured["on"]
+    ok = (
+        on[0] > 0.2 and off[0] < 1e-6      # stereo: centred when off
+        and on[1] > off[1] * 1.3           # spectrum: wider scatter
+        and on[2] > off[2] * 1.3           # depth: varied sends
+        and alternates > 0.6
+    )
+    return ok, (
+        f"stereo {off[0]:.3f}->{on[0]:.3f}, spectrum {off[1]:.1f}->{on[1]:.1f} st, "
+        f"depth {off[2]:.3f}->{on[2]:.3f}, {alternates * 100:.0f}% alternate sides"
+    )
+
+
+def check_afterglow_is_independent() -> tuple[bool, str]:
+    """AFTERGLOW must work on its own and add a tail that outlasts the input."""
+    from . import engine
+    from .params import Params
+
+    n = SR * 6
+    source = np.zeros((n, 2))
+    burst = int(0.4 * SR)
+    source[:burst] = np.random.default_rng(0).standard_normal((burst, 2)) * 0.3
+
+    base = dict(reaction="RADIATION", mode="GRID", grid="1/8", seed=2, toxicity=0.5)
+    dry_tail, _ = engine.process(source, SR, Params(**base, afterglow=0.0), 140.0)
+    wet_tail, _ = engine.process(source, SR, Params(**base, afterglow=0.8), 140.0)
+
+    after = slice(int(1.5 * SR), n)
+    quiet = 20.0 * np.log10(np.sqrt(np.mean(dry_tail[after] ** 2)) + 1e-15)
+    glowing = 20.0 * np.log10(np.sqrt(np.mean(wet_tail[after] ** 2)) + 1e-15)
+
+    ok = glowing > quiet + 6.0
+    return ok, f"tail after the source stops: {quiet:.1f} -> {glowing:.1f} dB with AFTERGLOW"
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
@@ -626,6 +701,8 @@ CHECKS = [
     ("volatility moves timing", check_volatility_moves_timing),
     ("meltdown stages in order", check_meltdown_stages_in_order),
     ("meltdown cannot reach backwards", check_meltdown_cannot_reach_backwards),
+    ("ionize scatters three axes", check_ionize_scatters_three_axes),
+    ("afterglow is independent", check_afterglow_is_independent),
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("range drives each character", check_range_drives_each_character),

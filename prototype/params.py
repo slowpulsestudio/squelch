@@ -48,12 +48,16 @@ CONTINUOUS = [
     "exposure",
     "collimator",
     "fallout",
+    "afterglow",
+    "ionize_amount",
 ]
 
-#: Momentary performance gestures. Every one of these is excluded from presets
-#: and from Randomise by default — they are played, not stored.
+#: Momentary or latched performance gestures. Excluded from Randomise by
+#: default. MELTDOWN is momentary so it is not stored either; IONIZE is latched,
+#: so it is a state a preset can recall.
 PERFORMATIVE = [
     "meltdown",
+    "ionize",
 ]
 
 
@@ -80,6 +84,15 @@ class Params:
     exposure: float = 0.5
     collimator: float = 0.0
     fallout: float = 0.3
+    #: How long the reaction keeps glowing after it has happened.
+    afterglow: float = 0.0
+
+    #: IONIZE is latched: the toggle decides whether events scatter in stereo,
+    #: spectrum and depth at all, and the amount decides how far. Depth is
+    #: scattered within whatever AFTERGLOW is set to, so at zero glow it still
+    #: scatters the other two.
+    ionize: bool = False
+    ionize_amount: float = 0.7
 
     #: MELTDOWN is momentary: held from meltdown_at for meltdown_hold seconds.
     #: Negative start or zero hold means it never fires.
