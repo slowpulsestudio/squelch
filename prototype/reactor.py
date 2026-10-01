@@ -32,6 +32,14 @@ MIN_EXCURSION = 0.45
 MAX_WIND_S = 0.020
 WIND_SMOOTH_S = 0.030
 
+#: Acid voice. An accented note opens the filter further and rings harder;
+#: unaccented notes sit back in level, which is what gives a 303 line its
+#: internal rhythm. Slid notes glide in over SLIDE_S instead of jumping.
+ACCENT_ENV_MOD = 1.45
+ACCENT_RESONANCE = 1.30
+UNACCENTED_LEVEL = 0.74
+SLIDE_S = 0.060
+
 
 def _event_envelope(length: int, attack: int, tau: float) -> np.ndarray:
     t = np.arange(length, dtype=float)
@@ -88,11 +96,16 @@ def build_controls(
     # How far this reaction throws cutoff and Q around from event to event,
     # on top of the ordinary VOLATILITY deviation.
     chaos = profile.chaos * p.volatility
+    acid = profile.voice == "acid"
+    slide_blocks = max(int(SLIDE_S * ctrl_sr), 1)
+    held_oct = base_oct
 
     for ev in events:
         this_decay = max(decay_s * ev.decay_scale, 0.005)
         peak = base_oct + excursion * (0.35 + 0.65 * ev.tone) * ev.intensity
         peak += span_oct * chaos * 0.6 * rng.ubipolar(p.seed, 20, ev.index)
+        if acid and ev.accent:
+            peak = base_oct + (peak - base_oct) * ACCENT_ENV_MOD
         peak = hold * prev_peak + (1.0 - hold) * peak
         peak = float(np.clip(peak, base_oct - 0.5, base_oct + span_oct + 0.5))
 
@@ -104,6 +117,8 @@ def build_controls(
         q *= 0.80 + 0.20 * p.squelch
         q *= 1.0 - 0.45 * damping
         q *= 1.0 + chaos * 0.9 * rng.ubipolar(p.seed, 21, ev.index)
+        if acid and ev.accent:
+            q *= ACCENT_RESONANCE
         q = float(np.clip(hold * prev_q + (1.0 - hold) * q, 0.7, q_hi * 1.4))
 
         prev_peak, prev_q = peak, q
@@ -116,13 +131,20 @@ def build_controls(
 
         tau = this_decay * ctrl_sr
         env = _event_envelope(c1 - c0, max(int(ATTACK_S * ctrl_sr), 1), tau)
+        accent_level = 1.0 if (not acid or ev.accent) else UNACCENTED_LEVEL
 
-        env_total[c0:c1] = np.maximum(env_total[c0:c1], env)
-        if profile.stepped:
-            # Later events overwrite earlier ones so each holds its frequency
-            # until the next arrives, which is what makes it read as a step.
-            cut_oct[c0:c1] = peak
+        env_total[c0:c1] = np.maximum(env_total[c0:c1], env * accent_level)
+        if acid:
+            # Monophonic, like the machine this imitates: each note retriggers
+            # the filter envelope and owns the line until the next one starts.
+            curve = base_oct + (peak - base_oct) * env
+            if ev.slide:
+                glide = min(slide_blocks, len(curve))
+                ramp = np.linspace(0.0, 1.0, glide)
+                curve[:glide] = held_oct * (1.0 - ramp) + curve[:glide] * ramp
+            cut_oct[c0:c1] = curve
             resonance[c0:c1] = q
+            held_oct = float(curve[-1])
         else:
             # Overlapping events take the most extreme value rather than
             # averaging. Averaging meant raising REACTIVITY diluted the sweep
@@ -156,14 +178,7 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
     controls = build_controls(events, len(x), sr, p, profile)
 
     inner_sat = profile.inner_sat * (0.3 + 0.7 * p.squelch) * (1.0 - 0.7 * p.rods)
-    if profile.filter_mode == "bandpass":
-        wet = filters.varying_bandpass(x, controls.cutoff, controls.resonance, sr)
-        if inner_sat > 0.0:
-            wet = np.tanh(wet * (1.0 + inner_sat * 6.0)) / (1.0 + inner_sat * 2.0)
-    else:
-        wet = filters.varying_ladder(
-            x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat
-        )
+    wet = filters.varying_ladder(x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat)
 
     depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * p.squelch) * (1.0 - 0.6 * p.rods)
     amp = filters.to_sample_rate(1.0 - depth + depth * controls.env, len(x))

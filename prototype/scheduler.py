@@ -21,6 +21,11 @@ MAX_SUB_EVENTS = 5
 #: fraction so it drifts against the bar instead of relocking to it.
 FREE_RATE_RATIO = 0.7213
 
+#: Share of events that accent and that slide. A 303 pattern is given its
+#: internal rhythm by roughly a third of its steps being accented.
+ACCENT_CHANCE = 0.30
+SLIDE_CHANCE = 0.30
+
 
 @dataclass
 class Event:
@@ -30,6 +35,10 @@ class Event:
     decay_scale: float
     tone: float
     pan: float
+    #: Hits harder — louder, with deeper filter envelope and more resonance.
+    accent: bool
+    #: Glides into this event's frequency instead of jumping to it.
+    slide: bool
 
 
 def _step_seconds(p: Params, bpm: float) -> float:
@@ -145,6 +154,8 @@ def schedule(x: np.ndarray, sr: int, p: Params, bpm: float, sub_event_bias: floa
                     decay_scale=1.0 + p.volatility * rng.ubipolar(p.seed, 2, k, s),
                     tone=rng.urand(p.seed, 3, k, s),
                     pan=rng.ubipolar(p.seed, 4, k, s),
+                    accent=rng.urand(p.seed, 5, k, s) < ACCENT_CHANCE,
+                    slide=rng.urand(p.seed, 6, k, s) < SLIDE_CHANCE,
                 )
             )
 

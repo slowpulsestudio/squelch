@@ -236,11 +236,11 @@ def check_voicing_curve() -> tuple[bool, str]:
     return ok, f"55Hz {low:+.1f}, 260Hz {dip:+.1f}, 6kHz {harsh:+.1f}, 15kHz {air:+.1f} dB"
 
 
-def check_beaker_steps_a_bandpass() -> tuple[bool, str]:
-    """BEAKER must be a fully wet midrange bandpass that steps and holds.
+def check_acid_voice() -> tuple[bool, str]:
+    """BEAKER must behave like a 303: per-note envelope sweep, accents, slides.
 
-    A bandpass rejects below its centre as well as above, which is what
-    separates it from the lowpass the other reactions use.
+    A resonant lowpass swept by a per-note envelope is what squelches. Holding
+    a frequency, or using a bandpass, removes both the squelch and the bassline.
     """
     from .params import Params
     from .reactions import PROFILES
@@ -248,36 +248,62 @@ def check_beaker_steps_a_bandpass() -> tuple[bool, str]:
     from .scheduler import schedule
 
     profile = PROFILES["BEAKER"]
-    assert profile.filter_mode == "bandpass" and profile.stepped
-
     n = SR * 4
-    rng_ = np.random.default_rng(0)
-    noise = rng_.standard_normal((n, 2)) * 0.1
-    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, volatility=0.8)
-    events = schedule(noise, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
+    silence = np.zeros((n, 2))
+    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, decay=0.3, range=0.7)
+    events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
     c = build_controls(events, n, SR, p, profile)
 
-    # Steps hold: the cutoff should be flat for most of its length, not gliding.
-    slope = np.abs(np.diff(np.log2(c.cutoff)))
-    flat = float(np.mean(slope < 1e-4)) * 100.0
-    centres = c.cutoff
-    in_mid = float(np.mean((centres > 250.0) & (centres < 2800.0))) * 100.0
+    octaves = np.log2(c.cutoff)
+    moving = float(np.mean(np.abs(np.diff(octaves)) > 1e-4)) * 100.0
 
-    out = filters.varying_bandpass(noise, c.cutoff, c.resonance, SR)
+    accented = [e for e in events if e.accent]
+    plain = [e for e in events if not e.accent]
+    blocks = lambda e: int(e.start / filters.BLOCK)
+    accent_peak = np.mean([octaves[blocks(e) : blocks(e) + 20].max() for e in accented[:40]])
+    plain_peak = np.mean([octaves[blocks(e) : blocks(e) + 20].max() for e in plain[:40]])
+
+    slid = sum(1 for e in events if e.slide) / max(len(events), 1) * 100.0
+
+    ok = (
+        profile.voice == "acid"
+        and moving > 80.0
+        and accent_peak > plain_peak
+        and 20.0 < slid < 40.0
+    )
+    return ok, (
+        f"{moving:.0f}% of the envelope is moving, accents open "
+        f"{(accent_peak - plain_peak) * 12:.1f} semitones higher, {slid:.0f}% slide"
+    )
+
+
+def check_acid_keeps_the_low_end() -> tuple[bool, str]:
+    """The acid filter is a lowpass, so the bassline must survive.
+
+    The bandpass this replaced rejected 80Hz by 20dB, which removes the bass
+    the line is supposed to be.
+    """
+    from .params import Params
+    from .reactions import PROFILES
+    from .reactor import build_controls
+    from .scheduler import schedule
+
+    profile = PROFILES["BEAKER"]
+    n = SR * 4
+    noise = np.random.default_rng(0).standard_normal((n, 2)) * 0.1
+    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, decay=0.3, range=0.7)
+    events = schedule(noise, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
+    c = build_controls(events, n, SR, p, profile)
+    out = filters.varying_ladder(noise, c.cutoff, c.resonance, SR, inner_sat=0.0)
+
     kwargs = dict(fs=SR, window="blackmanharris", nperseg=8192)
     freqs, p_in = welch(noise.mean(axis=1), **kwargs)
     _, p_out = welch(out.mean(axis=1), **kwargs)
     response = 10.0 * np.log10((p_out + 1e-30) / (p_in + 1e-30))
+    at = lambda f: float(response[int(np.argmin(np.abs(freqs - f)))])
 
-    def at(f: float) -> float:
-        return float(response[int(np.argmin(np.abs(freqs - f)))])
-
-    rejects_lows = at(80.0) < at(900.0) - 10.0
-    ok = flat > 70.0 and in_mid > 90.0 and rejects_lows
-    return ok, (
-        f"{flat:.0f}% held flat, {in_mid:.0f}% in midrange, "
-        f"80Hz {at(80.0):.0f}dB vs 900Hz {at(900.0):.0f}dB"
-    )
+    ok = at(80.0) > -6.0
+    return ok, f"80Hz {at(80.0):+.1f} dB, 300Hz {at(300.0):+.1f} dB, 5kHz {at(5000.0):+.1f} dB"
 
 
 CHECKS = [
@@ -288,7 +314,8 @@ CHECKS = [
     ("pitch wind", check_pitch_wind),
     ("contamination scales", check_contamination_scales),
     ("only radiation ticks", check_only_radiation_ticks),
-    ("beaker steps a bandpass", check_beaker_steps_a_bandpass),
+    ("acid voice", check_acid_voice),
+    ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("house voicing curve", check_voicing_curve),
     ("scheduling determinism", check_scheduling_is_deterministic),
 ]
