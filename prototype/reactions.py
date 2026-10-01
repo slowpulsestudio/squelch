@@ -19,8 +19,8 @@ from . import filters, rng
 from .controls import Controls
 from .params import Params
 
-# RANGE drives each reaction's own signature movement, not only the filter
-# sweep, and every one of them reaches zero when RANGE does.
+# SPREAD drives each reaction's own signature movement, not only the filter
+# sweep, and every one of them reaches zero when SPREAD does.
 #: How far FISSION's two halves pull apart from each other.
 FISSION_BASE_HZ = 220.0
 FISSION_SWEEP_OCT = 3.2
@@ -56,11 +56,11 @@ class ReactionProfile:
     #: "acid" is monophonic like a TB-303: each note retriggers the filter
     #: envelope, accented notes open it further, and slid notes glide in.
     voice: str
-    #: This reaction's share of the shared pitch wind, scaled by RANGE.
+    #: This reaction's share of the shared pitch wind, scaled by SPREAD.
     wind_depth: float
     #: How FALLOUT disperses this reaction: across the stereo field, or as a
     #: staccato midrange wobble. Reactions can have some of both.
-    spread_weight: float
+    stereo_weight: float
     wobble_weight: float
     #: This reaction's appetite for DRIVE, and how strongly HALF-LIFE carries
     #: its filter state from one reaction to the next.
@@ -146,7 +146,7 @@ def _fission_shimmer(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.nda
 
     bed = np.zeros_like(wet)
     for i, octaves in enumerate((-0.65, 0.0, 0.8)):
-        divergence = octaves * (0.5 + 1.5 * p.range)
+        divergence = octaves * (0.5 + 1.5 * p.spread)
         band = filters.varying_bandpass(
             noise, 1400.0 * np.power(2.0, spread * divergence), 9.0, sr
         )
@@ -279,14 +279,14 @@ def contaminate(
 
 
 def _phaser(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """Splitting: two allpass chains pulled apart in frequency by RANGE.
+    """Splitting: two allpass chains pulled apart in frequency by SPREAD.
 
-    RANGE is how far the split components separate. At zero both channels sweep
+    SPREAD is how far the split components separate. At zero both channels sweep
     together and the structure is still whole; opened up they diverge by
     FISSION_SEPARATION_OCT and read as two unstable halves.
     """
     sweep = FISSION_BASE_HZ * np.power(2.0, FISSION_SWEEP_OCT * c.env)
-    separation = np.power(2.0, 0.5 * FISSION_SEPARATION_OCT * p.range)
+    separation = np.power(2.0, 0.5 * FISSION_SEPARATION_OCT * p.spread)
     feedback = 0.72 * p.exposure * (1.0 - c.damping)
 
     left = filters.varying_allpass_chain(
@@ -302,17 +302,17 @@ def _sludge(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -
     """Submerged: swept notches instead of peaks, under an octave-down body.
 
     Inverted resonance reads as hollow and underwater where a resonant peak
-    would read as acidic. RANGE is how far the bubbles rise.
+    would read as acidic. SPREAD is how far the bubbles rise.
     """
     sub = filters.static_lowpass(filters.octave_down(wet), 180.0, sr, q=0.7)
-    body = wet + sub * (0.45 * p.squelch * (1.0 - c.damping))
+    body = wet + sub * (0.45 * p.toxicity * (1.0 - c.damping))
 
     slow = filters.smooth(c.env, 0.08, sr)
-    notch = SLUDGE_BASE_HZ * np.power(2.0, SLUDGE_RISE_OCT * p.range * slow)
+    notch = SLUDGE_BASE_HZ * np.power(2.0, SLUDGE_RISE_OCT * p.spread * slow)
     y = filters.varying_notch(body, notch, 1.6, sr)
     y = filters.varying_notch(y, notch * 1.9, 1.6, sr)
-    y = filters.static_lowpass(y, 900.0 + 1200.0 * p.squelch, sr, q=0.7)
-    return np.tanh(y * (1.0 + 1.2 * p.squelch)) / (1.0 + 0.7 * p.squelch)
+    y = filters.static_lowpass(y, 900.0 + 1200.0 * p.toxicity, sr, q=0.7)
+    return np.tanh(y * (1.0 + 1.2 * p.toxicity)) / (1.0 + 0.7 * p.toxicity)
 
 
 def _bubble(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
@@ -321,9 +321,9 @@ def _bubble(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -
 
 
 def _shift(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """Non-terrestrial: single-sideband zaps whose reach is set by RANGE."""
-    shifted = filters.frequency_shift(wet, c.env * ALIEN_SHIFT_HZ * p.range, sr)
-    amount = 0.55 * p.squelch * (1.0 - c.damping)
+    """Non-terrestrial: single-sideband zaps whose reach is set by SPREAD."""
+    shifted = filters.frequency_shift(wet, c.env * ALIEN_SHIFT_HZ * p.spread, sr)
+    amount = 0.55 * p.toxicity * (1.0 - c.damping)
     return (1.0 - amount) * wet + amount * shifted
 
 
@@ -342,7 +342,7 @@ PROFILES = {
         chaos=0.55,
         voice="sweep",
         wind_depth=1.0,
-        spread_weight=0.3,
+        stereo_weight=0.3,
         wobble_weight=1.0,
         drive_weight=0.90,
         persistence=0.90,
@@ -364,7 +364,7 @@ PROFILES = {
         chaos=0.25,
         voice="sweep",
         wind_depth=0.45,
-        spread_weight=1.0,
+        stereo_weight=1.0,
         wobble_weight=0.25,
         drive_weight=0.70,
         persistence=0.60,
@@ -386,7 +386,7 @@ PROFILES = {
         chaos=0.70,
         voice="sweep",
         wind_depth=0.85,
-        spread_weight=0.2,
+        stereo_weight=0.2,
         wobble_weight=0.9,
         drive_weight=1.30,
         persistence=1.00,
@@ -408,7 +408,7 @@ PROFILES = {
         chaos=0.45,
         voice="acid",
         wind_depth=0.6,
-        spread_weight=0.35,
+        stereo_weight=0.35,
         wobble_weight=0.55,
         drive_weight=1.00,
         # A 303 retriggers cleanly; heavy carry-over blunts the per-note
@@ -434,7 +434,7 @@ PROFILES = {
         chaos=0.6,
         voice="sweep",
         wind_depth=1.0,
-        spread_weight=0.5,
+        stereo_weight=0.5,
         wobble_weight=1.0,
         drive_weight=0.80,
         persistence=0.70,

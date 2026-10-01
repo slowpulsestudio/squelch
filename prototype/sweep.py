@@ -20,13 +20,13 @@ from .params import CONTINUOUS, GRID_NAMES, MODES, REACTIONS, Params
 #: heard at both ends of its travel and not only in the middle.
 QUIET_ANCHOR = dict(
     flux=0.0, probability=0.35, reactivity=0.1, volatility=0.1, half_life=0.0,
-    decay=0.15, range=0.15, squelch=0.2, containment=0.55, drive=0.1, contamination=0.2,
+    decay=0.15, spread=0.15, toxicity=0.2, containment=0.55, drive=0.1, contamination=0.2,
     exposure=0.25, collimator=0.0, fallout=0.15,
 )
 
 VIOLENT_ANCHOR = dict(
     flux=0.7, probability=1.0, reactivity=1.0, volatility=0.9, half_life=0.6,
-    decay=0.8, range=1.0, squelch=1.0, containment=0.0, drive=0.85, contamination=0.8,
+    decay=0.8, spread=1.0, toxicity=1.0, containment=0.0, drive=0.85, contamination=0.8,
     exposure=1.0, collimator=0.35, fallout=0.9,
 )
 

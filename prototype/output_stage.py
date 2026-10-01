@@ -127,7 +127,7 @@ def fallout(x: np.ndarray, sr: int, p: Params, profile, c: Controls) -> np.ndarr
     FISSION scatters across the stereo field because splitting is what it does;
     the others scatter in pitch instead, so they stay centred and physical.
     """
-    y = _stereo_spread(x, sr, p.fallout * profile.spread_weight)
+    y = _stereo_spread(x, sr, p.fallout * profile.stereo_weight)
     return _mid_wobble(y, sr, p.fallout * profile.wobble_weight, c)
 
 

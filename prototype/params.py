@@ -1,4 +1,4 @@
-"""The 16 canonical SQUELCH parameters.
+"""The canonical SQUELCH parameters.
 
 Names and semantics come from prompt.md, which is the authoritative spec.
 Continuous parameters are normalised 0..1 here deliberately: prompt.md does not
@@ -40,8 +40,8 @@ CONTINUOUS = [
     "volatility",
     "half_life",
     "decay",
-    "range",
-    "squelch",
+    "spread",
+    "toxicity",
     "containment",
     "drive",
     "contamination",
@@ -65,8 +65,8 @@ class Params:
     volatility: float = 0.3
     half_life: float = 0.0
     decay: float = 0.3
-    range: float = 0.4
-    squelch: float = 0.5
+    spread: float = 0.4
+    toxicity: float = 0.5
     containment: float = 0.0
     drive: float = 0.3
     #: Noise/grain emitted by the reaction. Its texture is set by the REACTION.

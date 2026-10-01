@@ -1,8 +1,8 @@
 """The reactor core.
 
 Turns scheduled events into control-rate filter movement, then runs the input
-through a resonant ladder driven by it. This is where DECAY, RANGE, EXPOSURE,
-VOLATILITY, HALF-LIFE, SQUELCH and CONTAINMENT act.
+through a resonant ladder driven by it. This is where DECAY, SPREAD, EXPOSURE,
+VOLATILITY, HALF-LIFE, TOXICITY and CONTAINMENT act.
 """
 
 from __future__ import annotations
@@ -72,17 +72,17 @@ def build_controls(
     ctrl_sr = sr / filters.BLOCK
 
     damping = p.containment
-    squelch_depth = 0.40 + 0.60 * p.squelch
+    squelch_depth = 0.40 + 0.60 * p.toxicity
     exposure_curve = np.power(p.exposure, 0.8)
 
     base_oct = np.log2(profile.cutoff_lo_hz)
     span_oct = np.log2(profile.cutoff_hi_hz / profile.cutoff_lo_hz)
     q_lo, q_hi = profile.resonance_lo, profile.resonance_hi
 
-    # As RANGE closes the sweep down, the filter's resting point rises to meet
+    # As SPREAD closes the sweep down, the filter's resting point rises to meet
     # it, so a static filter sits in the middle of its range rather than parked
     # at the bottom stripping everything above it.
-    resting_oct = base_oct + span_oct * STATIC_CENTRE * (1.0 - p.range)
+    resting_oct = base_oct + span_oct * STATIC_CENTRE * (1.0 - p.spread)
 
     env_total = np.zeros(nb)
     env_stereo = np.zeros((nb, 2))
@@ -92,7 +92,7 @@ def build_controls(
     decay_s = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
     hold = p.half_life * 0.85 * profile.persistence
 
-    excursion = span_oct * p.range
+    excursion = span_oct * p.spread
     excursion *= 0.55 + 0.45 * squelch_depth
     excursion *= 1.0 - 0.5 * damping
 
@@ -112,18 +112,18 @@ def build_controls(
     for ev in events:
         this_decay = max(decay_s * ev.decay_scale, 0.005)
         peak = resting_oct + excursion * (0.35 + 0.65 * ev.tone) * ev.intensity
-        peak += span_oct * chaos * 0.6 * p.range * rng.ubipolar(p.seed, 20, ev.index)
+        peak += span_oct * chaos * 0.6 * p.spread * rng.ubipolar(p.seed, 20, ev.index)
         if acid and ev.accent:
             peak = resting_oct + (peak - resting_oct) * ACCENT_ENV_MOD
         peak = hold * prev_peak + (1.0 - hold) * peak
         peak = float(np.clip(peak, base_oct - 0.5, base_oct + span_oct + 0.5))
 
-        # Q is reduced once, gently, by each of intensity, SQUELCH and
+        # Q is reduced once, gently, by each of intensity, TOXICITY and
         # CONTAINMENT. Stacking three aggressive reductions collapsed it to
         # Q~1.2, which is no resonance at all and left nothing to squelch.
         q = q_lo * np.power(q_hi / q_lo, exposure_curve)
         q *= 0.85 + 0.15 * ev.intensity
-        q *= 0.80 + 0.20 * p.squelch
+        q *= 0.80 + 0.20 * p.toxicity
         q *= 1.0 - 0.45 * damping
         q *= 1.0 + chaos * 0.9 * rng.ubipolar(p.seed, 21, ev.index)
         if acid and ev.accent:
@@ -203,10 +203,10 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
     events = schedule(x, sr, p, bpm, sub_event_bias=profile.sub_event_bias)
     controls = build_controls(events, len(x), sr, p, profile)
 
-    inner_sat = profile.inner_sat * (0.3 + 0.7 * p.squelch) * (1.0 - 0.7 * p.containment)
+    inner_sat = profile.inner_sat * (0.3 + 0.7 * p.toxicity) * (1.0 - 0.7 * p.containment)
     wet = filters.varying_ladder(x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat)
 
-    depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * p.squelch) * (1.0 - 0.6 * p.containment)
+    depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * p.toxicity) * (1.0 - 0.6 * p.containment)
     amp = np.stack(
         [filters.to_sample_rate(1.0 - depth + depth * controls.env_stereo[:, ch], len(x))
          for ch in (0, 1)],
@@ -214,9 +214,9 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
     )
     wet *= amp
 
-    # RANGE is how far a reaction travels in pitch, so it drives the wind as
+    # SPREAD is how far a reaction travels in pitch, so it drives the wind as
     # well as the filter excursion.
-    wind_depth = p.range * profile.wind_depth * (1.0 - 0.6 * p.containment)
+    wind_depth = p.spread * profile.wind_depth * (1.0 - 0.6 * p.containment)
     if wind_depth > 0.0:
         wind = filters.smooth(controls.env, WIND_SMOOTH_S, sr) * wind_depth
         wet = filters.pitch_wind(wet, wind, sr, MAX_WIND_S)

@@ -251,7 +251,7 @@ def check_acid_voice() -> tuple[bool, str]:
     profile = PROFILES["BEAKER"]
     n = SR * 4
     silence = np.zeros((n, 2))
-    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, decay=0.3, range=0.7)
+    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, decay=0.3, spread=0.7)
     events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
     c = build_controls(events, n, SR, p, profile)
 
@@ -292,7 +292,7 @@ def check_acid_keeps_the_low_end() -> tuple[bool, str]:
     profile = PROFILES["BEAKER"]
     n = SR * 4
     noise = np.random.default_rng(0).standard_normal((n, 2)) * 0.1
-    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, decay=0.3, range=0.7)
+    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, decay=0.3, spread=0.7)
     events = schedule(noise, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
     c = build_controls(events, n, SR, p, profile)
     out = filters.varying_ladder(noise, c.cutoff, c.resonance, SR, inner_sat=0.0)
@@ -308,7 +308,7 @@ def check_acid_keeps_the_low_end() -> tuple[bool, str]:
 
 
 def check_range_drives_each_character() -> tuple[bool, str]:
-    """RANGE must reach zero and scale up on each reaction's own movement.
+    """SPREAD must reach zero and scale up on each reaction's own movement.
 
     Not just the filter sweep: ALIEN's zaps, TOXIC SLUDGE's bubble rise and
     FISSION's separation of its two halves all answer to it.
@@ -322,7 +322,7 @@ def check_range_drives_each_character() -> tuple[bool, str]:
     results = {}
 
     def difference(reaction: str, amount: float) -> float:
-        p = Params(reaction=reaction, range=amount, squelch=0.8, seed=0)
+        p = Params(reaction=reaction, spread=amount, toxicity=0.8, seed=0)
         out = PROFILES[reaction].post(source, source, c, p, SR)
         delta = out - source
         return 20.0 * np.log10(
@@ -342,7 +342,7 @@ def check_range_drives_each_character() -> tuple[bool, str]:
     # FISSION's halves must sit together at zero and apart when opened.
     separation = {}
     for amount in (0.0, 1.0):
-        p = Params(reaction="FISSION", range=amount, squelch=0.8, exposure=0.7, seed=0)
+        p = Params(reaction="FISSION", spread=amount, toxicity=0.8, exposure=0.7, seed=0)
         out = PROFILES["FISSION"].post(source, source, c, p, SR)
         left, right = out[:, 0], out[:, 1]
         separation[amount] = float(
