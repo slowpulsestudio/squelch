@@ -109,11 +109,67 @@ def check_scheduling_is_deterministic() -> tuple[bool, str]:
     return same and varies, f"{len(a)} events, repeatable={same}, seed changes pattern={varies}"
 
 
+def check_pitch_wind() -> tuple[bool, str]:
+    """A lengthening delay must bend pitch down, and a shortening one back up."""
+    seconds = 1.0
+    tone = _tone(440.0, seconds)
+    blocks = filters.n_blocks(len(tone))
+    ramp = np.linspace(0.0, 1.0, blocks)
+    out = filters.pitch_wind(tone, ramp, SR, 0.020)
+
+    # Expected ratio is 1 minus the delay's rate of change.
+    expected = 440.0 * (1.0 - 0.020 / seconds)
+    middle = out[int(0.3 * SR) : int(0.8 * SR)]
+    measured = _peak_frequency(middle)
+
+    falling = filters.pitch_wind(tone, ramp[::-1], SR, 0.020)
+    up = _peak_frequency(falling[int(0.3 * SR) : int(0.8 * SR)])
+
+    ok = abs(measured - expected) < 4.0 and up > 440.0
+    return ok, f"wind down {measured:.1f} Hz (want {expected:.1f}), wind up {up:.1f} Hz (want >440)"
+
+
+def check_ticks_are_audible() -> tuple[bool, str]:
+    """The Geiger ticks must actually arrive in the output.
+
+    They previously measured -46 to -110 dB against the mix, which is inaudible,
+    because their gain was scaled by two parameters at once.
+    """
+    from .params import Params
+    from .reactions import PROFILES
+    from .controls import Controls
+
+    n = SR * 4
+    wet = _tone(200.0, 4.0) * 0.3
+    starts = np.arange(0, n, SR // 8)
+    levels = []
+    for squelch, rods in ((0.2, 0.55), (1.0, 0.0)):
+        p = Params(reaction="RADIATION", squelch=squelch, rods=rods, seed=0)
+        c = Controls(
+            env=np.zeros(filters.n_blocks(n)),
+            cutoff=np.full(filters.n_blocks(n), 500.0),
+            resonance=np.full(filters.n_blocks(n), 4.0),
+            starts=starts,
+            damping=rods,
+        )
+        out = PROFILES["RADIATION"].post(wet, wet, c, p, SR)
+        diff = out - wet
+        rel = 20.0 * np.log10(
+            (np.sqrt(np.mean(diff**2)) + 1e-15) / (np.sqrt(np.mean(out**2)) + 1e-12)
+        )
+        levels.append(rel)
+
+    ok = all(-26.0 < level < -3.0 for level in levels)
+    return ok, f"ticks at {levels[0]:.1f} dB (calm) and {levels[1]:.1f} dB (hot), want -26..-3"
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
     ("frequency shift", check_frequency_shift),
     ("octave down", check_octave_down),
+    ("pitch wind", check_pitch_wind),
+    ("ticks are audible", check_ticks_are_audible),
     ("scheduling determinism", check_scheduling_is_deterministic),
 ]
 
