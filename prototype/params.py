@@ -32,12 +32,12 @@ GRID_DIVISIONS = {
 
 GRID_NAMES = list(GRID_DIVISIONS)
 
-#: FEED spans this many dB either side of unity.
-FEED_RANGE_DB = 18.0
+#: ENRICHMENT spans this many dB either side of unity.
+ENRICHMENT_RANGE_DB = 18.0
 
 #: Continuous parameters, in the order prompt.md lists them.
 CONTINUOUS = [
-    "feed",
+    "enrichment",
     "flux",
     "probability",
     "reactivity",
@@ -78,7 +78,7 @@ class Params:
     #: just gain staging, and a preset that did not recall it would not recall
     #: the sound. That is why this is a plugin parameter and not the host-side
     #: Input strip, which stays a utility trim and stays out of presets.
-    feed: float = 0.5
+    enrichment: float = 0.5
 
     flux: float = 0.0
     probability: float = 1.0
@@ -117,9 +117,11 @@ class Params:
 
     seed: int = 0
 
-    def feed_gain(self) -> float:
-        """FEED as a linear gain, 0.5 being unity."""
-        return float(10.0 ** (((self.feed - 0.5) * 2.0 * FEED_RANGE_DB) / 20.0))
+    def enrichment_gain(self) -> float:
+        """ENRICHMENT as a linear gain, 0.5 being unity."""
+        return float(
+            10.0 ** (((self.enrichment - 0.5) * 2.0 * ENRICHMENT_RANGE_DB) / 20.0)
+        )
 
     def label(self) -> str:
         parts = [self.reaction.replace(" ", "-"), self.mode, self.grid.replace("/", "-")]
