@@ -12,7 +12,7 @@ import numpy as np
 from . import filters, rng
 from .controls import Controls
 from .params import Params
-from .reactions import PROFILES, ReactionProfile
+from .reactions import PROFILES, ReactionProfile, contaminate
 from .scheduler import Event, schedule
 
 #: Envelope attack. Long enough that the ramp spans many control blocks, so the
@@ -164,4 +164,5 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
         wet = filters.pitch_wind(wet, wind, sr, MAX_WIND_S)
 
     wet = profile.post(wet, x, controls, p, sr)
+    wet = contaminate(wet, controls, p, profile, sr)
     return wet, controls

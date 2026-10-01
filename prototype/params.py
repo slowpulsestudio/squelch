@@ -44,6 +44,7 @@ CONTINUOUS = [
     "squelch",
     "rods",
     "drive",
+    "contamination",
     "exposure",
     "collimator",
     "fallout",
@@ -68,6 +69,8 @@ class Params:
     squelch: float = 0.5
     rods: float = 0.0
     drive: float = 0.3
+    #: Noise/grain emitted by the reaction. Its texture is set by the REACTION.
+    contamination: float = 0.25
     exposure: float = 0.5
     collimator: float = 0.0
     fallout: float = 0.3

@@ -34,6 +34,12 @@ class ReactionProfile:
     chaos: float
     #: This reaction's share of the shared pitch wind, scaled by RANGE.
     wind_depth: float
+    #: Band, grain length and event hit-rate of this reaction's CONTAMINATION
+    #: noise. RADIATION's sparse short grains are the Geiger ticks.
+    noise_lo_hz: float
+    noise_hi_hz: float
+    grain_s: float
+    noise_density: float
     post: Callable[[np.ndarray, np.ndarray, Controls, Params, int], np.ndarray]
 
 
@@ -62,29 +68,40 @@ def _held_random(c: Controls, p: Params, stream: int, n_blocks: int) -> np.ndarr
 
 
 def _ticks(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """Geiger ticks: short synthetic noise bursts on a fraction of events.
+    """RADIATION's character is its sparse grain, which CONTAMINATION supplies."""
+    return wet
 
-    Normalised against the output's own level before scaling, so the delivered
-    loudness is predictable instead of whatever the gain chain happened to
-    leave. Previously these measured -46 to -110 dB and were never audible.
+
+def contaminate(
+    wet: np.ndarray, c: Controls, p: Params, profile: ReactionProfile, sr: int
+) -> np.ndarray:
+    """Emit this reaction's noise grain, shared by every reaction.
+
+    Normalised against the output's own level before scaling, so CONTAMINATION
+    maps to a predictable delivered loudness rather than to whatever the gain
+    chain happens to leave. Roughly -34 dB at a quarter travel (texture grain)
+    up to -13 dB at full.
     """
-    n = wet.shape[0]
+    if p.contamination <= 0.0 or len(c.starts) == 0:
+        return wet
+
     emitting = np.array(
-        [s for i, s in enumerate(c.starts) if rng.urand(p.seed, 30, i) < 0.45], dtype=int
+        [s for i, s in enumerate(c.starts) if rng.urand(p.seed, 30, i) < profile.noise_density],
+        dtype=int,
     )
     if len(emitting) == 0:
         return wet
 
-    burst = _event_burst_envelope(n, emitting, int(0.009 * sr))[:, None]
+    n = wet.shape[0]
+    burst = _event_burst_envelope(n, emitting, max(int(profile.grain_s * sr), 2))[:, None]
     noise = np.random.default_rng(p.seed + 1).standard_normal((n, 2))
-    noise = filters.static_highpass(noise, 1800.0, sr, q=0.8)
-    # Capped well below the top octave: prompt.md rules out HF harshness.
-    noise = filters.static_lowpass(noise, 6500.0, sr, q=0.8)
+    noise = filters.static_highpass(noise, profile.noise_lo_hz, sr, q=0.8)
+    noise = filters.static_lowpass(noise, profile.noise_hi_hz, sr, q=0.8)
 
-    ticks = noise * burst
-    ticks *= (np.sqrt(np.mean(wet**2)) + 1e-12) / (np.sqrt(np.mean(ticks**2)) + 1e-12)
-    level = 0.45 * (0.35 + 0.65 * p.squelch) * (1.0 - 0.7 * c.damping)
-    return wet + ticks * level
+    grains = noise * burst
+    grains *= (np.sqrt(np.mean(wet**2)) + 1e-12) / (np.sqrt(np.mean(grains**2)) + 1e-12)
+    level = 0.22 * np.power(p.contamination, 1.8) * (1.0 - 0.5 * c.damping)
+    return wet + grains * level
 
 
 def _phaser(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
@@ -151,6 +168,10 @@ PROFILES = {
         amp_floor=0.30,
         chaos=0.55,
         wind_depth=1.0,
+        noise_lo_hz=1800.0,
+        noise_hi_hz=6000.0,
+        grain_s=0.009,
+        noise_density=0.40,
         post=_ticks,
     ),
     "FISSION": ReactionProfile(
@@ -166,6 +187,10 @@ PROFILES = {
         amp_floor=0.45,
         chaos=0.25,
         wind_depth=0.45,
+        noise_lo_hz=900.0,
+        noise_hi_hz=4000.0,
+        grain_s=0.025,
+        noise_density=0.6,
         post=_phaser,
     ),
     "TOXIC SLUDGE": ReactionProfile(
@@ -181,6 +206,10 @@ PROFILES = {
         amp_floor=0.55,
         chaos=0.70,
         wind_depth=0.85,
+        noise_lo_hz=80.0,
+        noise_hi_hz=700.0,
+        grain_s=0.090,
+        noise_density=0.5,
         post=_sludge,
     ),
     "BEAKER": ReactionProfile(
@@ -196,6 +225,10 @@ PROFILES = {
         amp_floor=0.28,
         chaos=1.0,
         wind_depth=0.6,
+        noise_lo_hz=600.0,
+        noise_hi_hz=3500.0,
+        grain_s=0.005,
+        noise_density=0.9,
         post=_bubble,
     ),
     "ALIEN": ReactionProfile(
@@ -211,6 +244,10 @@ PROFILES = {
         amp_floor=0.32,
         chaos=0.6,
         wind_depth=1.0,
+        noise_lo_hz=1200.0,
+        noise_hi_hz=6500.0,
+        grain_s=0.015,
+        noise_density=0.5,
         post=_shift,
     ),
 }

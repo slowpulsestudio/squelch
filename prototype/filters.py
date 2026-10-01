@@ -70,6 +70,54 @@ def _rbj_notch(fc: float, q: float, sr: int) -> tuple[np.ndarray, np.ndarray]:
     return b / a[0], a / a[0]
 
 
+def _shelf_terms(fc: float, gain_db: float, sr: int) -> tuple[float, float, float, float]:
+    amp = np.power(10.0, gain_db / 40.0)
+    w0 = 2.0 * np.pi * float(np.clip(fc, 20.0, sr * 0.45)) / sr
+    alpha = np.sin(w0) / 2.0 * np.sqrt(2.0)
+    return amp, np.cos(w0), alpha, 2.0 * np.sqrt(amp) * alpha
+
+
+def low_shelf(x: np.ndarray, fc: float, gain_db: float, sr: int) -> np.ndarray:
+    amp, cos_w0, _, beta = _shelf_terms(fc, gain_db, sr)
+    b = np.array([
+        amp * ((amp + 1.0) - (amp - 1.0) * cos_w0 + beta),
+        2.0 * amp * ((amp - 1.0) - (amp + 1.0) * cos_w0),
+        amp * ((amp + 1.0) - (amp - 1.0) * cos_w0 - beta),
+    ])
+    a = np.array([
+        (amp + 1.0) + (amp - 1.0) * cos_w0 + beta,
+        -2.0 * ((amp - 1.0) + (amp + 1.0) * cos_w0),
+        (amp + 1.0) + (amp - 1.0) * cos_w0 - beta,
+    ])
+    return lfilter(b / a[0], a / a[0], x, axis=0)
+
+
+def high_shelf(x: np.ndarray, fc: float, gain_db: float, sr: int) -> np.ndarray:
+    amp, cos_w0, _, beta = _shelf_terms(fc, gain_db, sr)
+    b = np.array([
+        amp * ((amp + 1.0) + (amp - 1.0) * cos_w0 + beta),
+        -2.0 * amp * ((amp - 1.0) + (amp + 1.0) * cos_w0),
+        amp * ((amp + 1.0) + (amp - 1.0) * cos_w0 - beta),
+    ])
+    a = np.array([
+        (amp + 1.0) - (amp - 1.0) * cos_w0 + beta,
+        2.0 * ((amp - 1.0) - (amp + 1.0) * cos_w0),
+        (amp + 1.0) - (amp - 1.0) * cos_w0 - beta,
+    ])
+    return lfilter(b / a[0], a / a[0], x, axis=0)
+
+
+def peaking(x: np.ndarray, fc: float, gain_db: float, q: float, sr: int) -> np.ndarray:
+    amp = np.power(10.0, gain_db / 40.0)
+    w0 = 2.0 * np.pi * float(np.clip(fc, 20.0, sr * 0.45)) / sr
+    cos_w0 = np.cos(w0)
+    alpha = np.sin(w0) / (2.0 * max(q, 0.1))
+    b = np.array([1.0 + alpha * amp, -2.0 * cos_w0, 1.0 - alpha * amp])
+    a = np.array([1.0 + alpha / amp, -2.0 * cos_w0, 1.0 - alpha / amp])
+    return lfilter(b / a[0], a / a[0], x, axis=0)
+
+
+
 def varying_notch(x: np.ndarray, fc_ctrl: np.ndarray, q: float, sr: int) -> np.ndarray:
     """A swept notch — resonance inverted, which reads as hollow and submerged."""
     n, ch = x.shape

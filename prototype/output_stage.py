@@ -18,6 +18,19 @@ STEREO_BASS_MONO_HZ = 150.0
 LIMITER_LOOKAHEAD_S = 0.005
 LIMITER_CEILING = 0.97
 
+#: Pultec-style voicing, applied to every reaction. Tuned for future garage /
+#: breaks / warm techno: weight low down, mud pulled out above it, the harsh
+#: 4-8kHz region scooped, and the air above it left intact.
+VOICE_LOW_HZ = 70.0
+VOICE_LOW_DB = 2.5
+VOICE_DIP_HZ = 260.0
+VOICE_DIP_DB = -1.8
+VOICE_DEHARSH_HZ = 6000.0
+VOICE_DEHARSH_DB = -3.5
+VOICE_DEHARSH_Q = 0.75
+VOICE_AIR_HZ = 15000.0
+VOICE_AIR_DB = 1.0
+
 
 def drive(x: np.ndarray, p: Params) -> np.ndarray:
     """Saturation with the level change taken back out.
@@ -75,6 +88,22 @@ def match_rms(y: np.ndarray, reference: np.ndarray) -> np.ndarray:
     return y * (target / current)
 
 
+def voice(x: np.ndarray, sr: int) -> np.ndarray:
+    """Fixed Pultec-style house voicing: weight at the bottom, bite off the top.
+
+    The low shelf and the dip just above it are the Pultec boost-and-attenuate
+    trick, which lifts the very bottom while thinning the mud above it. The
+    de-harsh stage is a broad bell rather than a shelf on purpose: a shelf from
+    5kHz also pulled 15kHz down 2.4dB, which removes harshness by dulling the
+    whole top rather than by scooping the region that is actually harsh.
+    """
+    y = filters.low_shelf(x, VOICE_LOW_HZ, VOICE_LOW_DB, sr)
+    y = filters.peaking(y, VOICE_DIP_HZ, VOICE_DIP_DB, 0.9, sr)
+    y = filters.peaking(y, VOICE_DEHARSH_HZ, VOICE_DEHARSH_DB, VOICE_DEHARSH_Q, sr)
+    return filters.high_shelf(y, VOICE_AIR_HZ, VOICE_AIR_DB, sr)
+
+
+
 def peak_limit(x: np.ndarray, sr: int) -> np.ndarray:
     """Lookahead peak limiter.
 
@@ -104,6 +133,7 @@ def process(wet: np.ndarray, dry: np.ndarray, sr: int, p: Params, mix: float = 1
     y = drive(wet, p)
     y = collimate(y, sr, p)
     y = fallout(y, sr, p)
+    y = voice(y, sr)
     y = match_rms(y, dry)
     y = (1.0 - mix) * dry + mix * y
     return peak_limit(y, sr)

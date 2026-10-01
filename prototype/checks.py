@@ -129,38 +129,62 @@ def check_pitch_wind() -> tuple[bool, str]:
     return ok, f"wind down {measured:.1f} Hz (want {expected:.1f}), wind up {up:.1f} Hz (want >440)"
 
 
-def check_ticks_are_audible() -> tuple[bool, str]:
-    """The Geiger ticks must actually arrive in the output.
+def check_contamination_scales() -> tuple[bool, str]:
+    """CONTAMINATION must map to a predictable delivered level, and reach zero.
 
-    They previously measured -46 to -110 dB against the mix, which is inaudible,
-    because their gain was scaled by two parameters at once.
+    The grain previously measured -46 to -110 dB against the mix and was never
+    audible, because its gain was scaled by two other parameters at once.
     """
-    from .params import Params
-    from .reactions import PROFILES
     from .controls import Controls
+    from .params import Params
+    from .reactions import PROFILES, contaminate
 
     n = SR * 4
     wet = _tone(200.0, 4.0) * 0.3
-    starts = np.arange(0, n, SR // 8)
-    levels = []
-    for squelch, rods in ((0.2, 0.55), (1.0, 0.0)):
-        p = Params(reaction="RADIATION", squelch=squelch, rods=rods, seed=0)
-        c = Controls(
-            env=np.zeros(filters.n_blocks(n)),
-            cutoff=np.full(filters.n_blocks(n), 500.0),
-            resonance=np.full(filters.n_blocks(n), 4.0),
-            starts=starts,
-            damping=rods,
-        )
-        out = PROFILES["RADIATION"].post(wet, wet, c, p, SR)
-        diff = out - wet
-        rel = 20.0 * np.log10(
-            (np.sqrt(np.mean(diff**2)) + 1e-15) / (np.sqrt(np.mean(out**2)) + 1e-12)
-        )
-        levels.append(rel)
+    profile = PROFILES["RADIATION"]
+    c = Controls(
+        env=np.zeros(filters.n_blocks(n)),
+        cutoff=np.full(filters.n_blocks(n), 500.0),
+        resonance=np.full(filters.n_blocks(n), 4.0),
+        starts=np.arange(0, n, SR // 8),
+        damping=0.0,
+    )
 
-    ok = all(-26.0 < level < -3.0 for level in levels)
-    return ok, f"ticks at {levels[0]:.1f} dB (calm) and {levels[1]:.1f} dB (hot), want -26..-3"
+    levels = []
+    for amount in (0.0, 0.25, 1.0):
+        out = contaminate(wet, c, Params(contamination=amount, seed=0), profile, SR)
+        diff = out - wet
+        levels.append(
+            20.0 * np.log10((np.sqrt(np.mean(diff**2)) + 1e-15) / (np.sqrt(np.mean(out**2)) + 1e-12))
+        )
+
+    silent = levels[0] < -200.0
+    grain = -40.0 < levels[1] < -28.0
+    loud = -18.0 < levels[2] < -8.0
+    return silent and grain and loud, (
+        f"off {levels[0]:.0f} dB, quarter {levels[1]:.1f} dB (grain), full {levels[2]:.1f} dB"
+    )
+
+
+def check_voicing_curve() -> tuple[bool, str]:
+    """The house voicing must add weight low, dip the mud and shelve the harsh top."""
+    rng = np.random.default_rng(0)
+    noise = rng.standard_normal((SR * 4, 2)) * 0.1
+    out = output_stage.voice(noise, SR)
+
+    kwargs = dict(fs=SR, window="blackmanharris", nperseg=8192)
+    freqs, p_in = welch(noise.mean(axis=1), **kwargs)
+    _, p_out = welch(out.mean(axis=1), **kwargs)
+    response = 10.0 * np.log10((p_out + 1e-30) / (p_in + 1e-30))
+
+    def at(f: float) -> float:
+        return float(response[int(np.argmin(np.abs(freqs - f)))])
+
+    # Probed at the centre of the de-harsh bell, and at 15kHz to confirm the
+    # top is left intact rather than the harshness being removed by dulling.
+    low, dip, harsh, air = at(55.0), at(260.0), at(6000.0), at(15000.0)
+    ok = low > 1.5 and dip < -1.0 and harsh < -3.0 and air > -1.0
+    return ok, f"55Hz {low:+.1f}, 260Hz {dip:+.1f}, 6kHz {harsh:+.1f}, 15kHz {air:+.1f} dB"
 
 
 CHECKS = [
@@ -169,7 +193,8 @@ CHECKS = [
     ("frequency shift", check_frequency_shift),
     ("octave down", check_octave_down),
     ("pitch wind", check_pitch_wind),
-    ("ticks are audible", check_ticks_are_audible),
+    ("contamination scales", check_contamination_scales),
+    ("house voicing curve", check_voicing_curve),
     ("scheduling determinism", check_scheduling_is_deterministic),
 ]
 
