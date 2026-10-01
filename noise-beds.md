@@ -8,7 +8,7 @@ Very short bright noise grains, fired on a sparse random subset of events so the
 
 Continuous, no onsets. A noise bed through two or three narrow resonant peaks that slowly drift apart from a shared starting frequency — the "splitting" made audible. The peaks sit in different stereo positions, and the whole bed breathes with the event envelope rather than restarting. Reads as a metallic hiss that opens and closes.
 
-☣ TOXIC SLUDGE — submerged pressure bed
+☣ SLUDGE — submerged pressure bed
 
 Continuous low rumble, 60–500 Hz, heavily filtered and lightly saturated so it's thick rather than hissy. No onsets whatsoever — it swells and sinks slowly under the signal, following a heavily smoothed envelope. Felt more than heard: it should add weight and a sense of something moving underneath.
 
@@ -25,7 +25,7 @@ Proposed levels against the output, at half and full CONTAMINATION:
 half	full
 RADIATION ticks	-40 dB	-28 dB
 FISSION shimmer	-30 dB	-18 dB
-TOXIC SLUDGE rumble	-26 dB	-14 dB
+SLUDGE rumble	-26 dB	-14 dB
 CHEMICAL fizz	-32 dB	-20 dB
 ALIEN whirr	-28 dB	-16 dB
 RADIATION is pinned much lower than the rest so it stays barely legible even at maximum, per your note. The beds can sit higher and still feel subtle because continuous texture is far less attention-grabbing than transients.

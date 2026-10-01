@@ -334,7 +334,7 @@ def check_acid_keeps_the_low_end() -> tuple[bool, str]:
 def check_range_drives_each_character() -> tuple[bool, str]:
     """SPREAD must reach zero and scale up on each reaction's own movement.
 
-    Not just the filter sweep: ALIEN's zaps, TOXIC SLUDGE's bubble rise and
+    Not just the filter sweep: ALIEN's zaps, SLUDGE's bubble rise and
     FISSION's separation of its two halves all answer to it.
     """
     from .params import Params
@@ -356,7 +356,7 @@ def check_range_drives_each_character() -> tuple[bool, str]:
     # ALIEN's shift must be absent at zero and present when opened.
     results["ALIEN"] = (difference("ALIEN", 0.0), difference("ALIEN", 1.0))
 
-    # TOXIC SLUDGE's notches must stop rising at zero.
+    # SLUDGE's notches must stop rising at zero.
     travel = {}
     for amount in (0.0, 1.0):
         slow = filters.smooth(c.env, 0.08, SR)
@@ -482,8 +482,8 @@ def check_beds_follow_the_input() -> tuple[bool, str]:
 
     wet = _tone(220.0, 4.0) * 0.3
     c = _bed_controls(n)
-    p = Params(reaction="TOXIC SLUDGE", contamination=1.0, seed=0)
-    bed = contaminate(wet, dry, c, p, PROFILES["TOXIC SLUDGE"], SR) - wet
+    p = Params(reaction="SLUDGE", contamination=1.0, seed=0)
+    bed = contaminate(wet, dry, c, p, PROFILES["SLUDGE"], SR) - wet
 
     # Masks come from the pulse schedule, not from instantaneous amplitude: a
     # noise burst crosses zero constantly, so a sample-value mask counts the

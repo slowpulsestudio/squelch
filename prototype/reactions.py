@@ -25,7 +25,7 @@ from .params import Params
 FISSION_BASE_HZ = 220.0
 FISSION_SWEEP_OCT = 3.2
 FISSION_SEPARATION_OCT = 2.4
-#: How far TOXIC SLUDGE's bubbles rise before they dissolve.
+#: How far SLUDGE's bubbles rise before they dissolve.
 SLUDGE_BASE_HZ = 260.0
 SLUDGE_RISE_OCT = 2.6
 #: How far ALIEN's zaps travel.
@@ -388,8 +388,8 @@ PROFILES = {
         noise=_fission_shimmer,
         post=_phaser,
     ),
-    "TOXIC SLUDGE": ReactionProfile(
-        name="TOXIC SLUDGE",
+    "SLUDGE": ReactionProfile(
+        name="SLUDGE",
         cutoff_lo_hz=150.0,
         cutoff_hi_hz=1300.0,
         decay_lo_s=0.25,
