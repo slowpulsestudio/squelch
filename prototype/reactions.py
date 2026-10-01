@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
+from scipy.signal import lfilter
 
 from . import filters, rng
 from .controls import Controls
@@ -34,25 +35,12 @@ class ReactionProfile:
     chaos: float
     #: This reaction's share of the shared pitch wind, scaled by RANGE.
     wind_depth: float
-    #: Band, grain length and event hit-rate of this reaction's CONTAMINATION
-    #: noise. RADIATION's sparse short grains are the Geiger ticks.
-    noise_lo_hz: float
-    noise_hi_hz: float
-    grain_s: float
-    noise_density: float
+    #: Delivered level of this reaction's noise bed at full CONTAMINATION,
+    #: relative to the output's own RMS. Half travel lands 12dB below it.
+    noise_full_level: float
+    #: Builds this reaction's noise bed. Level is applied by contaminate().
+    noise: Callable[[np.ndarray, Controls, Params, int], np.ndarray]
     post: Callable[[np.ndarray, np.ndarray, Controls, Params, int], np.ndarray]
-
-
-def _event_burst_envelope(n: int, starts: np.ndarray, length: int) -> np.ndarray:
-    """A very short decaying spike at each event start, at sample rate."""
-    env = np.zeros(n)
-    shape = np.exp(-np.linspace(0.0, 6.0, length))
-    for s in starts:
-        end = min(s + length, n)
-        if end <= s:
-            continue
-        env[s:end] = np.maximum(env[s:end], shape[: end - s])
-    return env
 
 
 def _held_random(c: Controls, p: Params, stream: int, n_blocks: int) -> np.ndarray:
@@ -67,41 +55,175 @@ def _held_random(c: Controls, p: Params, stream: int, n_blocks: int) -> np.ndarr
     return held
 
 
-def _ticks(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """RADIATION's character is its sparse grain, which CONTAMINATION supplies."""
+def _passthrough(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
+    """RADIATION's character is its filter movement, wind and sparse ticks."""
     return wet
+
+
+def _noise(n: int, seed: int) -> np.ndarray:
+    return np.random.default_rng(seed).standard_normal((n, 2))
+
+
+def _ctrl_time(c: Controls, sr: int) -> np.ndarray:
+    return np.arange(len(c.env)) / (sr / filters.BLOCK)
+
+
+def _event_burst_envelope(
+    n: int, starts: np.ndarray, length: int, attack: int = 0
+) -> np.ndarray:
+    """A short decaying spike at each event start, at sample rate."""
+    shape = np.exp(-np.linspace(0.0, 6.0, length))
+    if attack > 0:
+        ramp = np.minimum(np.arange(length) / attack, 1.0)
+        shape = shape * ramp
+    env = np.zeros(n)
+    for s in starts:
+        end = min(s + length, n)
+        if end <= s:
+            continue
+        env[s:end] = np.maximum(env[s:end], shape[: end - s])
+    return env
+
+
+def _geiger_ticks(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
+    """Sparse bright grains on an unpredictable subset of events.
+
+    The onset stays fast, because a fast onset is what makes a tick a tick. It
+    is kept legible only by level, not by blunting its shape.
+    """
+    n = wet.shape[0]
+    emitting = np.array(
+        [s for i, s in enumerate(c.starts) if rng.urand(p.seed, 30, i) < 0.30], dtype=int
+    )
+    if len(emitting) == 0:
+        return np.zeros_like(wet)
+
+    burst = _event_burst_envelope(
+        n, emitting, int(0.008 * sr), attack=max(int(0.0002 * sr), 1)
+    )[:, None]
+    noise = filters.static_highpass(_noise(n, p.seed + 1), 2000.0, sr, q=0.8)
+    noise = filters.static_lowpass(noise, 6000.0, sr, q=0.8)
+    return noise * burst
+
+
+def _fission_shimmer(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
+    """Continuous metallic bed whose resonant peaks drift apart over time."""
+    n = wet.shape[0]
+    t = _ctrl_time(c, sr)
+    spread = 0.5 - 0.5 * np.cos(2.0 * np.pi * 0.07 * t)
+    noise = _noise(n, p.seed + 2)
+
+    bed = np.zeros_like(wet)
+    for i, octaves in enumerate((-0.65, 0.0, 0.8)):
+        band = filters.varying_bandpass(noise, 1400.0 * np.power(2.0, spread * octaves * 1.6), 9.0, sr)
+        pan = 0.5 + 0.5 * np.cos(i * 2.1)
+        bed += band * np.array([pan, 1.0 - pan])
+
+    amp = filters.to_sample_rate(0.35 + 0.65 * filters.smooth(c.env, 0.05, sr), n)
+    return bed * amp[:, None]
+
+
+def _sludge_rumble(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
+    """Continuous low pressure bed with no onsets at all."""
+    n = wet.shape[0]
+    bed = filters.static_lowpass(_noise(n, p.seed + 3), 420.0, sr, q=0.7)
+    bed = filters.static_highpass(bed, 55.0, sr, q=0.7)
+    bed = np.tanh(bed * 1.6)
+
+    amp = filters.to_sample_rate(0.30 + 0.70 * filters.smooth(c.env, 0.25, sr), n)
+    return bed * amp[:, None]
+
+
+def _flatten_level(x: np.ndarray, sr: int, seconds: float = 0.015, amount: float = 0.8) -> np.ndarray:
+    """Take the level swing out of a signal while leaving its spectral motion.
+
+    A resonant bandpass swept across noise swings in level by as much as it
+    changes in timbre, which reads as individual events rather than a texture.
+    """
+    coeff = float(np.exp(-1.0 / max(seconds * sr, 1.0)))
+    magnitude = np.abs(x).mean(axis=1)
+    envelope = lfilter([1.0 - coeff], [1.0, -coeff], magnitude)
+    reference = np.sqrt(np.mean(magnitude**2)) + 1e-12
+    return x / (np.power((envelope + 1e-9) / reference, amount)[:, None])
+
+
+def _beaker_fizz(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
+    """Overlapping micro-grains, dense enough to fuse into carbonation."""
+    n = wet.shape[0]
+    blocks = len(c.env)
+
+    hold = max(int(0.003 * sr / filters.BLOCK), 1)
+    steps = int(np.ceil(blocks / hold))
+    jumps = np.repeat(np.array([rng.urand(p.seed, 50, i) for i in range(steps)]), hold)[:blocks]
+    jumps = filters.smooth(jumps, 0.001, sr)
+
+    bed = filters.varying_bandpass(
+        _noise(n, p.seed + 4), 600.0 * np.power(2.0, 2.7 * jumps), 4.0, sr
+    )
+    bed = _flatten_level(bed, sr)
+
+    # Grains must overlap several deep to fuse into carbonation. At a rate that
+    # merely fills the timeline they stay individually countable, which is the
+    # ticking this bed exists to avoid.
+    rate = 420.0 + 900.0 * p.reactivity
+    count = max(int(rate * n / sr), 1)
+    grain = int(0.006 * sr)
+    shape = np.exp(-np.linspace(0.0, 5.0, grain)) * np.minimum(
+        np.arange(grain) / max(int(0.0005 * sr), 1), 1.0
+    )
+    env = np.zeros(n)
+    for i in range(count):
+        start = int(rng.urand(p.seed, 51, i) * n)
+        end = min(start + grain, n)
+        if end > start:
+            env[start:end] += shape[: end - start]
+    env /= env.max() + 1e-12
+
+    return bed * env[:, None]
+
+
+def _alien_whirr(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
+    """A hovering craft: a narrow resonance rotating, with a detuned second
+    rotation beating against it and the whole thing circling the stereo field."""
+    n = wet.shape[0]
+    t = _ctrl_time(c, sr)
+    drift = 0.5 - 0.5 * np.cos(2.0 * np.pi * 0.08 * t)
+    base = 700.0 * np.power(2.0, 1.2 * drift)
+    noise = _noise(n, p.seed + 5)
+
+    bed = np.zeros_like(wet)
+    for channel, phase in ((0, 0.0), (1, np.pi * 0.5)):
+        rotation = np.sin(2.0 * np.pi * 5.0 * t + phase) + 0.7 * np.sin(
+            2.0 * np.pi * 5.9 * t + phase * 1.3
+        )
+        bed[:, channel : channel + 1] = filters.varying_bandpass(
+            noise[:, channel : channel + 1], base * np.power(2.0, 0.55 * rotation), 11.0, sr
+        )[:, 0:1]
+
+    amp = filters.to_sample_rate(0.45 + 0.55 * filters.smooth(c.env, 0.12, sr), n)
+    return bed * amp[:, None]
 
 
 def contaminate(
     wet: np.ndarray, c: Controls, p: Params, profile: ReactionProfile, sr: int
 ) -> np.ndarray:
-    """Emit this reaction's noise grain, shared by every reaction.
+    """Add this reaction's noise bed at a predictable delivered level.
 
-    Normalised against the output's own level before scaling, so CONTAMINATION
-    maps to a predictable delivered loudness rather than to whatever the gain
-    chain happens to leave. Roughly -34 dB at a quarter travel (texture grain)
-    up to -13 dB at full.
+    The bed is normalised against the output's own RMS before scaling, so
+    CONTAMINATION maps to a level in dB rather than to whatever the gain chain
+    happened to leave. Squaring the control puts full travel 12dB above half.
     """
-    if p.contamination <= 0.0 or len(c.starts) == 0:
+    if p.contamination <= 0.0:
         return wet
 
-    emitting = np.array(
-        [s for i, s in enumerate(c.starts) if rng.urand(p.seed, 30, i) < profile.noise_density],
-        dtype=int,
-    )
-    if len(emitting) == 0:
+    bed = profile.noise(wet, c, p, sr)
+    bed_rms = np.sqrt(np.mean(bed**2))
+    if bed_rms < 1e-12:
         return wet
 
-    n = wet.shape[0]
-    burst = _event_burst_envelope(n, emitting, max(int(profile.grain_s * sr), 2))[:, None]
-    noise = np.random.default_rng(p.seed + 1).standard_normal((n, 2))
-    noise = filters.static_highpass(noise, profile.noise_lo_hz, sr, q=0.8)
-    noise = filters.static_lowpass(noise, profile.noise_hi_hz, sr, q=0.8)
-
-    grains = noise * burst
-    grains *= (np.sqrt(np.mean(wet**2)) + 1e-12) / (np.sqrt(np.mean(grains**2)) + 1e-12)
-    level = 0.22 * np.power(p.contamination, 1.8) * (1.0 - 0.5 * c.damping)
-    return wet + grains * level
+    bed *= (np.sqrt(np.mean(wet**2)) + 1e-12) / bed_rms
+    level = profile.noise_full_level * p.contamination**2 * (1.0 - 0.5 * c.damping)
+    return wet + bed * level
 
 
 def _phaser(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
@@ -168,11 +290,9 @@ PROFILES = {
         amp_floor=0.30,
         chaos=0.55,
         wind_depth=1.0,
-        noise_lo_hz=1800.0,
-        noise_hi_hz=6000.0,
-        grain_s=0.009,
-        noise_density=0.40,
-        post=_ticks,
+        noise_full_level=0.0398,
+        noise=_geiger_ticks,
+        post=_passthrough,
     ),
     "FISSION": ReactionProfile(
         name="FISSION",
@@ -187,10 +307,8 @@ PROFILES = {
         amp_floor=0.45,
         chaos=0.25,
         wind_depth=0.45,
-        noise_lo_hz=900.0,
-        noise_hi_hz=4000.0,
-        grain_s=0.025,
-        noise_density=0.6,
+        noise_full_level=0.1259,
+        noise=_fission_shimmer,
         post=_phaser,
     ),
     "TOXIC SLUDGE": ReactionProfile(
@@ -206,10 +324,8 @@ PROFILES = {
         amp_floor=0.55,
         chaos=0.70,
         wind_depth=0.85,
-        noise_lo_hz=80.0,
-        noise_hi_hz=700.0,
-        grain_s=0.090,
-        noise_density=0.5,
+        noise_full_level=0.1995,
+        noise=_sludge_rumble,
         post=_sludge,
     ),
     "BEAKER": ReactionProfile(
@@ -225,10 +341,8 @@ PROFILES = {
         amp_floor=0.28,
         chaos=1.0,
         wind_depth=0.6,
-        noise_lo_hz=600.0,
-        noise_hi_hz=3500.0,
-        grain_s=0.005,
-        noise_density=0.9,
+        noise_full_level=0.1000,
+        noise=_beaker_fizz,
         post=_bubble,
     ),
     "ALIEN": ReactionProfile(
@@ -244,10 +358,8 @@ PROFILES = {
         amp_floor=0.32,
         chaos=0.6,
         wind_depth=1.0,
-        noise_lo_hz=1200.0,
-        noise_hi_hz=6500.0,
-        grain_s=0.015,
-        noise_density=0.5,
+        noise_full_level=0.1585,
+        noise=_alien_whirr,
         post=_shift,
     ),
 }

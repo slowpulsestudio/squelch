@@ -118,6 +118,32 @@ def peaking(x: np.ndarray, fc: float, gain_db: float, q: float, sr: int) -> np.n
 
 
 
+def _rbj_bandpass(fc: float, q: float, sr: int) -> tuple[np.ndarray, np.ndarray]:
+    fc = float(np.clip(fc, 20.0, sr * 0.45))
+    q = max(float(q), 0.3)
+    w0 = 2.0 * np.pi * fc / sr
+    cos_w0, sin_w0 = np.cos(w0), np.sin(w0)
+    alpha = sin_w0 / (2.0 * q)
+    b = np.array([alpha, 0.0, -alpha])
+    a = np.array([1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha])
+    return b / a[0], a / a[0]
+
+
+def varying_bandpass(x: np.ndarray, fc_ctrl: np.ndarray, q: float, sr: int) -> np.ndarray:
+    """A swept resonant bandpass, used to give noise beds a moving formant."""
+    n, ch = x.shape
+    y = np.zeros_like(x)
+    zi = np.zeros((2, ch))
+    for i in range(len(fc_ctrl)):
+        seg = x[i * BLOCK : (i + 1) * BLOCK]
+        if seg.shape[0] == 0:
+            break
+        b, a = _rbj_bandpass(fc_ctrl[i], q, sr)
+        seg, zi = lfilter(b, a, seg, axis=0, zi=zi)
+        y[i * BLOCK : (i + 1) * BLOCK] = seg
+    return y
+
+
 def varying_notch(x: np.ndarray, fc_ctrl: np.ndarray, q: float, sr: int) -> np.ndarray:
     """A swept notch — resonance inverted, which reads as hollow and submerged."""
     n, ch = x.shape

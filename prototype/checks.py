@@ -31,6 +31,20 @@ def _peak_frequency(x: np.ndarray, sr: int = SR) -> float:
     return float(np.fft.rfftfreq(len(x), 1.0 / sr)[int(np.argmax(spectrum))])
 
 
+def _bed_controls(n: int):
+    """A plausible set of controls for exercising a noise bed on its own."""
+    from .controls import Controls
+
+    blocks = filters.n_blocks(n)
+    return Controls(
+        env=np.linspace(0.2, 1.0, blocks),
+        cutoff=np.full(blocks, 500.0),
+        resonance=np.full(blocks, 4.0),
+        starts=np.arange(0, n, SR // 8),
+        damping=0.0,
+    )
+
+
 def check_ladder_response() -> tuple[bool, str]:
     """A 4-pole lowpass must roll off near 24 dB/octave with one resonant peak.
 
@@ -130,40 +144,75 @@ def check_pitch_wind() -> tuple[bool, str]:
 
 
 def check_contamination_scales() -> tuple[bool, str]:
-    """CONTAMINATION must map to a predictable delivered level, and reach zero.
+    """Every reaction's bed must be silent at zero and hit its target level.
 
     The grain previously measured -46 to -110 dB against the mix and was never
     audible, because its gain was scaled by two other parameters at once.
     """
-    from .controls import Controls
-    from .params import Params
+    from .params import REACTIONS, Params
     from .reactions import PROFILES, contaminate
 
     n = SR * 4
     wet = _tone(200.0, 4.0) * 0.3
-    profile = PROFILES["RADIATION"]
-    c = Controls(
-        env=np.zeros(filters.n_blocks(n)),
-        cutoff=np.full(filters.n_blocks(n), 500.0),
-        resonance=np.full(filters.n_blocks(n), 4.0),
-        starts=np.arange(0, n, SR // 8),
-        damping=0.0,
-    )
+    c = _bed_controls(n)
 
-    levels = []
-    for amount in (0.0, 0.25, 1.0):
-        out = contaminate(wet, c, Params(contamination=amount, seed=0), profile, SR)
-        diff = out - wet
-        levels.append(
-            20.0 * np.log10((np.sqrt(np.mean(diff**2)) + 1e-15) / (np.sqrt(np.mean(out**2)) + 1e-12))
+    failures = []
+    for reaction in REACTIONS:
+        profile = PROFILES[reaction]
+        target = 20.0 * np.log10(profile.noise_full_level)
+        measured = []
+        for amount in (0.0, 0.5, 1.0):
+            params = Params(reaction=reaction, contamination=amount, seed=0)
+            out = contaminate(wet, c, params, profile, SR)
+            diff = out - wet
+            measured.append(
+                20.0
+                * np.log10(
+                    (np.sqrt(np.mean(diff**2)) + 1e-15) / (np.sqrt(np.mean(out**2)) + 1e-12)
+                )
+            )
+        if measured[0] > -200.0:
+            failures.append(f"{reaction} audible at zero")
+        if abs(measured[2] - target) > 1.5:
+            failures.append(f"{reaction} full {measured[2]:.1f} vs target {target:.1f}")
+        if abs((measured[2] - measured[1]) - 12.0) > 1.5:
+            failures.append(f"{reaction} half-to-full {measured[2] - measured[1]:.1f} not 12")
+
+    detail = "; ".join(failures) if failures else "5 beds silent at 0, on target at full, 12dB half-to-full"
+    return not failures, detail
+
+
+def check_only_radiation_ticks() -> tuple[bool, str]:
+    """Only RADIATION may emit discrete bursts; the rest must be continuous.
+
+    Measured on a 20ms RMS envelope, not on raw samples: any noise signal has
+    roughly 12dB of sample-level crest intrinsically, so a raw-sample measure
+    reports every bed as peaky and cannot tell a bed from a burst.
+    """
+    from .params import REACTIONS, Params
+    from .reactions import PROFILES
+
+    n = SR * 4
+    wet = _tone(200.0, 4.0) * 0.3
+    c = _bed_controls(n)
+    window = int(0.020 * SR)
+    kernel = np.ones(window) / window
+
+    crests = {}
+    for reaction in REACTIONS:
+        bed = PROFILES[reaction].noise(wet, c, Params(reaction=reaction, seed=0), SR)
+        envelope = np.sqrt(np.convolve(bed.mean(axis=1) ** 2, kernel, mode="valid"))
+        crests[reaction] = 20.0 * np.log10(
+            envelope.max() / (np.sqrt(np.mean(envelope**2)) + 1e-12)
         )
 
-    silent = levels[0] < -200.0
-    grain = -40.0 < levels[1] < -28.0
-    loud = -18.0 < levels[2] < -8.0
-    return silent and grain and loud, (
-        f"off {levels[0]:.0f} dB, quarter {levels[1]:.1f} dB (grain), full {levels[2]:.1f} dB"
-    )
+    ticky = crests["RADIATION"]
+    beds = max(v for k, v in crests.items() if k != "RADIATION")
+    # Beds measure 3-8dB and discrete bursts 18dB+. The bed figure is a floor
+    # set by the swept filter texture, not by grain density: it stays put over
+    # a 16x change in grain rate, so there is no point tightening it further.
+    ok = ticky > 15.0 and beds < 10.0
+    return ok, ", ".join(f"{k.split()[0].title()} {v:.1f}" for k, v in crests.items()) + " dB env crest"
 
 
 def check_voicing_curve() -> tuple[bool, str]:
@@ -194,6 +243,7 @@ CHECKS = [
     ("octave down", check_octave_down),
     ("pitch wind", check_pitch_wind),
     ("contamination scales", check_contamination_scales),
+    ("only radiation ticks", check_only_radiation_ticks),
     ("house voicing curve", check_voicing_curve),
     ("scheduling determinism", check_scheduling_is_deterministic),
 ]
