@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.ndimage import maximum_filter1d
+from scipy.signal import lfilter
 
 from . import filters, rng, saturation
 from .controls import Controls
@@ -34,6 +35,16 @@ AFTERGLOW_LEVEL = 0.9
 LIMITER_LOOKAHEAD_S = 0.005
 LIMITER_CEILING = 0.97
 LIMITER_RELEASE_S = 0.050
+
+#: How slowly the streaming level match tracks. Long on purpose: anything near
+#: the speed of the programme turns a level match into a compressor.
+LEVEL_MATCH_S = 1.5
+#: Material below this is held rather than matched. An absolute threshold on
+#: purpose: anything relative to the render's own average would be measuring
+#: the future, which is the thing this function exists to avoid.
+LEVEL_MATCH_GATE_DB = -60.0
+#: How far the match is allowed to push, either way.
+LEVEL_MATCH_RANGE_DB = 18.0
 
 #: Pultec-style voicing, applied to every reaction. Tuned for future garage /
 #: breaks / warm techno: weight low down, mud pulled out above it, the harsh
@@ -163,6 +174,42 @@ def match_rms(y: np.ndarray, reference: np.ndarray, until: int | None = None) ->
     return y * (target / current)
 
 
+def running_match(y: np.ndarray, reference: np.ndarray, sr: int) -> np.ndarray:
+    """The same level match, but only ever looking backwards.
+
+    match_rms measures the whole render before deciding on a gain, which no
+    plugin can do. This tracks both levels through a slow one-pole instead and
+    divides one by the other as it goes.
+
+    The time constant is the whole design. The job is to match average level,
+    not to follow the input's envelope: track too quickly and the output is
+    dragged into the shape of the dry signal, which flattens the dynamics the
+    reaction just created. It is slow enough to settle on a figure and stay
+    there.
+
+    Quiet passages hold the last gain rather than being matched. Dividing two
+    small numbers gives a large gain for no good reason, and resetting to unity
+    instead of holding biases the whole render upwards.
+    """
+    coeff = float(np.exp(-1.0 / max(LEVEL_MATCH_S * sr, 1.0)))
+    wet = filters.running_rms(y, sr, LEVEL_MATCH_S)
+    dry = filters.running_rms(reference, sr, LEVEL_MATCH_S)
+
+    ceiling = 10.0 ** (LEVEL_MATCH_RANGE_DB / 20.0)
+    gain = np.clip(dry / np.maximum(wet, 1e-12), 1.0 / ceiling, ceiling)
+
+    gate = 10.0 ** (LEVEL_MATCH_GATE_DB / 20.0)
+    sounding = wet > gate
+    if not sounding.all():
+        # Hold through the gaps: carry the last gain forward rather than
+        # snapping to unity.
+        index = np.where(sounding, np.arange(len(gain)), 0)
+        gain = gain[np.maximum.accumulate(index)]
+
+    gain = lfilter([1.0 - coeff], [1.0, -coeff], gain, zi=np.array([coeff * gain[0]]))[0]
+    return y * gain[:, None]
+
+
 def voice(x: np.ndarray, sr: int) -> np.ndarray:
     """Fixed Pultec-style house voicing: weight at the bottom, bite off the top.
 
@@ -245,12 +292,16 @@ def process(
     c: Controls,
     mix: float = 1.0,
     md=None,
+    offline: bool = False,
 ) -> np.ndarray:
     """Run the output chain, blend with dry, then protect the peaks.
 
     Peak safety runs after the blend rather than on the wet path alone: the
     reaction decorrelates phase against the dry signal, so the mix can peak
     higher than either part on its own.
+
+    `offline` falls back to the whole-render level match, which is kept only so
+    the two can be rendered against each other. The plugin cannot use it.
     """
     until = int(p.meltdown_at * sr) if (md is not None and md.active) else 0
     y = drive(wet, p, profile.drive_weight, md.samples("drive") if md else None, until)
@@ -271,6 +322,9 @@ def process(
 
     y = fallout(y, sr, p, profile, c)
     y = voice(y, sr)
-    y = match_rms(y, dry, until if until > sr // 4 else None)
+    if offline:
+        y = match_rms(y, dry, until if until > sr // 4 else None)
+    else:
+        y = running_match(y, dry, sr)
     y = (1.0 - mix) * dry + mix * y
     return clip(y, sr) if p.clip else peak_limit(y, sr)

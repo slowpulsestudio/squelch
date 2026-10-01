@@ -173,9 +173,22 @@ def check_contamination_scales() -> tuple[bool, str]:
 
     The grain previously measured -46 to -110 dB against the mix and was never
     audible, because its gain was scaled by two other parameters at once.
+
+    The targets are written out here rather than read back from the profile's
+    own gain. Deriving the target from the constant being tested moves the goal
+    whenever the constant moves, so the check could only ever pass. These are
+    the levels noise-beds.md specifies.
     """
     from .params import REACTIONS, Params
     from .reactions import PROFILES, contaminate
+
+    targets = {
+        "RADIATION": -28.0,
+        "FISSION": -18.0,
+        "SLUDGE": -14.0,
+        "CHEMICAL": -23.0,
+        "ALIEN": -16.0,
+    }
 
     n = SR * 4
     wet = _tone(200.0, 4.0) * 0.3
@@ -184,7 +197,7 @@ def check_contamination_scales() -> tuple[bool, str]:
     failures = []
     for reaction in REACTIONS:
         profile = PROFILES[reaction]
-        target = 20.0 * np.log10(profile.noise_full_level)
+        target = targets[reaction]
         measured = []
         for amount in (0.0, 0.5, 1.0):
             params = Params(reaction=reaction, contamination=amount, seed=0)
@@ -898,6 +911,100 @@ def check_enrichment_drives_without_changing_level() -> tuple[bool, str]:
     )
 
 
+def check_level_match_is_causal() -> tuple[bool, str]:
+    """Nothing in the chain may decide the level from audio that has not played.
+
+    The offline harness could measure a whole render before choosing a gain. A
+    plugin gets one block at a time, so the level match tracks both signals
+    through a slow one-pole instead. This is the check that the port is even
+    possible: processing a render in one pass and processing it in pieces have
+    to agree.
+    """
+    import soundfile as sf
+
+    from . import engine
+    from .params import Params
+
+    source, sr = sf.read(_source(), always_2d=True, dtype="float64")
+    source = np.tile(source, (2, 1))
+    p = Params(
+        reaction="RADIATION", mode="GRID", grid="1/16",
+        drive=0.6, toxicity=0.5, contamination=0.4, seed=3,
+    )
+
+    whole, _ = engine.process(source, sr, p, 140.0)
+
+    # Truncating the input must not change what came before the cut. Anything
+    # that measures the whole render fails this, because the average it is
+    # working from is different.
+    cut = int(len(source) * 0.6)
+    short, _ = engine.process(source[:cut], sr, p, 140.0)
+
+    compare = slice(0, cut - sr)  # drop the tail, which has no future to use
+    a, b = whole[compare], short[compare]
+    agreement = 20.0 * np.log10(
+        (np.sqrt(np.mean((a - b) ** 2)) + 1e-18) / (np.sqrt(np.mean(a**2)) + 1e-18)
+    )
+
+    offline, _ = engine.process(source[:cut], sr, p, 140.0, offline=True)
+    was = 20.0 * np.log10(
+        (np.sqrt(np.mean((whole[compare] - offline[compare]) ** 2)) + 1e-18)
+        / (np.sqrt(np.mean(whole[compare] ** 2)) + 1e-18)
+    )
+
+    ok = agreement < -100.0 and agreement < was - 40.0
+    return ok, (
+        f"shortening the render changes the earlier audio by {agreement:.0f} dB, "
+        f"against {was:.0f} dB for the offline match"
+    )
+
+
+def check_level_match_does_not_pump() -> tuple[bool, str]:
+    """A level match that follows the programme is a compressor.
+
+    Tracking quickly would drag the output into the shape of the input and
+    flatten the dynamics the reaction just created, so the gain is held to a
+    crawl. Measured against the offline version, which applies one fixed number
+    to the whole render and therefore cannot pump by definition.
+    """
+    import soundfile as sf
+
+    from . import engine
+    from .params import Params
+
+    source, sr = sf.read(_source(), always_2d=True, dtype="float64")
+    source = np.tile(source, (4, 1))
+    p = Params(
+        reaction="RADIATION", mode="GRID", grid="1/16",
+        drive=0.6, toxicity=0.5, seed=3,
+    )
+
+    live, _ = engine.process(source, sr, p, 140.0)
+    fixed, _ = engine.process(source, sr, p, 140.0, offline=True)
+
+    settled = slice(int(6 * sr), None)
+    span = 512
+    length = (len(live[settled]) // span) * span
+    gain = 20.0 * np.log10(
+        (np.abs(live[settled][:length, 0]) + 1e-9) / (np.abs(fixed[settled][:length, 0]) + 1e-9)
+    )
+    gain = gain.reshape(-1, span).mean(axis=1)
+
+    swing = float(gain.max() - gain.min())
+    rate = float(np.abs(np.diff(gain)).max()) * sr / span
+
+    level = 20.0 * np.log10(
+        (np.sqrt(np.mean(live[settled] ** 2)) + 1e-18)
+        / (np.sqrt(np.mean(source[settled] ** 2)) + 1e-18)
+    )
+
+    ok = swing < 1.5 and rate < 5.0 and abs(level) < 1.0
+    return ok, (
+        f"gain wanders {swing:.2f} dB at up to {rate:.1f} dB/s, "
+        f"settles {level:+.2f} dB from the input"
+    )
+
+
 def check_quiet_material_is_untouched() -> tuple[bool, str]:
     """Below the knee the curve must be exactly linear.
 
@@ -1033,6 +1140,8 @@ CHECKS = [
         check_enrichment_drives_without_changing_level,
     ),
     ("quiet material is untouched", check_quiet_material_is_untouched),
+    ("level match is causal", check_level_match_is_causal),
+    ("level match does not pump", check_level_match_does_not_pump),
     ("clip trades lookahead for hardness", check_clip_trades_lookahead_for_hardness),
     ("frequency shift", check_frequency_shift),
     ("octave down", check_octave_down),

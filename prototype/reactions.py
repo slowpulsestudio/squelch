@@ -37,6 +37,10 @@ SIDECHAIN_DEPTH = 0.9
 SIDECHAIN_ATTACK_S = 0.005
 SIDECHAIN_RELEASE_S = 0.080
 
+#: How slowly the bed's level is matched to the output's. Same reasoning as the
+#: output stage: slow enough to settle on a figure rather than ride the music.
+BED_MATCH_S = 1.5
+
 
 @dataclass
 class ReactionProfile:
@@ -276,17 +280,17 @@ def contaminate(
     follower = _input_follower(dry, sr)
     bed = bed * (1.0 - SIDECHAIN_DEPTH + SIDECHAIN_DEPTH * follower)[:, None]
 
-    # Normalising the bed against its own RMS is what makes CONTAMINATION map
-    # to a predictable level in dB. Measured before the gate when a MELTDOWN is
-    # armed, so a loud passage later in the render cannot scale the bed earlier
-    # in it — the same reach-backwards the output stage's level match had.
-    until = int(p.meltdown_at * sr) if (md is not None and md.active) else 0
-    window = slice(0, until) if until > sr // 4 else slice(None)
-    bed_rms = np.sqrt(np.mean(bed[window] ** 2))
-    if bed_rms < 1e-12:
+    # Normalising the bed against the output's level is what makes
+    # CONTAMINATION map to a predictable level in dB rather than to whatever
+    # the gain chain happened to leave. Both levels are tracked by the same
+    # slow one-pole the output stage uses, so nothing here measures a part of
+    # the render that has not played yet.
+    bed_level = filters.running_rms(bed, sr, BED_MATCH_S)
+    wet_level = filters.running_rms(wet, sr, BED_MATCH_S)
+    if float(np.max(bed_level)) < 1e-12:
         return wet
 
-    bed *= (np.sqrt(np.mean(wet[window] ** 2)) + 1e-12) / bed_rms
+    bed = bed * (wet_level / np.maximum(bed_level, 1e-12))[:, None]
     level = profile.noise_full_level * amount**2 * (1.0 - 0.5 * c.damping)
     return wet + bed * level[:, None]
 
@@ -362,7 +366,7 @@ PROFILES = {
         wobble_weight=1.0,
         drive_weight=0.90,
         persistence=0.90,
-        noise_full_level=0.0398,
+        noise_full_level=0.0229,
         noise=_geiger_ticks,
         post=_passthrough,
     ),
@@ -384,7 +388,7 @@ PROFILES = {
         wobble_weight=0.25,
         drive_weight=0.70,
         persistence=0.60,
-        noise_full_level=0.1259,
+        noise_full_level=0.0902,
         noise=_fission_shimmer,
         post=_phaser,
     ),
@@ -406,7 +410,7 @@ PROFILES = {
         wobble_weight=0.9,
         drive_weight=1.30,
         persistence=1.00,
-        noise_full_level=0.1995,
+        noise_full_level=0.1373,
         noise=_sludge_rumble,
         post=_sludge,
     ),
@@ -432,7 +436,7 @@ PROFILES = {
         persistence=0.45,
         # Dense continuous fizz in the most sensitive part of the ear's range
         # reads louder than its level suggests, so it sits below the others.
-        noise_full_level=0.0708,
+        noise_full_level=0.0530,
         noise=_chemical_fizz,
         post=_bubble,
     ),
@@ -454,7 +458,7 @@ PROFILES = {
         wobble_weight=1.0,
         drive_weight=0.80,
         persistence=0.70,
-        noise_full_level=0.1585,
+        noise_full_level=0.1147,
         noise=_alien_whirr,
         post=_shift,
     ),

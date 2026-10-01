@@ -38,6 +38,20 @@ def smooth(ctrl: np.ndarray, time_s: float, sr: int) -> np.ndarray:
     return lfilter(b, a, ctrl, zi=zi)[0]
 
 
+def running_rms(x: np.ndarray, sr: int, time_s: float) -> np.ndarray:
+    """Level as a plugin would measure it: a one-pole on power, looking back.
+
+    Used anywhere the offline prototype would reach for the RMS of the whole
+    render. It starts settled on the opening instead of ramping up from
+    silence, so the first second of a render is measured as well as the rest.
+    """
+    coeff = float(np.exp(-1.0 / max(time_s * sr, 1.0)))
+    power = np.mean(np.atleast_2d(x.T).T ** 2, axis=1)
+    start = float(np.mean(power[: max(int(0.05 * sr), 1)]))
+    smoothed = lfilter([1.0 - coeff], [1.0, -coeff], power, zi=np.array([coeff * start]))
+    return np.sqrt(np.maximum(smoothed[0], 1e-20))
+
+
 
 def _rbj_lowpass(fc: float, q: float, sr: int) -> tuple[np.ndarray, np.ndarray]:
     fc = float(np.clip(fc, 20.0, sr * 0.45))

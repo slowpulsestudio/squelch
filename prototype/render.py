@@ -29,6 +29,11 @@ def main() -> None:
     parser.add_argument(
         "--clip", action="store_true", help="hard ceiling instead of the limiter"
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="whole-render level match, which the plugin cannot do",
+    )
     for name in CONTINUOUS:
         parser.add_argument(f"--{name.replace('_', '-')}", type=float, default=None)
     args = parser.parse_args()
@@ -47,7 +52,7 @@ def main() -> None:
     )
 
     dry, sr = audio_io.load(args.source)
-    wet, _ = engine.process(dry, sr, p, args.bpm, mix=args.mix)
+    wet, _ = engine.process(dry, sr, p, args.bpm, mix=args.mix, offline=args.offline)
 
     out_dir = Path("Output") / args.name
     audio_io.save(out_dir / f"{args.name}.wav", wet, sr)
