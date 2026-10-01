@@ -1,5 +1,10 @@
 # SQUELCH — Full Concept & Parameter Metaprompt
 
+> **For records only.** This is the original prompt that started the project,
+> kept as written. It is deliberately not maintained: parameters have since
+> been renamed, added and removed, so where this document and the code
+> disagree, the code is right. Do not update this file to match.
+
 ## Core Concept
 
 **SQUELCH** is a rhythmic acid-house / techno audio manipulator that takes incoming audio and subjects it to unstable chemical, radioactive, and nuclear reactions.

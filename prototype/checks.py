@@ -262,7 +262,7 @@ def check_voicing_curve() -> tuple[bool, str]:
 
 
 def check_acid_voice() -> tuple[bool, str]:
-    """BEAKER must behave like a 303: per-note envelope sweep, accents, slides.
+    """BIO-CHEMICAL must behave like a 303: per-note envelope sweep, accents, slides.
 
     A resonant lowpass swept by a per-note envelope is what squelches. Holding
     a frequency, or using a bandpass, removes both the squelch and the bassline.
@@ -272,10 +272,10 @@ def check_acid_voice() -> tuple[bool, str]:
     from .reactor import build_controls
     from .scheduler import schedule
 
-    profile = PROFILES["BEAKER"]
+    profile = PROFILES["BIO-CHEMICAL"]
     n = SR * 4
     silence = np.zeros((n, 2))
-    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, decay=0.3, spread=0.7)
+    p = Params(reaction="BIO-CHEMICAL", mode="GRID", grid="1/8", seed=3, decay=0.3, spread=0.7)
     events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
     c = build_controls(events, n, SR, p, profile)
 
@@ -313,10 +313,10 @@ def check_acid_keeps_the_low_end() -> tuple[bool, str]:
     from .reactor import build_controls
     from .scheduler import schedule
 
-    profile = PROFILES["BEAKER"]
+    profile = PROFILES["BIO-CHEMICAL"]
     n = SR * 4
     noise = np.random.default_rng(0).standard_normal((n, 2)) * 0.1
-    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, decay=0.3, spread=0.7)
+    p = Params(reaction="BIO-CHEMICAL", mode="GRID", grid="1/8", seed=3, decay=0.3, spread=0.7)
     events = schedule(noise, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
     c = build_controls(events, n, SR, p, profile)
     out = filters.varying_ladder(noise, c.cutoff, c.resonance, SR, inner_sat=0.0)
