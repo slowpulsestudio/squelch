@@ -82,6 +82,7 @@ def build_controls(
     resting_oct = base_oct + span_oct * STATIC_CENTRE * (1.0 - p.range)
 
     env_total = np.zeros(nb)
+    env_stereo = np.zeros((nb, 2))
     cut_oct = np.full(nb, resting_oct)
     resonance = np.zeros(nb)
 
@@ -101,6 +102,9 @@ def build_controls(
     acid = profile.voice == "acid"
     slide_blocks = max(int(SLIDE_S * ctrl_sr), 1)
     held_oct = resting_oct
+
+    # prompt.md lists stereo position among the things VOLATILITY varies.
+    pan_spread = p.volatility * (1.0 - 0.7 * damping)
 
     for ev in events:
         this_decay = max(decay_s * ev.decay_scale, 0.005)
@@ -136,6 +140,13 @@ def build_controls(
         accent_level = 1.0 if (not acid or ev.accent) else UNACCENTED_LEVEL
 
         env_total[c0:c1] = np.maximum(env_total[c0:c1], env * accent_level)
+
+        # Each event takes its own stereo position, so successive reactions
+        # bounce across the field instead of all arriving dead centre.
+        angle = (ev.pan * pan_spread + 1.0) * 0.25 * np.pi
+        placed = env * accent_level * np.sqrt(2.0)
+        env_stereo[c0:c1, 0] = np.maximum(env_stereo[c0:c1, 0], placed * np.cos(angle))
+        env_stereo[c0:c1, 1] = np.maximum(env_stereo[c0:c1, 1], placed * np.sin(angle))
         if acid:
             # Monophonic, like the machine this imitates: each note retriggers
             # the filter envelope and owns the line until the next one starts.
@@ -158,6 +169,11 @@ def build_controls(
     cut_oct = filters.smooth(cut_oct, ANTI_STEP_S, sr)
     resonance = filters.smooth(np.maximum(resonance, q_lo * 0.6), ANTI_STEP_S, sr)
     env_total = filters.smooth(env_total, ANTI_STEP_S, sr)
+    env_stereo = np.stack(
+        [filters.smooth(env_stereo[:, 0], ANTI_STEP_S, sr),
+         filters.smooth(env_stereo[:, 1], ANTI_STEP_S, sr)],
+        axis=1,
+    )
 
     smoothing = 0.92 * damping
     cut_oct = _one_pole_smooth(cut_oct, smoothing)
@@ -167,6 +183,7 @@ def build_controls(
 
     return Controls(
         env=env_total,
+        env_stereo=env_stereo,
         cutoff=np.power(2.0, cut_oct),
         resonance=resonance,
         starts=starts,
@@ -183,8 +200,12 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
     wet = filters.varying_ladder(x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat)
 
     depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * p.squelch) * (1.0 - 0.6 * p.rods)
-    amp = filters.to_sample_rate(1.0 - depth + depth * controls.env, len(x))
-    wet *= amp[:, None]
+    amp = np.stack(
+        [filters.to_sample_rate(1.0 - depth + depth * controls.env_stereo[:, ch], len(x))
+         for ch in (0, 1)],
+        axis=1,
+    )
+    wet *= amp
 
     # RANGE is how far a reaction travels in pitch, so it drives the wind as
     # well as the filter excursion.
@@ -194,5 +215,5 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
         wet = filters.pitch_wind(wet, wind, sr, MAX_WIND_S)
 
     wet = profile.post(wet, x, controls, p, sr)
-    wet = contaminate(wet, controls, p, profile, sr)
+    wet = contaminate(wet, x, controls, p, profile, sr)
     return wet, controls

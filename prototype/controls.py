@@ -15,6 +15,8 @@ import numpy as np
 class Controls:
     #: Combined event envelope, 0..1, one value per control block.
     env: np.ndarray
+    #: The same envelope split per channel by each event's stereo position.
+    env_stereo: np.ndarray
     #: Filter cutoff in Hz, one value per control block.
     cutoff: np.ndarray
     #: Filter Q, one value per control block.

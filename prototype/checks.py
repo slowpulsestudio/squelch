@@ -38,6 +38,7 @@ def _bed_controls(n: int):
     blocks = filters.n_blocks(n)
     return Controls(
         env=np.linspace(0.2, 1.0, blocks),
+        env_stereo=np.repeat(np.linspace(0.2, 1.0, blocks)[:, None], 2, axis=1),
         cutoff=np.full(blocks, 500.0),
         resonance=np.full(blocks, 4.0),
         starts=np.arange(0, n, SR // 8),
@@ -163,7 +164,7 @@ def check_contamination_scales() -> tuple[bool, str]:
         measured = []
         for amount in (0.0, 0.5, 1.0):
             params = Params(reaction=reaction, contamination=amount, seed=0)
-            out = contaminate(wet, c, params, profile, SR)
+            out = contaminate(wet, wet, c, params, profile, SR)
             diff = out - wet
             measured.append(
                 20.0
@@ -418,6 +419,65 @@ def check_fallout_disperses_per_reaction() -> tuple[bool, str]:
     )
 
 
+def check_events_are_panned() -> tuple[bool, str]:
+    """VOLATILITY must scatter events across the stereo field, not just centre them."""
+    from .params import Params
+    from .reactions import PROFILES
+    from .reactor import build_controls
+    from .scheduler import schedule
+
+    profile = PROFILES["RADIATION"]
+    n = SR * 4
+    silence = np.zeros((n, 2))
+
+    spreads = []
+    for volatility in (0.0, 1.0):
+        p = Params(reaction="RADIATION", mode="GRID", grid="1/16", seed=5, volatility=volatility)
+        events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
+        c = build_controls(events, n, SR, p, profile)
+        difference = c.env_stereo[:, 0] - c.env_stereo[:, 1]
+        spreads.append(float(np.sqrt(np.mean(difference**2))))
+
+    ok = spreads[0] < 1e-6 and spreads[1] > 0.1
+    return ok, f"L/R event difference {spreads[0]:.4f} at VOLATILITY 0, {spreads[1]:.3f} at 1"
+
+
+def check_beds_follow_the_input() -> tuple[bool, str]:
+    """The noise beds must track the input's rhythm, not sit under it flat."""
+    from .params import Params
+    from .reactions import PROFILES, contaminate
+
+    n = SR * 4
+    # Two bars of pulses with real gaps between them.
+    dry = np.zeros((n, 2))
+    pulse = int(0.12 * SR)
+    period = SR // 2
+    for start in range(0, n, period):
+        end = min(start + pulse, n)
+        dry[start:end] = np.random.default_rng(start).standard_normal((end - start, 2)) * 0.4
+
+    wet = _tone(220.0, 4.0) * 0.3
+    c = _bed_controls(n)
+    p = Params(reaction="TOXIC SLUDGE", contamination=1.0, seed=0)
+    bed = contaminate(wet, dry, c, p, PROFILES["TOXIC SLUDGE"], SR) - wet
+
+    # Masks come from the pulse schedule, not from instantaneous amplitude: a
+    # noise burst crosses zero constantly, so a sample-value mask counts the
+    # middle of a loud pulse as a gap and flattens the result.
+    playing = np.zeros(n, dtype=bool)
+    settled = np.zeros(n, dtype=bool)
+    for start in range(0, n, period):
+        playing[start : min(start + pulse, n)] = True
+        settled[min(start + pulse + int(0.25 * SR), n) : min(start + period, n)] = True
+
+    on = float(np.sqrt(np.mean(bed[playing] ** 2)))
+    off = float(np.sqrt(np.mean(bed[settled] ** 2)))
+    ratio = 20.0 * np.log10((on + 1e-15) / (off + 1e-15))
+
+    ok = ratio > 12.0
+    return ok, f"bed is {ratio:.1f} dB louder while the input plays than in the gaps"
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
@@ -426,6 +486,8 @@ CHECKS = [
     ("pitch wind", check_pitch_wind),
     ("contamination scales", check_contamination_scales),
     ("only radiation ticks", check_only_radiation_ticks),
+    ("beds follow the input", check_beds_follow_the_input),
+    ("events are panned", check_events_are_panned),
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("range drives each character", check_range_drives_each_character),

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
+from scipy.ndimage import maximum_filter1d
 from scipy.signal import lfilter
 
 from . import filters, rng
@@ -29,6 +30,12 @@ SLUDGE_BASE_HZ = 260.0
 SLUDGE_RISE_OCT = 2.6
 #: How far ALIEN's zaps travel.
 ALIEN_SHIFT_HZ = 1100.0
+
+#: The noise beds follow the incoming audio rather than sitting under it as a
+#: constant hiss, so contamination reads as rhythmic.
+SIDECHAIN_DEPTH = 0.9
+SIDECHAIN_ATTACK_S = 0.005
+SIDECHAIN_RELEASE_S = 0.080
 
 
 @dataclass
@@ -227,19 +234,37 @@ def _alien_whirr(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray
     return bed * amp[:, None]
 
 
+def _input_follower(dry: np.ndarray, sr: int) -> np.ndarray:
+    """Envelope of the incoming audio, normalised to average 1.
+
+    Fast attack via a rolling peak, slow release via a one-pole, so the beds
+    arrive with the source and fall away in the gaps.
+    """
+    magnitude = np.abs(dry).max(axis=1)
+    peak = maximum_filter1d(magnitude, size=max(int(SIDECHAIN_ATTACK_S * sr), 1))
+    coeff = float(np.exp(-1.0 / max(SIDECHAIN_RELEASE_S * sr, 1.0)))
+    envelope = lfilter([1.0 - coeff], [1.0, -coeff], peak)
+    return envelope / (envelope.mean() + 1e-12)
+
+
 def contaminate(
-    wet: np.ndarray, c: Controls, p: Params, profile: ReactionProfile, sr: int
+    wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, profile: ReactionProfile, sr: int
 ) -> np.ndarray:
     """Add this reaction's noise bed at a predictable delivered level.
 
-    The bed is normalised against the output's own RMS before scaling, so
-    CONTAMINATION maps to a level in dB rather than to whatever the gain chain
-    happened to leave. Squaring the control puts full travel 12dB above half.
+    The bed is sidechained by the input so it moves with the music rather than
+    sitting under it as a constant hiss, then normalised against the output's
+    own RMS before scaling, so CONTAMINATION maps to a level in dB rather than
+    to whatever the gain chain happened to leave. Squaring the control puts
+    full travel 12dB above half.
     """
     if p.contamination <= 0.0:
         return wet
 
     bed = profile.noise(wet, c, p, sr)
+    follower = _input_follower(dry, sr)
+    bed = bed * (1.0 - SIDECHAIN_DEPTH + SIDECHAIN_DEPTH * follower)[:, None]
+
     bed_rms = np.sqrt(np.mean(bed**2))
     if bed_rms < 1e-12:
         return wet
@@ -375,7 +400,9 @@ PROFILES = {
         wind_depth=0.6,
         spread_weight=0.35,
         wobble_weight=0.55,
-        noise_full_level=0.1000,
+        # Dense continuous fizz in the most sensitive part of the ear's range
+        # reads louder than its level suggests, so it sits below the others.
+        noise_full_level=0.0708,
         noise=_beaker_fizz,
         post=_bubble,
     ),
