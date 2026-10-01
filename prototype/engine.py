@@ -13,7 +13,10 @@ from .reactions import PROFILES
 def process(
     x: np.ndarray, sr: int, p: Params, bpm: float, mix: float = 1.0
 ) -> tuple[np.ndarray, Controls]:
-    """INPUT -> reactor -> DRIVE -> COLLIMATOR -> FALLOUT -> mix -> peak safety."""
-    wet, controls, md = reactor.process(x, sr, p, bpm)
+    """FEED -> reactor -> DRIVE -> COLLIMATOR -> FALLOUT -> mix -> peak safety."""
+    # FEED drives the reaction only. The dry reference stays at its original
+    # level so the MIX blend and the output level match do not move with it,
+    # which leaves FEED changing character rather than loudness.
+    wet, controls, md = reactor.process(x * p.feed_gain(), sr, p, bpm)
     y = output_stage.process(wet, x, sr, p, PROFILES[p.reaction], controls, mix=mix, md=md)
     return y, controls

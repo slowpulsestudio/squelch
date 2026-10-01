@@ -847,6 +847,55 @@ def check_drive_responds_to_input_level() -> tuple[bool, str]:
     )
 
 
+def check_feed_drives_without_changing_level() -> tuple[bool, str]:
+    """FEED has to change the sound without changing the loudness.
+
+    It is the analogue response made into a parameter: level decides how much
+    of the drive curve is reached, so FEED is a character control. That only
+    works if it leaves output level alone, otherwise it reads as a volume knob
+    and nobody will push it. The dry reference is deliberately left untrimmed
+    so the output level match holds it in place.
+    """
+    import soundfile as sf
+
+    from . import engine
+    from .params import Params
+
+    source, sr = sf.read(_source(), always_2d=True, dtype="float64")
+    base = dict(
+        reaction="RADIATION", mode="GRID", grid="1/16",
+        drive=0.6, toxicity=0.5, seed=3,
+    )
+
+    renders = {}
+    for name, feed in (("low", 0.0), ("unity", 0.5), ("high", 1.0)):
+        renders[name], _ = engine.process(source, sr, Params(**base, feed=feed), 140.0)
+
+    def rms_db(y: np.ndarray) -> float:
+        return 20.0 * np.log10(np.sqrt(np.mean(y**2)) + 1e-18)
+
+    levels = {k: rms_db(v) for k, v in renders.items()}
+    spread = max(levels.values()) - min(levels.values())
+
+    # Character measured as what is left once level is taken out of it, so the
+    # number reports a change in sound rather than a change in gain.
+    reference = renders["unity"]
+    scaled = renders["high"] * (
+        (np.sqrt(np.mean(reference**2)) + 1e-18)
+        / (np.sqrt(np.mean(renders["high"] ** 2)) + 1e-18)
+    )
+    character = 20.0 * np.log10(
+        (np.sqrt(np.mean((scaled - reference) ** 2)) + 1e-18)
+        / (np.sqrt(np.mean(reference**2)) + 1e-18)
+    )
+
+    ok = spread < 3.0 and character > -12.0
+    return ok, (
+        f"level moves {spread:.1f} dB across the range, "
+        f"character changes {character:+.1f} dB"
+    )
+
+
 def check_quiet_material_is_untouched() -> tuple[bool, str]:
     """Below the knee the curve must be exactly linear.
 
@@ -977,6 +1026,7 @@ CHECKS = [
     ("limiter releases gently", check_limiter_releases_gently),
     ("drive does not alias", check_drive_does_not_alias),
     ("drive responds to input level", check_drive_responds_to_input_level),
+    ("feed drives without changing level", check_feed_drives_without_changing_level),
     ("quiet material is untouched", check_quiet_material_is_untouched),
     ("clip trades lookahead for hardness", check_clip_trades_lookahead_for_hardness),
     ("frequency shift", check_frequency_shift),

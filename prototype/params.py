@@ -32,8 +32,12 @@ GRID_DIVISIONS = {
 
 GRID_NAMES = list(GRID_DIVISIONS)
 
+#: FEED spans this many dB either side of unity.
+FEED_RANGE_DB = 18.0
+
 #: Continuous parameters, in the order prompt.md lists them.
 CONTINUOUS = [
+    "feed",
     "flux",
     "probability",
     "reactivity",
@@ -68,6 +72,13 @@ class Params:
     reaction: str = "RADIATION"
     mode: str = "GRID"
     grid: str = "1/16"
+
+    #: How hard the source is fed into the reactor, 0.5 being unity. The drive
+    #: curve has a fixed knee, so level is part of the character rather than
+    #: just gain staging, and a preset that did not recall it would not recall
+    #: the sound. That is why this is a plugin parameter and not the host-side
+    #: Input strip, which stays a utility trim and stays out of presets.
+    feed: float = 0.5
 
     flux: float = 0.0
     probability: float = 1.0
@@ -105,6 +116,10 @@ class Params:
     meltdown_hold: float = 0.0
 
     seed: int = 0
+
+    def feed_gain(self) -> float:
+        """FEED as a linear gain, 0.5 being unity."""
+        return float(10.0 ** (((self.feed - 0.5) * 2.0 * FEED_RANGE_DB) / 20.0))
 
     def label(self) -> str:
         parts = [self.reaction.replace(" ", "-"), self.mode, self.grid.replace("/", "-")]
