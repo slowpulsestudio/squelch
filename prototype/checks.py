@@ -14,7 +14,7 @@ import sys
 import numpy as np
 from scipy.signal import hilbert, welch
 
-from . import filters, output_stage
+from . import audio_io, filters, output_stage
 from .params import Params
 from .scheduler import schedule
 
@@ -29,6 +29,14 @@ def _tone(freq: float, seconds: float = 1.0, sr: int = SR) -> np.ndarray:
 def _peak_frequency(x: np.ndarray, sr: int = SR) -> float:
     spectrum = np.abs(np.fft.rfft(x.mean(axis=1)))
     return float(np.fft.rfftfreq(len(x), 1.0 / sr)[int(np.argmax(spectrum))])
+
+
+def _source() -> str:
+    """A real loop if one is present, so end-to-end checks use real material."""
+    from pathlib import Path
+
+    found = sorted(Path("Input").glob("*.wav"))
+    return str(found[0]) if found else ""
 
 
 def _bed_controls(n: int):
@@ -687,6 +695,49 @@ def check_afterglow_is_independent() -> tuple[bool, str]:
     return ok, f"tail after the source stops: {quiet:.1f} -> {glowing:.1f} dB with AFTERGLOW"
 
 
+def check_ionize_moves_the_delivered_mix() -> tuple[bool, str]:
+    """IONIZE must still be moving by the time it reaches the output.
+
+    The control-level check passed while the delivered mix barely moved: DRIVE
+    compresses the loud side of a panned event harder than the quiet side and
+    squeezed 7.5dB of swing down to 3.6dB. Measure what comes out, not what
+    was asked for.
+    """
+    from . import engine
+    from .params import Params
+
+    dry, sr = audio_io.load(_source())
+    base = dict(
+        reaction="RADIATION", mode="GRID", grid="1/16", seed=6, volatility=0.2,
+        spread=0.6, toxicity=0.6, decay=0.35, contamination=0.2, afterglow=0.65,
+    )
+
+    def movement(on: bool) -> tuple[float, float]:
+        y, _ = engine.process(dry, sr, Params(**base, ionize=on, ionize_amount=0.9), 140.0)
+        # Measured above the mono bass band: everything below it is folded to
+        # centre on purpose, so including it just dilutes the reading with
+        # material that is never allowed to move.
+        y = filters.static_highpass(y, output_stage.STEREO_BASS_MONO_HZ, sr, q=0.7)
+        window = int(0.025 * sr)
+        balance = []
+        for i in range(len(y) // window):
+            block = y[i * window : (i + 1) * window]
+            left = np.sqrt(np.mean(block[:, 0] ** 2)) + 1e-12
+            right = np.sqrt(np.mean(block[:, 1] ** 2)) + 1e-12
+            balance.append(20.0 * np.log10(left / right))
+        balance = np.array(balance)
+        return float(balance.std()), float(np.mean(np.abs(balance) > 6.0) * 100.0)
+
+    off_std, off_hard = movement(False)
+    on_std, on_hard = movement(True)
+
+    ok = on_std > off_std * 2.0 and on_hard > 15.0
+    return ok, (
+        f"balance swing {off_std:.1f} -> {on_std:.1f} dB, "
+        f"hard-panned {off_hard:.0f}% -> {on_hard:.0f}% of the time"
+    )
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
@@ -702,6 +753,7 @@ CHECKS = [
     ("meltdown stages in order", check_meltdown_stages_in_order),
     ("meltdown cannot reach backwards", check_meltdown_cannot_reach_backwards),
     ("ionize scatters three axes", check_ionize_scatters_three_axes),
+    ("ionize moves the delivered mix", check_ionize_moves_the_delivered_mix),
     ("afterglow is independent", check_afterglow_is_independent),
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),

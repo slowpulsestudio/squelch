@@ -8,6 +8,7 @@ from scipy.ndimage import maximum_filter1d
 from . import filters, rng
 from .controls import Controls
 from .params import Params
+from .reverb import reverb
 
 #: The spectral point COLLIMATOR closes in on. Deliberately low-mid rather than
 #: centred in the audible band, to keep a focused beam warm instead of shrill.
@@ -24,6 +25,11 @@ WOBBLE_RATE_HZ = 6.0
 WOBBLE_MAX_DELAY_S = 0.0035
 WOBBLE_BURST_S = 0.09
 WOBBLE_CHANCE = 0.45
+
+#: AFTERGLOW's voicing. Damped well down so a long tail stays warm rather than
+#: hissing on top of the reaction.
+AFTERGLOW_DAMPING = 0.45
+AFTERGLOW_LEVEL = 0.9
 
 LIMITER_LOOKAHEAD_S = 0.005
 LIMITER_CEILING = 0.97
@@ -94,6 +100,8 @@ def _stereo_spread(x: np.ndarray, sr: int, amount: float) -> np.ndarray:
     side *= 1.0 + 2.2 * amount
 
     spread = np.stack([mid + side, mid - side], axis=1)
+    # Below STEREO_BASS_MONO_HZ stays mono unconditionally so the low end
+    # stays solid on a club system. Placement lives above it.
     return low.mean(axis=1)[:, None] + spread
 
 
@@ -202,6 +210,20 @@ def process(
     """
     y = drive(wet, p, profile.drive_weight, md.samples("drive") if md else None)
     y = collimate(y, sr, p)
+
+    # Placement runs after the saturation, not before it. A hard-panned event
+    # has one loud channel and one quiet one, and tanh compresses the loud one
+    # harder, so driving a placed signal squeezes most of the placement back
+    # out: measured 7.5dB of balance swing down to 3.6dB.
+    y = y * np.stack(
+        [filters.to_sample_rate(c.pan_gain[:, ch], len(y)) for ch in (0, 1)], axis=1
+    )
+
+    if p.afterglow > 0.0:
+        send = filters.to_sample_rate(c.send, len(y))[:, None]
+        glow = reverb(y * send, sr, decay=p.afterglow, damping=AFTERGLOW_DAMPING)
+        y = y + glow * (AFTERGLOW_LEVEL * p.afterglow)
+
     y = fallout(y, sr, p, profile, c)
     y = voice(y, sr)
     until = int(p.meltdown_at * sr) if (md is not None and md.active) else None

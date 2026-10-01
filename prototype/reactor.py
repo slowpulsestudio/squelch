@@ -52,6 +52,9 @@ IONIZE_SPECTRAL = 0.55
 #: Placement glides over this, so an event landing hard left does not click.
 PAN_SMOOTH_S = 0.004
 
+#: How far IONIZE opens the gaps between events so each one stands alone.
+IONIZE_ARTICULATION = 0.8
+
 #: AFTERGLOW's voicing. Damped well down so a long tail stays warm rather than
 #: hissing on top of the reaction.
 AFTERGLOW_DAMPING = 0.45
@@ -264,12 +267,13 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
     wet = filters.varying_ladder(x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat)
 
     depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * toxicity) * (1.0 - 0.6 * containment)
+    # IONIZE needs each transient to stand alone, so the gaps between events
+    # open up: riding on a continuous bed, a placed event has nothing to be
+    # distinct from.
+    ionize = p.ionize_amount if p.ionize else 0.0
+    depth = depth + ionize * IONIZE_ARTICULATION * (1.0 - depth)
     articulation = filters.to_sample_rate(1.0 - depth + depth * controls.env, len(x))
-    placement = np.stack(
-        [filters.to_sample_rate(controls.pan_gain[:, ch], len(x)) for ch in (0, 1)],
-        axis=1,
-    )
-    wet *= articulation[:, None] * placement
+    wet *= articulation[:, None]
 
     # SPREAD is how far a reaction travels in pitch, so it drives the wind as
     # well as the filter excursion.
@@ -280,10 +284,4 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
 
     wet = profile.post(wet, x, controls, p, sr)
     wet = contaminate(wet, x, controls, p, profile, sr, md)
-
-    if p.afterglow > 0.0:
-        send = filters.to_sample_rate(controls.send, len(x))[:, None]
-        glow = reverb(wet * send, sr, decay=p.afterglow, damping=AFTERGLOW_DAMPING)
-        wet = wet + glow * (AFTERGLOW_LEVEL * p.afterglow)
-
     return wet, controls, md
