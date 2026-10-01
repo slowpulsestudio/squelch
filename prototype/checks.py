@@ -236,6 +236,50 @@ def check_voicing_curve() -> tuple[bool, str]:
     return ok, f"55Hz {low:+.1f}, 260Hz {dip:+.1f}, 6kHz {harsh:+.1f}, 15kHz {air:+.1f} dB"
 
 
+def check_beaker_steps_a_bandpass() -> tuple[bool, str]:
+    """BEAKER must be a fully wet midrange bandpass that steps and holds.
+
+    A bandpass rejects below its centre as well as above, which is what
+    separates it from the lowpass the other reactions use.
+    """
+    from .params import Params
+    from .reactions import PROFILES
+    from .reactor import build_controls
+    from .scheduler import schedule
+
+    profile = PROFILES["BEAKER"]
+    assert profile.filter_mode == "bandpass" and profile.stepped
+
+    n = SR * 4
+    rng_ = np.random.default_rng(0)
+    noise = rng_.standard_normal((n, 2)) * 0.1
+    p = Params(reaction="BEAKER", mode="GRID", grid="1/8", seed=3, volatility=0.8)
+    events = schedule(noise, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
+    c = build_controls(events, n, SR, p, profile)
+
+    # Steps hold: the cutoff should be flat for most of its length, not gliding.
+    slope = np.abs(np.diff(np.log2(c.cutoff)))
+    flat = float(np.mean(slope < 1e-4)) * 100.0
+    centres = c.cutoff
+    in_mid = float(np.mean((centres > 250.0) & (centres < 2800.0))) * 100.0
+
+    out = filters.varying_bandpass(noise, c.cutoff, c.resonance, SR)
+    kwargs = dict(fs=SR, window="blackmanharris", nperseg=8192)
+    freqs, p_in = welch(noise.mean(axis=1), **kwargs)
+    _, p_out = welch(out.mean(axis=1), **kwargs)
+    response = 10.0 * np.log10((p_out + 1e-30) / (p_in + 1e-30))
+
+    def at(f: float) -> float:
+        return float(response[int(np.argmin(np.abs(freqs - f)))])
+
+    rejects_lows = at(80.0) < at(900.0) - 10.0
+    ok = flat > 70.0 and in_mid > 90.0 and rejects_lows
+    return ok, (
+        f"{flat:.0f}% held flat, {in_mid:.0f}% in midrange, "
+        f"80Hz {at(80.0):.0f}dB vs 900Hz {at(900.0):.0f}dB"
+    )
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
@@ -244,6 +288,7 @@ CHECKS = [
     ("pitch wind", check_pitch_wind),
     ("contamination scales", check_contamination_scales),
     ("only radiation ticks", check_only_radiation_ticks),
+    ("beaker steps a bandpass", check_beaker_steps_a_bandpass),
     ("house voicing curve", check_voicing_curve),
     ("scheduling determinism", check_scheduling_is_deterministic),
 ]

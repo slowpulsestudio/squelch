@@ -129,16 +129,19 @@ def _rbj_bandpass(fc: float, q: float, sr: int) -> tuple[np.ndarray, np.ndarray]
     return b / a[0], a / a[0]
 
 
-def varying_bandpass(x: np.ndarray, fc_ctrl: np.ndarray, q: float, sr: int) -> np.ndarray:
-    """A swept resonant bandpass, used to give noise beds a moving formant."""
+def varying_bandpass(
+    x: np.ndarray, fc_ctrl: np.ndarray, q: np.ndarray | float, sr: int
+) -> np.ndarray:
+    """A swept resonant bandpass. Q may be a constant or a control-rate array."""
     n, ch = x.shape
+    q_ctrl = q if isinstance(q, np.ndarray) else np.full(len(fc_ctrl), float(q))
     y = np.zeros_like(x)
     zi = np.zeros((2, ch))
     for i in range(len(fc_ctrl)):
         seg = x[i * BLOCK : (i + 1) * BLOCK]
         if seg.shape[0] == 0:
             break
-        b, a = _rbj_bandpass(fc_ctrl[i], q, sr)
+        b, a = _rbj_bandpass(fc_ctrl[i], q_ctrl[i], sr)
         seg, zi = lfilter(b, a, seg, axis=0, zi=zi)
         y[i * BLOCK : (i + 1) * BLOCK] = seg
     return y

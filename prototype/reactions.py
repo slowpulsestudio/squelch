@@ -33,6 +33,11 @@ class ReactionProfile:
     amp_floor: float
     #: How violently cutoff and Q jump between events, scaled by VOLATILITY.
     chaos: float
+    #: "ladder" for a 4-pole lowpass, "bandpass" for a resonant band.
+    filter_mode: str
+    #: When true the filter holds each event's frequency instead of sweeping to
+    #: it, so successive events read as steps rather than as a glide.
+    stepped: bool
     #: This reaction's share of the shared pitch wind, scaled by RANGE.
     wind_depth: float
     #: Delivered level of this reaction's noise bed at full CONTAMINATION,
@@ -254,18 +259,8 @@ def _sludge(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -
 
 
 def _bubble(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """Boiling: a second resonant peak that jumps to a new frequency per event."""
-    blocks = len(c.env)
-    spread = 0.3 + 0.7 * p.volatility
-    jump_oct = _held_random(c, p, 40, blocks) * 3.4 * spread
-    jump = 350.0 * np.power(2.0, 0.6 + jump_oct + 1.2 * c.env)
-    jump = filters.smooth(jump, 0.002, sr)
-
-    q_hold = 4.0 + 16.0 * p.exposure * (0.3 + 0.7 * _held_random(c, p, 41, blocks))
-    q_hold = filters.smooth(q_hold, 0.002, sr) * (1.0 - 0.6 * c.damping)
-
-    second = filters.varying_ladder(wet, jump, q_hold, sr, inner_sat=0.25)
-    return 0.5 * wet + 0.5 * second
+    """BEAKER's character is its stepping bandpass, which the reactor applies."""
+    return wet
 
 
 def _shift(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
@@ -289,6 +284,8 @@ PROFILES = {
         sub_event_bias=2.0,
         amp_floor=0.30,
         chaos=0.55,
+        filter_mode="ladder",
+        stepped=False,
         wind_depth=1.0,
         noise_full_level=0.0398,
         noise=_geiger_ticks,
@@ -306,6 +303,8 @@ PROFILES = {
         sub_event_bias=1.0,
         amp_floor=0.45,
         chaos=0.25,
+        filter_mode="ladder",
+        stepped=False,
         wind_depth=0.45,
         noise_full_level=0.1259,
         noise=_fission_shimmer,
@@ -323,6 +322,8 @@ PROFILES = {
         sub_event_bias=0.5,
         amp_floor=0.55,
         chaos=0.70,
+        filter_mode="ladder",
+        stepped=False,
         wind_depth=0.85,
         noise_full_level=0.1995,
         noise=_sludge_rumble,
@@ -330,16 +331,18 @@ PROFILES = {
     ),
     "BEAKER": ReactionProfile(
         name="BEAKER",
-        cutoff_lo_hz=480.0,
-        cutoff_hi_hz=4200.0,
+        cutoff_lo_hz=300.0,
+        cutoff_hi_hz=2600.0,
         decay_lo_s=0.012,
         decay_hi_s=0.16,
-        resonance_lo=5.0,
-        resonance_hi=22.0,
+        resonance_lo=4.0,
+        resonance_hi=16.0,
         inner_sat=0.40,
         sub_event_bias=3.0,
         amp_floor=0.28,
         chaos=1.0,
+        filter_mode="bandpass",
+        stepped=True,
         wind_depth=0.6,
         noise_full_level=0.1000,
         noise=_beaker_fizz,
@@ -357,6 +360,8 @@ PROFILES = {
         sub_event_bias=1.3,
         amp_floor=0.32,
         chaos=0.6,
+        filter_mode="ladder",
+        stepped=False,
         wind_depth=1.0,
         noise_full_level=0.1585,
         noise=_alien_whirr,

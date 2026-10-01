@@ -118,11 +118,17 @@ def build_controls(
         env = _event_envelope(c1 - c0, max(int(ATTACK_S * ctrl_sr), 1), tau)
 
         env_total[c0:c1] = np.maximum(env_total[c0:c1], env)
-        # Overlapping events take the most extreme value rather than averaging.
-        # Averaging meant raising REACTIVITY diluted the sweep instead of
-        # intensifying it, capping the excursion at ~55% of its span.
-        cut_oct[c0:c1] = np.maximum(cut_oct[c0:c1], base_oct + (peak - base_oct) * env)
-        resonance[c0:c1] = np.maximum(resonance[c0:c1], q * env)
+        if profile.stepped:
+            # Later events overwrite earlier ones so each holds its frequency
+            # until the next arrives, which is what makes it read as a step.
+            cut_oct[c0:c1] = peak
+            resonance[c0:c1] = q
+        else:
+            # Overlapping events take the most extreme value rather than
+            # averaging. Averaging meant raising REACTIVITY diluted the sweep
+            # instead of intensifying it, capping it at ~55% of its span.
+            cut_oct[c0:c1] = np.maximum(cut_oct[c0:c1], base_oct + (peak - base_oct) * env)
+            resonance[c0:c1] = np.maximum(resonance[c0:c1], q * env)
 
     # Anti-step smoothing runs always; RODS adds much heavier damping on top.
     cut_oct = filters.smooth(cut_oct, ANTI_STEP_S, sr)
@@ -150,7 +156,14 @@ def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, 
     controls = build_controls(events, len(x), sr, p, profile)
 
     inner_sat = profile.inner_sat * (0.3 + 0.7 * p.squelch) * (1.0 - 0.7 * p.rods)
-    wet = filters.varying_ladder(x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat)
+    if profile.filter_mode == "bandpass":
+        wet = filters.varying_bandpass(x, controls.cutoff, controls.resonance, sr)
+        if inner_sat > 0.0:
+            wet = np.tanh(wet * (1.0 + inner_sat * 6.0)) / (1.0 + inner_sat * 2.0)
+    else:
+        wet = filters.varying_ladder(
+            x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat
+        )
 
     depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * p.squelch) * (1.0 - 0.6 * p.rods)
     amp = filters.to_sample_rate(1.0 - depth + depth * controls.env, len(x))
