@@ -807,6 +807,46 @@ def check_drive_does_not_alias() -> tuple[bool, str]:
     return ok, f"{plain:.1f} dB at the base rate, {clean:.1f} dB oversampled"
 
 
+def check_drive_responds_to_input_level() -> tuple[bool, str]:
+    """How hard the input hits the curve is part of the instrument.
+
+    The knee is a fixed threshold, so a quieter input reaches less of it and
+    the saturation backs off on its own, the way it does in a circuit. This is
+    a deliberate choice rather than an oversight: nothing upstream may
+    normalise the signal before the drive stage, or trimming the input would
+    stop being a tone control and the plugin would sound the same however it
+    is fed.
+    """
+    import soundfile as sf
+
+    from . import reactions, reactor, saturation
+    from .params import Params
+
+    source, sr = sf.read(_source(), always_2d=True, dtype="float64")
+    p = Params(
+        reaction="RADIATION", mode="GRID", grid="1/16",
+        drive=0.75, toxicity=0.5, seed=3,
+    )
+    profile = reactions.PROFILES[p.reaction]
+    gain = 1.0 + 11.0 * (p.drive**0.6) * profile.drive_weight
+
+    def bent(trim_db: float) -> float:
+        trimmed = source * (10.0 ** (trim_db / 20.0))
+        wet, controls, md = reactor.process(trimmed, sr, p, 140.0)
+        hot = reactions.contaminate(wet, trimmed, controls, p, profile, sr, md)
+        return 100.0 * float(np.mean(np.abs(hot * gain) > saturation.KNEE))
+
+    loud = bent(0.0)
+    middle = bent(-12.0)
+    quiet = bent(-30.0)
+
+    ok = loud > 60.0 and 10.0 < middle < loud - 20.0 and quiet < 1.0
+    return ok, (
+        f"{loud:.0f}% of samples saturate at full level, {middle:.0f}% at -12 dB, "
+        f"{quiet:.0f}% at -30 dB"
+    )
+
+
 def check_quiet_material_is_untouched() -> tuple[bool, str]:
     """Below the knee the curve must be exactly linear.
 
@@ -936,6 +976,7 @@ CHECKS = [
     ("limiter catches spike", check_limiter_catches_spike),
     ("limiter releases gently", check_limiter_releases_gently),
     ("drive does not alias", check_drive_does_not_alias),
+    ("drive responds to input level", check_drive_responds_to_input_level),
     ("quiet material is untouched", check_quiet_material_is_untouched),
     ("clip trades lookahead for hardness", check_clip_trades_lookahead_for_hardness),
     ("frequency shift", check_frequency_shift),
