@@ -41,10 +41,13 @@ ACCENT_RESONANCE = 1.30
 UNACCENTED_LEVEL = 0.74
 SLIDE_S = 0.060
 
+#: How far VOLATILITY bends an event envelope away from a plain exponential.
+SHAPE_RANGE = 0.8
 
-def _event_envelope(length: int, attack: int, tau: float) -> np.ndarray:
+
+def _event_envelope(length: int, attack: int, tau: float, curve: float = 1.0) -> np.ndarray:
     t = np.arange(length, dtype=float)
-    env = np.exp(-t / max(tau, 1e-6))
+    env = np.power(np.exp(-t / max(tau, 1e-6)), curve)
     if attack > 0:
         ramp = np.minimum(t[:attack] / attack, 1.0)
         env[:attack] *= ramp
@@ -87,7 +90,7 @@ def build_controls(
     resonance = np.zeros(nb)
 
     decay_s = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
-    hold = p.half_life * 0.85
+    hold = p.half_life * 0.85 * profile.persistence
 
     excursion = span_oct * p.range
     excursion *= 0.55 + 0.45 * squelch_depth
@@ -136,7 +139,11 @@ def build_controls(
             continue
 
         tau = this_decay * ctrl_sr
-        env = _event_envelope(c1 - c0, max(int(ATTACK_S * ctrl_sr), 1), tau)
+        # VOLATILITY varies the envelope's shape and attack, not just its
+        # length: a soft swell and a sharp pluck are different events.
+        curve = 1.0 + SHAPE_RANGE * p.volatility * (ev.shape * 2.0 - 1.0)
+        attack = ATTACK_S * (1.0 + 2.5 * p.volatility * ev.shape)
+        env = _event_envelope(c1 - c0, max(int(attack * ctrl_sr), 1), tau, curve)
         accent_level = 1.0 if (not acid or ev.accent) else UNACCENTED_LEVEL
 
         env_total[c0:c1] = np.maximum(env_total[c0:c1], env * accent_level)

@@ -42,15 +42,15 @@ VOICE_AIR_HZ = 15000.0
 VOICE_AIR_DB = 1.0
 
 
-def drive(x: np.ndarray, p: Params) -> np.ndarray:
+def drive(x: np.ndarray, p: Params, weight: float = 1.0) -> np.ndarray:
     """Saturation with the level change taken back out.
 
     DRIVE is a contamination control, not a gain control, so the RMS it adds is
-    removed afterwards.
+    removed afterwards. The weight is the reaction's own appetite for it.
     """
     if p.drive <= 0.0:
         return x
-    amount = np.power(p.drive, 0.6)
+    amount = np.power(p.drive, 0.6) * weight
     gain = 1.0 + 11.0 * amount
     before = np.sqrt(np.mean(x**2)) + 1e-12
     y = np.tanh(x * gain)
@@ -187,7 +187,7 @@ def process(
     reaction decorrelates phase against the dry signal, so the mix can peak
     higher than either part on its own.
     """
-    y = drive(wet, p)
+    y = drive(wet, p, profile.drive_weight)
     y = collimate(y, sr, p)
     y = fallout(y, sr, p, profile, c)
     y = voice(y, sr)

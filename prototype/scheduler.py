@@ -26,6 +26,11 @@ FREE_RATE_RATIO = 0.7213
 ACCENT_CHANCE = 0.30
 SLIDE_CHANCE = 0.30
 
+#: How far CONTAINMENT can thin out the event stream, and how far VOLATILITY
+#: can displace an individual event from its nominal position.
+DENSITY_SUPPRESSION = 0.55
+TIMING_JITTER = 0.18
+
 
 @dataclass
 class Event:
@@ -35,6 +40,8 @@ class Event:
     decay_scale: float
     tone: float
     pan: float
+    #: Envelope curvature, 0..1. Low is a soft swell, high is a sharp pluck.
+    shape: float
     #: Hits harder — louder, with deeper filter envelope and more resonance.
     accent: bool
     #: Glides into this event's frequency instead of jumping to it.
@@ -134,13 +141,21 @@ def schedule(x: np.ndarray, sr: int, p: Params, bpm: float, sub_event_bias: floa
     step = _step_seconds(p, bpm)
     events: list[Event] = []
 
+    # CONTAINMENT suppresses the reactor, and prompt.md lists event density
+    # among the things it damps, not just the depth of what fires.
+    probability = p.probability * (1.0 - DENSITY_SUPPRESSION * p.containment)
+    density = 1.0 - DENSITY_SUPPRESSION * p.containment
+
     for k, t in _base_times(x, sr, p, bpm):
-        if rng.urand(p.seed, 1, k) >= p.probability:
+        if rng.urand(p.seed, 1, k) >= probability:
             continue
 
-        count = 1 + int(round(p.reactivity * sub_event_bias * (MAX_SUB_EVENTS - 1)))
+        count = 1 + int(round(p.reactivity * sub_event_bias * density * (MAX_SUB_EVENTS - 1)))
         for s in range(count):
             offset = (s / count) * step * (0.9 if p.mode != "INPUT" else 0.5)
+            # VOLATILITY unsettles the timing itself, not only the sound. This
+            # is micro-timing per event, distinct from FLUX's swing.
+            offset += step * TIMING_JITTER * p.volatility * rng.ubipolar(p.seed, 7, k, s)
             start = int((t + offset) * sr)
             # FLUX jitter can displace the first step before the start of the
             # render, which is not a position the reactor can fire at.
@@ -154,6 +169,7 @@ def schedule(x: np.ndarray, sr: int, p: Params, bpm: float, sub_event_bias: floa
                     decay_scale=1.0 + p.volatility * rng.ubipolar(p.seed, 2, k, s),
                     tone=rng.urand(p.seed, 3, k, s),
                     pan=rng.ubipolar(p.seed, 4, k, s),
+                    shape=rng.urand(p.seed, 8, k, s),
                     accent=rng.urand(p.seed, 5, k, s) < ACCENT_CHANCE,
                     slide=rng.urand(p.seed, 6, k, s) < SLIDE_CHANCE,
                 )

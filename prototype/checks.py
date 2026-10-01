@@ -478,6 +478,53 @@ def check_beds_follow_the_input() -> tuple[bool, str]:
     return ok, f"bed is {ratio:.1f} dB louder while the input plays than in the gaps"
 
 
+def check_containment_thins_events() -> tuple[bool, str]:
+    """CONTAINMENT must reduce event density, which prompt.md lists explicitly."""
+    from .params import Params
+    from .scheduler import schedule
+
+    n = SR * 7
+    silence = np.zeros((n, 2))
+    counts = []
+    for amount in (0.0, 0.5, 1.0):
+        p = Params(
+            mode="GRID", grid="1/16", probability=0.9, reactivity=0.6,
+            containment=amount, seed=3,
+        )
+        counts.append(len(schedule(silence, SR, p, 140.0, sub_event_bias=2.0)))
+
+    ok = counts[0] > counts[1] > counts[2] and counts[2] < counts[0] * 0.4
+    return ok, f"{counts[0]} -> {counts[1]} -> {counts[2]} events as CONTAINMENT closes"
+
+
+def check_volatility_moves_timing() -> tuple[bool, str]:
+    """VOLATILITY must unsettle the timing, not only the sound.
+
+    Measured against the grid, not by pairing up two event lists: the lists are
+    sorted by time, so displacing events reorders them and pairing compares
+    different events, which reads as a full step of movement at any setting.
+    """
+    from .params import GRID_DIVISIONS, Params
+    from .scheduler import schedule
+
+    n = SR * 7
+    silence = np.zeros((n, 2))
+    step = GRID_DIVISIONS["1/16"] * 60.0 / 140.0
+
+    offsets = []
+    for amount in (0.0, 1.0):
+        p = Params(
+            mode="GRID", grid="1/16", probability=1.0, reactivity=0.0,
+            volatility=amount, seed=3,
+        )
+        starts = np.array([e.start for e in schedule(silence, SR, p, 140.0, 1.0)]) / SR
+        deviation = starts % step
+        offsets.append(float(np.minimum(deviation, step - deviation).mean() * 1000.0))
+
+    ok = offsets[0] < 0.1 and offsets[1] > 5.0
+    return ok, f"{offsets[0]:.2f} ms off-grid at VOLATILITY 0, {offsets[1]:.2f} ms at 1"
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
@@ -488,6 +535,8 @@ CHECKS = [
     ("only radiation ticks", check_only_radiation_ticks),
     ("beds follow the input", check_beds_follow_the_input),
     ("events are panned", check_events_are_panned),
+    ("containment thins events", check_containment_thins_events),
+    ("volatility moves timing", check_volatility_moves_timing),
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("range drives each character", check_range_drives_each_character),

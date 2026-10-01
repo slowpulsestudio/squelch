@@ -62,6 +62,10 @@ class ReactionProfile:
     #: staccato midrange wobble. Reactions can have some of both.
     spread_weight: float
     wobble_weight: float
+    #: This reaction's appetite for DRIVE, and how strongly HALF-LIFE carries
+    #: its filter state from one reaction to the next.
+    drive_weight: float
+    persistence: float
     #: Delivered level of this reaction's noise bed at full CONTAMINATION,
     #: relative to the output's own RMS. Half travel lands 12dB below it.
     noise_full_level: float
@@ -340,6 +344,8 @@ PROFILES = {
         wind_depth=1.0,
         spread_weight=0.3,
         wobble_weight=1.0,
+        drive_weight=0.90,
+        persistence=0.90,
         noise_full_level=0.0398,
         noise=_geiger_ticks,
         post=_passthrough,
@@ -360,6 +366,8 @@ PROFILES = {
         wind_depth=0.45,
         spread_weight=1.0,
         wobble_weight=0.25,
+        drive_weight=0.70,
+        persistence=0.60,
         noise_full_level=0.1259,
         noise=_fission_shimmer,
         post=_phaser,
@@ -380,6 +388,8 @@ PROFILES = {
         wind_depth=0.85,
         spread_weight=0.2,
         wobble_weight=0.9,
+        drive_weight=1.30,
+        persistence=1.00,
         noise_full_level=0.1995,
         noise=_sludge_rumble,
         post=_sludge,
@@ -400,6 +410,10 @@ PROFILES = {
         wind_depth=0.6,
         spread_weight=0.35,
         wobble_weight=0.55,
+        drive_weight=1.00,
+        # A 303 retriggers cleanly; heavy carry-over blunts the per-note
+        # envelope that the whole voice depends on.
+        persistence=0.45,
         # Dense continuous fizz in the most sensitive part of the ear's range
         # reads louder than its level suggests, so it sits below the others.
         noise_full_level=0.0708,
@@ -422,6 +436,8 @@ PROFILES = {
         wind_depth=1.0,
         spread_weight=0.5,
         wobble_weight=1.0,
+        drive_weight=0.80,
+        persistence=0.70,
         noise_full_level=0.1585,
         noise=_alien_whirr,
         post=_shift,
