@@ -306,6 +306,60 @@ def check_acid_keeps_the_low_end() -> tuple[bool, str]:
     return ok, f"80Hz {at(80.0):+.1f} dB, 300Hz {at(300.0):+.1f} dB, 5kHz {at(5000.0):+.1f} dB"
 
 
+def check_range_drives_each_character() -> tuple[bool, str]:
+    """RANGE must reach zero and scale up on each reaction's own movement.
+
+    Not just the filter sweep: ALIEN's zaps, TOXIC SLUDGE's bubble rise and
+    FISSION's separation of its two halves all answer to it.
+    """
+    from .params import Params
+    from .reactions import PROFILES
+
+    n = SR * 2
+    source = _tone(300.0, 2.0) * 0.4
+    c = _bed_controls(n)
+    results = {}
+
+    def difference(reaction: str, amount: float) -> float:
+        p = Params(reaction=reaction, range=amount, squelch=0.8, seed=0)
+        out = PROFILES[reaction].post(source, source, c, p, SR)
+        delta = out - source
+        return 20.0 * np.log10(
+            (np.sqrt(np.mean(delta**2)) + 1e-15) / (np.sqrt(np.mean(source**2)) + 1e-12)
+        )
+
+    # ALIEN's shift must be absent at zero and present when opened.
+    results["ALIEN"] = (difference("ALIEN", 0.0), difference("ALIEN", 1.0))
+
+    # TOXIC SLUDGE's notches must stop rising at zero.
+    travel = {}
+    for amount in (0.0, 1.0):
+        slow = filters.smooth(c.env, 0.08, SR)
+        notch = 260.0 * np.power(2.0, 2.6 * amount * slow)
+        travel[amount] = float(np.log2(notch.max() / notch.min()) * 12.0)
+
+    # FISSION's halves must sit together at zero and apart when opened.
+    separation = {}
+    for amount in (0.0, 1.0):
+        p = Params(reaction="FISSION", range=amount, squelch=0.8, exposure=0.7, seed=0)
+        out = PROFILES["FISSION"].post(source, source, c, p, SR)
+        left, right = out[:, 0], out[:, 1]
+        separation[amount] = float(
+            np.corrcoef(left, right)[0, 1]
+        )
+
+    alien_ok = results["ALIEN"][0] < -100.0 and results["ALIEN"][1] > -20.0
+    sludge_ok = travel[0.0] < 0.1 and travel[1.0] > 20.0
+    fission_ok = separation[0.0] > 0.9 and separation[1.0] < separation[0.0] - 0.1
+
+    ok = alien_ok and sludge_ok and fission_ok
+    return ok, (
+        f"ALIEN zaps {results['ALIEN'][0]:.0f} -> {results['ALIEN'][1]:.0f} dB, "
+        f"SLUDGE rise {travel[0.0]:.0f} -> {travel[1.0]:.0f} st, "
+        f"FISSION L/R corr {separation[0.0]:.2f} -> {separation[1.0]:.2f}"
+    )
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
@@ -316,6 +370,7 @@ CHECKS = [
     ("only radiation ticks", check_only_radiation_ticks),
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),
+    ("range drives each character", check_range_drives_each_character),
     ("house voicing curve", check_voicing_curve),
     ("scheduling determinism", check_scheduling_is_deterministic),
 ]

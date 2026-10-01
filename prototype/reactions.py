@@ -18,6 +18,18 @@ from . import filters, rng
 from .controls import Controls
 from .params import Params
 
+# RANGE drives each reaction's own signature movement, not only the filter
+# sweep, and every one of them reaches zero when RANGE does.
+#: How far FISSION's two halves pull apart from each other.
+FISSION_BASE_HZ = 220.0
+FISSION_SWEEP_OCT = 3.2
+FISSION_SEPARATION_OCT = 2.4
+#: How far TOXIC SLUDGE's bubbles rise before they dissolve.
+SLUDGE_BASE_HZ = 260.0
+SLUDGE_RISE_OCT = 2.6
+#: How far ALIEN's zaps travel.
+ALIEN_SHIFT_HZ = 1100.0
+
 
 @dataclass
 class ReactionProfile:
@@ -119,7 +131,10 @@ def _fission_shimmer(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.nda
 
     bed = np.zeros_like(wet)
     for i, octaves in enumerate((-0.65, 0.0, 0.8)):
-        band = filters.varying_bandpass(noise, 1400.0 * np.power(2.0, spread * octaves * 1.6), 9.0, sr)
+        divergence = octaves * (0.5 + 1.5 * p.range)
+        band = filters.varying_bandpass(
+            noise, 1400.0 * np.power(2.0, spread * divergence), 9.0, sr
+        )
         pan = 0.5 + 0.5 * np.cos(i * 2.1)
         bed += band * np.array([pan, 1.0 - pan])
 
@@ -231,26 +246,36 @@ def contaminate(
 
 
 def _phaser(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """Splitting: a swept allpass chain, run per channel in opposite directions."""
-    sweep = 220.0 * np.power(2.0, 4.2 * c.env)
+    """Splitting: two allpass chains pulled apart in frequency by RANGE.
+
+    RANGE is how far the split components separate. At zero both channels sweep
+    together and the structure is still whole; opened up they diverge by
+    FISSION_SEPARATION_OCT and read as two unstable halves.
+    """
+    sweep = FISSION_BASE_HZ * np.power(2.0, FISSION_SWEEP_OCT * c.env)
+    separation = np.power(2.0, 0.5 * FISSION_SEPARATION_OCT * p.range)
     feedback = 0.72 * p.exposure * (1.0 - c.damping)
-    left = filters.varying_allpass_chain(wet[:, :1], sweep, sr, stages=6, feedback=feedback)
-    right = filters.varying_allpass_chain(wet[:, 1:], sweep[::-1], sr, stages=6, feedback=feedback)
-    phased = np.concatenate([left, right], axis=1)
-    return 0.5 * wet + 0.5 * phased
+
+    left = filters.varying_allpass_chain(
+        wet[:, :1], sweep / separation, sr, stages=6, feedback=feedback
+    )
+    right = filters.varying_allpass_chain(
+        wet[:, 1:], sweep * separation, sr, stages=6, feedback=feedback
+    )
+    return 0.5 * wet + 0.5 * np.concatenate([left, right], axis=1)
 
 
 def _sludge(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
     """Submerged: swept notches instead of peaks, under an octave-down body.
 
     Inverted resonance reads as hollow and underwater where a resonant peak
-    would read as acidic.
+    would read as acidic. RANGE is how far the bubbles rise.
     """
     sub = filters.static_lowpass(filters.octave_down(wet), 180.0, sr, q=0.7)
     body = wet + sub * (0.45 * p.squelch * (1.0 - c.damping))
 
     slow = filters.smooth(c.env, 0.08, sr)
-    notch = 260.0 * np.power(2.0, 1.8 * slow)
+    notch = SLUDGE_BASE_HZ * np.power(2.0, SLUDGE_RISE_OCT * p.range * slow)
     y = filters.varying_notch(body, notch, 1.6, sr)
     y = filters.varying_notch(y, notch * 1.9, 1.6, sr)
     y = filters.static_lowpass(y, 900.0 + 1200.0 * p.squelch, sr, q=0.7)
@@ -263,9 +288,8 @@ def _bubble(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -
 
 
 def _shift(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """Non-terrestrial: single-sideband frequency sweeps tracking each event."""
-    depth = 60.0 + 900.0 * p.range
-    shifted = filters.frequency_shift(wet, c.env * depth, sr)
+    """Non-terrestrial: single-sideband zaps whose reach is set by RANGE."""
+    shifted = filters.frequency_shift(wet, c.env * ALIEN_SHIFT_HZ * p.range, sr)
     amount = 0.55 * p.squelch * (1.0 - c.damping)
     return (1.0 - amount) * wet + amount * shifted
 
