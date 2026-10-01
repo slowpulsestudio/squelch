@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 
 import numpy as np
-from scipy.signal import welch
+from scipy.signal import hilbert, welch
 
 from . import filters, output_stage
 from .params import Params
@@ -360,6 +360,64 @@ def check_range_drives_each_character() -> tuple[bool, str]:
     )
 
 
+def check_fallout_disperses_per_reaction() -> tuple[bool, str]:
+    """FALLOUT must widen FISSION and wobble the others, and do nothing at zero.
+
+    Width is measured as the side/mid energy ratio; wobble as how much the
+    midrange's own level moves, since a gated vibrato modulates it.
+    """
+    from . import output_stage
+    from .params import Params
+    from .reactions import PROFILES
+
+    n = SR * 2
+    noise = np.random.default_rng(0).standard_normal((n, 2)) * 0.1
+    tone = _tone(1000.0, 2.0) * 0.5
+    c = _bed_controls(n)
+
+    def width(x: np.ndarray) -> float:
+        mid = x.mean(axis=1)
+        side = (x[:, 0] - x[:, 1]) * 0.5
+        return float(np.sqrt(np.mean(side**2)) / (np.sqrt(np.mean(mid**2)) + 1e-12))
+
+    def pitch_deviation(x: np.ndarray) -> float:
+        """Cents of instantaneous pitch movement on a steady midrange tone.
+
+        Measured on frequency, not on level: the stereo spread also modulates
+        the midrange's level, so a level-based measure credits spreading as
+        wobble and reports more of it on FISSION than on RADIATION.
+        """
+        analytic = hilbert(x.mean(axis=1))
+        phase = np.unwrap(np.angle(analytic))
+        freq = np.diff(phase) * SR / (2.0 * np.pi)
+        freq = freq[int(0.05 * SR) : -int(0.05 * SR)]
+        return float(np.std(1200.0 * np.log2(np.clip(freq, 50.0, None) / 1000.0)))
+
+    def run(source: np.ndarray, reaction: str, amount: float) -> np.ndarray:
+        p = Params(reaction=reaction, fallout=amount, seed=1)
+        return output_stage.fallout(source, SR, p, PROFILES[reaction], c)
+
+    untouched = np.allclose(run(noise, "FISSION", 0.0), noise)
+
+    fission_width = width(run(noise, "FISSION", 1.0)) / (width(noise) + 1e-12)
+    radiation_width = width(run(noise, "RADIATION", 1.0)) / (width(noise) + 1e-12)
+    radiation_pitch = pitch_deviation(run(tone, "RADIATION", 1.0))
+    fission_pitch = pitch_deviation(run(tone, "FISSION", 1.0))
+    baseline_pitch = pitch_deviation(tone)
+
+    ok = (
+        untouched
+        and fission_width > radiation_width * 1.5
+        and radiation_pitch > fission_pitch * 1.5
+        and fission_pitch > baseline_pitch
+    )
+    return ok, (
+        f"off=untouched {untouched}, width FISSION x{fission_width:.2f} vs "
+        f"RADIATION x{radiation_width:.2f}, pitch move RADIATION {radiation_pitch:.0f} "
+        f"vs FISSION {fission_pitch:.0f} cents (dry {baseline_pitch:.0f})"
+    )
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
@@ -371,6 +429,7 @@ CHECKS = [
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("range drives each character", check_range_drives_each_character),
+    ("fallout disperses per reaction", check_fallout_disperses_per_reaction),
     ("house voicing curve", check_voicing_curve),
     ("scheduling determinism", check_scheduling_is_deterministic),
 ]

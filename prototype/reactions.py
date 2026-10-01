@@ -51,6 +51,10 @@ class ReactionProfile:
     voice: str
     #: This reaction's share of the shared pitch wind, scaled by RANGE.
     wind_depth: float
+    #: How FALLOUT disperses this reaction: across the stereo field, or as a
+    #: staccato midrange wobble. Reactions can have some of both.
+    spread_weight: float
+    wobble_weight: float
     #: Delivered level of this reaction's noise bed at full CONTAMINATION,
     #: relative to the output's own RMS. Half travel lands 12dB below it.
     noise_full_level: float
@@ -309,6 +313,8 @@ PROFILES = {
         chaos=0.55,
         voice="sweep",
         wind_depth=1.0,
+        spread_weight=0.3,
+        wobble_weight=1.0,
         noise_full_level=0.0398,
         noise=_geiger_ticks,
         post=_passthrough,
@@ -327,6 +333,8 @@ PROFILES = {
         chaos=0.25,
         voice="sweep",
         wind_depth=0.45,
+        spread_weight=1.0,
+        wobble_weight=0.25,
         noise_full_level=0.1259,
         noise=_fission_shimmer,
         post=_phaser,
@@ -345,6 +353,8 @@ PROFILES = {
         chaos=0.70,
         voice="sweep",
         wind_depth=0.85,
+        spread_weight=0.2,
+        wobble_weight=0.9,
         noise_full_level=0.1995,
         noise=_sludge_rumble,
         post=_sludge,
@@ -363,6 +373,8 @@ PROFILES = {
         chaos=0.45,
         voice="acid",
         wind_depth=0.6,
+        spread_weight=0.35,
+        wobble_weight=0.55,
         noise_full_level=0.1000,
         noise=_beaker_fizz,
         post=_bubble,
@@ -381,6 +393,8 @@ PROFILES = {
         chaos=0.6,
         voice="sweep",
         wind_depth=1.0,
+        spread_weight=0.5,
+        wobble_weight=1.0,
         noise_full_level=0.1585,
         noise=_alien_whirr,
         post=_shift,

@@ -7,6 +7,7 @@ import numpy as np
 from . import output_stage, reactor
 from .controls import Controls
 from .params import Params
+from .reactions import PROFILES
 
 
 def process(
@@ -14,5 +15,5 @@ def process(
 ) -> tuple[np.ndarray, Controls]:
     """INPUT -> reactor -> DRIVE -> COLLIMATOR -> FALLOUT -> mix -> peak safety."""
     wet, controls = reactor.process(x, sr, p, bpm)
-    y = output_stage.process(wet, x, sr, p, mix=mix)
+    y = output_stage.process(wet, x, sr, p, PROFILES[p.reaction], controls, mix=mix)
     return y, controls

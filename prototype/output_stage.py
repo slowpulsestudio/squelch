@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import maximum_filter1d
 
-from . import filters
+from . import filters, rng
+from .controls import Controls
 from .params import Params
 
 #: The spectral point COLLIMATOR closes in on. Deliberately low-mid rather than
@@ -14,6 +15,15 @@ COLLIMATOR_CENTRE_HZ = 650.0
 
 #: Below this, FALLOUT leaves the signal mono so club systems stay solid.
 STEREO_BASS_MONO_HZ = 150.0
+
+#: The staccato midrange wobble FALLOUT produces on reactions that disperse in
+#: pitch rather than in space.
+WOBBLE_LO_HZ = 300.0
+WOBBLE_HI_HZ = 2500.0
+WOBBLE_RATE_HZ = 6.0
+WOBBLE_MAX_DELAY_S = 0.0035
+WOBBLE_BURST_S = 0.09
+WOBBLE_CHANCE = 0.45
 
 LIMITER_LOOKAHEAD_S = 0.005
 LIMITER_CEILING = 0.97
@@ -60,14 +70,14 @@ def collimate(x: np.ndarray, sr: int, p: Params) -> np.ndarray:
     return filters.static_lowpass(y, lp, sr, q=q)
 
 
-def fallout(x: np.ndarray, sr: int, p: Params) -> np.ndarray:
-    """Spread the reaction across the stereo field, keeping the bass centred."""
-    if p.fallout <= 0.0:
+def _stereo_spread(x: np.ndarray, sr: int, amount: float) -> np.ndarray:
+    """Disperse into the stereo field, keeping the bass centred."""
+    if amount <= 0.0:
         return x
     low = filters.static_lowpass(x, STEREO_BASS_MONO_HZ, sr)
     high = x - low
 
-    delay = int(p.fallout * 0.004 * sr)
+    delay = int(amount * 0.004 * sr)
     if delay > 0:
         shifted = np.zeros_like(high)
         shifted[:, 0] = high[:, 0]
@@ -76,10 +86,49 @@ def fallout(x: np.ndarray, sr: int, p: Params) -> np.ndarray:
 
     mid = high.mean(axis=1)
     side = (high[:, 0] - high[:, 1]) * 0.5
-    side *= 1.0 + 2.2 * p.fallout
+    side *= 1.0 + 2.2 * amount
 
     spread = np.stack([mid + side, mid - side], axis=1)
     return low.mean(axis=1)[:, None] + spread
+
+
+def _mid_wobble(x: np.ndarray, sr: int, amount: float, c: Controls) -> np.ndarray:
+    """Staccato vibrato on the midrange only.
+
+    Dispersion for reactions that should stay put in the stereo field: the
+    material scatters in pitch instead of in space. Gated to short bursts on a
+    subset of events so it reads as rhythmic rather than as a constant warble.
+    """
+    if amount <= 0.0 or len(c.env) == 0:
+        return x
+
+    blocks = len(c.env)
+    ctrl_sr = sr / filters.BLOCK
+    gate = np.zeros(blocks)
+    burst = max(int(WOBBLE_BURST_S * ctrl_sr), 1)
+    for i, start in enumerate(np.clip(c.starts // filters.BLOCK, 0, blocks - 1)):
+        if rng.urand(1, 70, i) < WOBBLE_CHANCE:
+            gate[start : start + burst] = 1.0
+    gate = filters.smooth(gate, 0.004, sr)
+
+    lfo = 0.5 + 0.5 * np.sin(2.0 * np.pi * WOBBLE_RATE_HZ * np.arange(blocks) / ctrl_sr)
+
+    mid = filters.static_highpass(x, WOBBLE_LO_HZ, sr, q=0.7)
+    mid = filters.static_lowpass(mid, WOBBLE_HI_HZ, sr, q=0.7)
+    rest = x - mid
+
+    wobbled = filters.pitch_wind(mid, lfo * gate * amount, sr, WOBBLE_MAX_DELAY_S)
+    return rest + wobbled
+
+
+def fallout(x: np.ndarray, sr: int, p: Params, profile, c: Controls) -> np.ndarray:
+    """FALLOUT disperses the reaction, in whichever way suits the reaction.
+
+    FISSION scatters across the stereo field because splitting is what it does;
+    the others scatter in pitch instead, so they stay centred and physical.
+    """
+    y = _stereo_spread(x, sr, p.fallout * profile.spread_weight)
+    return _mid_wobble(y, sr, p.fallout * profile.wobble_weight, c)
 
 
 def match_rms(y: np.ndarray, reference: np.ndarray) -> np.ndarray:
@@ -123,7 +172,15 @@ def peak_limit(x: np.ndarray, sr: int) -> np.ndarray:
     return delayed * gain[:, None]
 
 
-def process(wet: np.ndarray, dry: np.ndarray, sr: int, p: Params, mix: float = 1.0) -> np.ndarray:
+def process(
+    wet: np.ndarray,
+    dry: np.ndarray,
+    sr: int,
+    p: Params,
+    profile,
+    c: Controls,
+    mix: float = 1.0,
+) -> np.ndarray:
     """Run the output chain, blend with dry, then protect the peaks.
 
     Peak safety runs after the blend rather than on the wet path alone: the
@@ -132,7 +189,7 @@ def process(wet: np.ndarray, dry: np.ndarray, sr: int, p: Params, mix: float = 1
     """
     y = drive(wet, p)
     y = collimate(y, sr, p)
-    y = fallout(y, sr, p)
+    y = fallout(y, sr, p, profile, c)
     y = voice(y, sr)
     y = match_rms(y, dry)
     y = (1.0 - mix) * dry + mix * y
