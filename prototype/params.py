@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 
-REACTIONS = ["RADIATION", "FISSION", "TOXIC SLUDGE", "BIO-CHEMICAL", "ALIEN"]
+REACTIONS = ["RADIATION", "FISSION", "TOXIC SLUDGE", "CHEMICAL", "ALIEN"]
 
 MODES = ["GRID", "RANDOM", "FREE", "INPUT"]
 

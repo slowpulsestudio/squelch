@@ -181,7 +181,7 @@ def _flatten_level(x: np.ndarray, sr: int, seconds: float = 0.015, amount: float
     return x / (np.power((envelope + 1e-9) / reference, amount)[:, None])
 
 
-def _biochemical_fizz(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
+def _chemical_fizz(wet: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
     """Overlapping micro-grains, dense enough to fuse into carbonation."""
     n = wet.shape[0]
     blocks = len(c.env)
@@ -332,7 +332,7 @@ def _sludge(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -
 
 
 def _bubble(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """BIO-CHEMICAL's character is its acid voice, which the reactor applies."""
+    """CHEMICAL's character is its acid voice, which the reactor applies."""
     return wet
 
 
@@ -410,8 +410,8 @@ PROFILES = {
         noise=_sludge_rumble,
         post=_sludge,
     ),
-    "BIO-CHEMICAL": ReactionProfile(
-        name="BIO-CHEMICAL",
+    "CHEMICAL": ReactionProfile(
+        name="CHEMICAL",
         cutoff_lo_hz=180.0,
         cutoff_hi_hz=3800.0,
         decay_lo_s=0.03,
@@ -433,7 +433,7 @@ PROFILES = {
         # Dense continuous fizz in the most sensitive part of the ear's range
         # reads louder than its level suggests, so it sits below the others.
         noise_full_level=0.0708,
-        noise=_biochemical_fizz,
+        noise=_chemical_fizz,
         post=_bubble,
     ),
     "ALIEN": ReactionProfile(
