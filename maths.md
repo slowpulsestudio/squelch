@@ -1606,14 +1606,13 @@ f_c[n]
 2^{\Delta_{\text{snap}}s_{\text{snap}}[n]}
 $$
 
-The snap state decays with:
-
-$$
-s_{\text{snap}}[n]
-=
-s_{\text{snap}}[n-1]
-e^{-1/(\tau_{\text{snap}}f_s)}
-$$
+\(s_{\text{snap}}[n]\) is \(q[n]-r[n]\), already defined above. It needs no
+separate decaying state: because \(r\) tracks faster than \(q\)
+(\(f_r>f_q\)), a change in input level makes \(r\) move first and \(q\)
+follow, so the difference rises and falls on its own as \(q\) catches back up
+to \(r\). An independent exponential state here would have no excitation term
+feeding it and would simply decay to zero regardless of input, which is why
+that formulation has been dropped in favour of using \(q[n]-r[n]\) directly.
 
 This makes the cutoff briefly recoil before settling back into the slow memory state.
 

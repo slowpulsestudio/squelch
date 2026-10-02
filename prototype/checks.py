@@ -389,12 +389,28 @@ def check_range_drives_each_character() -> tuple[bool, str]:
     # ALIEN's shift must be absent at zero and present when opened.
     results["ALIEN"] = (difference("ALIEN", 0.0), difference("ALIEN", 1.0))
 
-    # SLUDGE's notches must stop rising at zero.
-    travel = {}
-    for amount in (0.0, 1.0):
-        slow = filters.smooth(c.env, 0.08, SR)
-        notch = 260.0 * np.power(2.0, 2.6 * amount * slow)
-        travel[amount] = float(np.log2(notch.max() / notch.min()) * 12.0)
+    # SLUDGE's subharmonic frequency must be insensitive to body energy at
+    # zero and clearly coupled to it when opened. Through the real engine, not
+    # a formula copied from a post hook it no longer calls: comparing a quiet
+    # and a loud steady noise bed isolates what SPREAD alone is responsible
+    # for, since f_h = f_reactor * 2^(spread * ... * tanh(body energy)).
+    from . import reactor
+
+    n_sludge = SR * 4
+
+    def sub_peak_hz(level: float, amount: float) -> float:
+        bed = np.random.default_rng(1).standard_normal((n_sludge, 2)) * level
+        p = Params(reaction="SLUDGE", spread=amount, toxicity=0.5, exposure=0.6,
+                    reactivity=0.6, half_life=0.2, decay=0.5, seed=0)
+        wet, _, _ = reactor.process(bed, SR, p, 140.0)
+        freqs, power = welch(wet[SR:].mean(axis=1), fs=SR, window="blackmanharris", nperseg=16384)
+        band = (freqs > 15.0) & (freqs < 150.0)
+        return float(freqs[band][np.argmax(power[band])])
+
+    travel = {
+        0.0: sub_peak_hz(0.9, 0.0) - sub_peak_hz(0.05, 0.0),
+        1.0: sub_peak_hz(0.9, 1.0) - sub_peak_hz(0.05, 1.0),
+    }
 
     # FISSION's halves must sit together at zero and apart when opened.
     separation = {}
@@ -407,14 +423,54 @@ def check_range_drives_each_character() -> tuple[bool, str]:
         )
 
     alien_ok = results["ALIEN"][0] < -100.0 and results["ALIEN"][1] > -20.0
-    sludge_ok = travel[0.0] < 0.1 and travel[1.0] > 20.0
+    sludge_ok = abs(travel[0.0]) < 5.0 and travel[1.0] > 10.0
     fission_ok = separation[0.0] > 0.9 and separation[1.0] < separation[0.0] - 0.1
 
     ok = alien_ok and sludge_ok and fission_ok
     return ok, (
         f"ALIEN zaps {results['ALIEN'][0]:.0f} -> {results['ALIEN'][1]:.0f} dB, "
-        f"SLUDGE rise {travel[0.0]:.0f} -> {travel[1.0]:.0f} st, "
+        f"SLUDGE quiet/loud peak shift {travel[0.0]:.1f} -> {travel[1.0]:.1f} Hz, "
         f"FISSION L/R corr {separation[0.0]:.2f} -> {separation[1.0]:.2f}"
+    )
+
+
+def check_sludge_subharmonics() -> tuple[bool, str]:
+    """dsp-testing.md Test 9: SLUDGE must generate energy the input never had.
+
+    Driven with silence, so any energy at f_h/2 and f_h/4 can only have come
+    from the generator, not from filtering something already present in the
+    input. A low-pass implementation fails this by construction: it has
+    nothing below the input's own lowest content to remove into existence.
+    """
+    from . import reactor
+    from .reactions import PROFILES
+
+    n = SR * 2
+    silence = np.zeros((n, 2))
+    p = Params(reaction="SLUDGE", spread=0.4, toxicity=0.4, exposure=0.6,
+                reactivity=0.6, half_life=0.3, decay=0.5, seed=0)
+    wet, _, _ = reactor.process(silence, SR, p, 140.0)
+
+    f_reactor = PROFILES["SLUDGE"].base_hz
+    freqs, power = welch(wet.mean(axis=1), fs=SR, window="blackmanharris", nperseg=16384)
+    power_db = 10.0 * np.log10(power + 1e-30)
+
+    def level_near(target: float) -> float:
+        return float(power_db[np.argmin(np.abs(freqs - target))])
+
+    def floor_near(target: float) -> float:
+        """Median level a third of an octave either side, as the local noise floor."""
+        band = (freqs > target * 0.8) & (freqs < target * 1.25) & (np.abs(freqs - target) > target * 0.08)
+        return float(np.median(power_db[band]))
+
+    h1, h2 = f_reactor / 2.0, f_reactor / 4.0
+    rise1 = level_near(h1) - floor_near(h1)
+    rise2 = level_near(h2) - floor_near(h2)
+
+    ok = rise1 > 6.0 and rise2 > 6.0
+    return ok, (
+        f"input silent; f_h/2 ({h1:.0f}Hz) {rise1:+.1f} dB above its band, "
+        f"f_h/4 ({h2:.0f}Hz) {rise2:+.1f} dB above its band"
     )
 
 
@@ -1325,6 +1381,7 @@ CHECKS = [
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("range drives each character", check_range_drives_each_character),
+    ("sludge generates subharmonics", check_sludge_subharmonics),
     ("reactions are distinct", check_reactions_are_distinct),
     ("fallout disperses per reaction", check_fallout_disperses_per_reaction),
     ("house voicing curve", check_voicing_curve),

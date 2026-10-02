@@ -15,7 +15,7 @@ import numpy as np
 from scipy.ndimage import maximum_filter1d
 from scipy.signal import lfilter
 
-from . import filters, rng, saturation
+from . import filters, rng
 from .controls import Controls
 from .params import Params
 
@@ -25,9 +25,6 @@ from .params import Params
 FISSION_BASE_HZ = 220.0
 FISSION_SWEEP_OCT = 3.2
 FISSION_SEPARATION_OCT = 2.4
-#: How far SLUDGE's bubbles rise before they dissolve.
-SLUDGE_BASE_HZ = 260.0
-SLUDGE_RISE_OCT = 2.6
 #: How far ALIEN's zaps travel.
 ALIEN_SHIFT_HZ = 1100.0
 
@@ -360,26 +357,6 @@ def _phaser(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -
     return 0.5 * wet + 0.5 * np.concatenate([left, right], axis=1)
 
 
-def _sludge(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """Submerged: swept notches instead of peaks, under an octave-down body.
-
-    Inverted resonance reads as hollow and underwater where a resonant peak
-    would read as acidic. SPREAD is how far the bubbles rise.
-    """
-    sub = filters.static_lowpass(filters.octave_down(wet), 180.0, sr, q=0.7)
-    body = wet + sub * (0.45 * p.toxicity * (1.0 - c.damping))
-
-    slow = filters.smooth(c.env, 0.08, sr)
-    notch = SLUDGE_BASE_HZ * np.power(2.0, SLUDGE_RISE_OCT * p.spread * slow)
-    y = filters.varying_notch(body, notch, 1.6, sr)
-    y = filters.varying_notch(y, notch * 1.9, 1.6, sr)
-    y = filters.static_lowpass(y, 900.0 + 1200.0 * p.toxicity, sr, q=0.7)
-    thick = saturation.oversampled(
-        y * (1.0 + 1.2 * p.toxicity), saturation.soft_clip
-    )
-    return thick / (1.0 + 0.7 * p.toxicity)
-
-
 def _bubble(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
     """CHEMICAL's character is its acid voice, which the reactor applies."""
     return wet
@@ -490,7 +467,9 @@ PROFILES = {
         noise_full_level=0.1373,
         noise_unit_rms=0.099999,
         noise=_sludge_rumble,
-        post=_sludge,
+        # SLUDGE's mechanism lives in reactor._sludge_engine now, not a post
+        # hook on top of a filter voice it no longer has.
+        post=_bubble,
     ),
     "CHEMICAL": ReactionProfile(
         name="CHEMICAL",

@@ -12,7 +12,7 @@ from typing import Callable
 import numpy as np
 from scipy.signal import lfilter
 
-from . import filters, rng
+from . import filters, rng, saturation
 from .controls import Controls
 from .meltdown import Meltdown
 from .params import Params
@@ -79,6 +79,28 @@ IONIZE_ARTICULATION = 0.8
 #: hissing on top of the reaction.
 AFTERGLOW_DAMPING = 0.45
 AFTERGLOW_LEVEL = 0.9
+
+#: SLUDGE's body/snap envelope followers. Fixed architecture constants, not
+#: knobs: f_q is the slow body corner, f_r the fast snap corner that DECAY
+#: slows down from. maths.md requires f_r > f_q; this stays true across the
+#: whole DECAY range by construction.
+SLUDGE_F_Q_HZ = 5.0
+SLUDGE_F_R_LO_HZ = 45.0
+SLUDGE_F_R_HI_HZ = 12.0
+
+#: HALF-LIFE's long reactor memory, in seconds.
+SLUDGE_TAU_M_LO_S = 0.3
+SLUDGE_TAU_M_HI_S = 5.0
+
+#: Asymmetry of SLUDGE's saturator. Fixed: TOXICITY drives the drive amount,
+#: not the asymmetry itself, which is what gives it even-order content CHEMICAL's
+#: symmetric tanh cannot produce.
+SLUDGE_GAMMA = 0.6
+
+#: Subharmonic mix weights for the /2 and /4 components. Fixed so the
+#: generator is always present rather than being a knob some setting zeroes.
+SLUDGE_W1 = 0.65
+SLUDGE_W2 = 0.45
 
 
 def _event_envelope(length: int, attack: int, tau: float, curve: float = 1.0) -> np.ndarray:
@@ -414,13 +436,102 @@ def _ladder_engine(
     return filters.ladder(x, cutoff, feedback, drive, sr, tap=profile.tap)
 
 
-#: One engine per REACTION. All five are CHEMICAL's ladder today; replacing an
-#: entry is how a reaction gets its own mechanism instead of the ladder's.
+def _one_pole_hz(x: np.ndarray, f_hz: float, sr: int) -> np.ndarray:
+    """Constant-coefficient one-pole lowpass, maths.md's g = 1 - e^(-2*pi*f/fs)."""
+    g = 1.0 - np.exp(-2.0 * np.pi * f_hz / sr)
+    return lfilter([g], [1.0, -(1.0 - g)], x, axis=0)
+
+
+def _sludge_engine(
+    x: np.ndarray,
+    cutoff: np.ndarray,
+    feedback: np.ndarray,
+    drive: np.ndarray,
+    sr: int,
+    profile: ReactionProfile,
+    events: list[Event],
+    controls: Controls,
+    p: Params,
+    md: Meltdown,
+) -> np.ndarray:
+    """SLUDGE's engine: nonlinear subharmonic generation plus long memory.
+
+    maths.md's SLUDGE section. No event sweep and no ladder: the reaction
+    tracks its own slow/fast envelope followers off the input, generates the
+    /2 and /4 subharmonics from its own reactor frequency (no pitch tracking),
+    and runs the asymmetric-saturated result through a memory-driven lowpass.
+    """
+    n = x.shape[0]
+    e = np.abs(x).max(axis=1)
+
+    q = _one_pole_hz(e, SLUDGE_F_Q_HZ, sr)
+    decay_time = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
+    f_r = SLUDGE_F_R_LO_HZ + (SLUDGE_F_R_HI_HZ - SLUDGE_F_R_LO_HZ) * (
+        decay_time / profile.decay_hi_s
+    )
+    r = _one_pole_hz(q, f_r, sr)
+    s_snap = q - r
+
+    tau_m = SLUDGE_TAU_M_LO_S + (SLUDGE_TAU_M_HI_S - SLUDGE_TAU_M_LO_S) * p.half_life
+    a_m = float(np.exp(-1.0 / max(tau_m * sr, 1.0)))
+    m = lfilter([1.0 - a_m], [1.0, -a_m], q)
+    m_b = np.tanh(m)
+
+    # Slow cutoff movement: the molasses lurch, bounded to this reaction's own
+    # cutoff territory so SPREAD at zero collapses it to the resting centre.
+    span_oct = np.log2(profile.cutoff_hi_hz / profile.cutoff_lo_hz)
+    f_base_oct = np.log2(profile.cutoff_lo_hz) + span_oct * 0.5
+    delta_f = span_oct * 0.5 * p.spread
+    f_c = np.power(2.0, f_base_oct + delta_f * m_b)
+
+    # The fast state briefly recoils the cutoff before it settles, per the
+    # correction in maths.md's Viscous snapback section: q - r already carries
+    # its own rise/decay from f_r > f_q, with no separate state needed.
+    delta_snap = 0.4 * p.reactivity
+    f_effective = np.clip(f_c * np.power(2.0, delta_snap * s_snap), 20.0, sr * 0.45)
+
+    beta_m = 0.3 + 0.9 * p.exposure
+    beta_h = 0.2 + 0.6 * p.exposure
+
+    # Subharmonics derived from SLUDGE's own reactor frequency, not the input.
+    delta_h = 0.5 * p.spread
+    f_h = profile.base_hz * np.power(2.0, delta_h * m_b)
+    theta_raw = np.cumsum(2.0 * np.pi * f_h / sr)
+    h1 = np.sin(np.mod(theta_raw, 4.0 * np.pi) / 2.0)
+    h2 = np.sin(np.mod(theta_raw, 8.0 * np.pi) / 4.0)
+    a_h = 0.5 + (0.5 + 1.0 * p.exposure) * np.tanh(q)
+    h = a_h * (SLUDGE_W1 * h1 + SLUDGE_W2 * h2)
+
+    delta = 1.0 + 3.0 * p.toxicity
+    z = x + beta_m * m[:, None] + beta_h * h[:, None]
+
+    def curve(u: np.ndarray) -> np.ndarray:
+        return np.where(u >= 0.0, np.tanh(delta * u), SLUDGE_GAMMA * np.tanh(delta * u))
+
+    sat = saturation.oversampled(z, curve)
+
+    # The one lowpass stage whose cutoff genuinely varies every sample: the
+    # memory-driven movement is slow by construction (HALF-LIFE's seconds), so
+    # a Python loop here costs nothing a smoothed control-rate approximation
+    # would have saved, and stays exactly what maths.md specifies.
+    s = np.zeros_like(sat)
+    state = np.zeros(sat.shape[1])
+    g_c = 1.0 - np.exp(-2.0 * np.pi * f_effective / sr)
+    for i in range(n):
+        state += g_c[i] * (sat[i] - state)
+        s[i] = state
+
+    mu_h = 0.3 + 0.5 * p.reactivity
+    return (1.0 - mu_h) * s + mu_h * h[:, None]
+
+
+#: One engine per REACTION. Replacing an entry is how a reaction gets its own
+#: mechanism instead of CHEMICAL's ladder.
 ENGINES: dict[str, Callable] = {
     "CHEMICAL": _ladder_engine,
     "RADIATION": _ladder_engine,
     "FISSION": _ladder_engine,
-    "SLUDGE": _ladder_engine,
+    "SLUDGE": _sludge_engine,
     "ALIEN": _ladder_engine,
 }
 
