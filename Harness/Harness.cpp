@@ -416,7 +416,54 @@ int main()
                 values.push_back (r);
             }
         }
-        printArray ("drive", values, true);
+        printArray ("drive", values);
+    }
+
+    // Stereo spread: the prototype zero-fills ahead of its right-channel
+    // shift, which a zero-initialised line reproduces, so nothing settles.
+    {
+        dsp::StereoSpread spread;
+        spread.prepare (sampleRate);
+        spread.set (0.65);
+
+        std::vector<double> values;
+        for (int i = 0; i < 4000; ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto l = 0.4 * std::sin (2.0 * M_PI * 90.0 * t)
+                         + 0.3 * std::sin (2.0 * M_PI * 900.0 * t);
+            const auto r = 0.35 * std::sin (2.0 * M_PI * 110.0 * t)
+                         + 0.25 * std::sin (2.0 * M_PI * 1300.0 * t);
+
+            double ol = 0.0, orr = 0.0;
+            spread.process (l, r, ol, orr);
+            if (i % 20 == 0)
+            {
+                values.push_back (ol);
+                values.push_back (orr);
+            }
+        }
+        printArray ("stereo_spread", values);
+    }
+
+    // Pitch wind. The prototype clips its read index at 0, reading x[0] where
+    // a delay line reads zeros; bounded by the longest delay available,
+    // 0.0035 * 44100 = 155 samples, rounded to 200.
+    {
+        constexpr int settle = 200;
+        dsp::PitchWind wind;
+        wind.prepare (sampleRate);
+
+        std::vector<double> values;
+        for (int i = 0; i < 4000; ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto control = 0.5 + 0.5 * std::sin (2.0 * M_PI * 6.0 * t);
+            const auto y = wind.process (0.4 * std::sin (2.0 * M_PI * 440.0 * t), control);
+            if (i >= settle && (i - settle) % 20 == 0)
+                values.push_back (y);
+        }
+        printArray ("pitch_wind", values, true);
     }
 
     std::printf ("}\n");

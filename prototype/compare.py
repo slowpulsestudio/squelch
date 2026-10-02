@@ -303,6 +303,48 @@ def _drive_reference() -> np.ndarray:
     return ref[indices - latency].reshape(-1)
 
 
+def _stereo_spread_reference() -> np.ndarray:
+    """Source/Dsp/OutputStage.h's StereoSpread against output_stage._stereo_spread.
+
+    No settling window: the prototype zero-fills ahead of its right-channel
+    shift, which a zero-initialised delay line reproduces exactly, and both
+    bass filters start from zero state.
+    """
+    from . import output_stage
+
+    n = 4000
+    t = np.arange(n) / SR
+    x = np.stack([0.4 * np.sin(2.0 * np.pi * 90.0 * t) + 0.3 * np.sin(2.0 * np.pi * 900.0 * t),
+                  0.35 * np.sin(2.0 * np.pi * 110.0 * t) + 0.25 * np.sin(2.0 * np.pi * 1300.0 * t)],
+                 axis=1)
+    return output_stage._stereo_spread(x, SR, 0.65)[::20].reshape(-1)
+
+
+def _pitch_wind_reference() -> np.ndarray:
+    """Source/Dsp/OutputStage.h's PitchWind against filters.pitch_wind.
+
+    The prototype clips its read index at 0, so it reads x[0] where a delay
+    line reads zeros. Bounded by the longest delay available:
+    WOBBLE_MAX_DELAY_S * sr = 0.0035 * 44100 = 155 samples, rounded to 200.
+
+    The control is fed at sample rate here rather than through
+    to_sample_rate, so this tests the delay itself and not the control-rate
+    interpolation around it.
+    """
+    from . import filters, output_stage
+
+    n = 4000
+    settle = 200
+    t = np.arange(n) / SR
+    tone = np.repeat((0.4 * np.sin(2.0 * np.pi * 440.0 * t))[:, None], 2, axis=1)
+    wind = 0.5 + 0.5 * np.sin(2.0 * np.pi * 6.0 * t)
+
+    delay = wind * output_stage.WOBBLE_MAX_DELAY_S * SR
+    read = np.clip(np.arange(n) - delay, 0.0, n - 1.0)
+    ref = np.interp(read, np.arange(n), tone[:, 0])
+    return ref[settle::20]
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -337,6 +379,8 @@ def expectations() -> dict:
         "collimate": _collimate_reference(),
         "unity_match": _unity_match_reference(),
         "drive": _drive_reference(),
+        "stereo_spread": _stereo_spread_reference(),
+        "pitch_wind": _pitch_wind_reference(),
     }
 
 

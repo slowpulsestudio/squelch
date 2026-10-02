@@ -40,7 +40,125 @@ namespace squelch::dsp
     inline constexpr double kLevelMatchRangeDb = 36.0;
     inline constexpr double kLevelMatchGateDb = -60.0;
     inline constexpr double kGainSmoothS = 0.05;
+    inline constexpr double kWobbleMaxDelayS = 0.0035;
+
+    /// Longest wind delay at 96 kHz with headroom.
+    inline constexpr int kPitchWindMaxDelay = 512;
+
+    /** Tape/turntable wind via a delay line whose length follows a control.
+
+        A lengthening delay drops the pitch and a shortening one raises it, so
+        a control that rises and falls winds down then back up, and the delay
+        returns to zero so the effect cannot drift out of time.
+
+        This is the primitive `_mid_wobble` is built from. The assembly around
+        it is not ported: it is driven by `Controls.starts` and the event
+        schedule, and neither the scheduler nor the controls exist in C++ yet.
+    */
+    class PitchWind
+    {
+    public:
+        void prepare (double sampleRate, double maxDelayS = kWobbleMaxDelayS) noexcept
+        {
+            sr = sampleRate;
+            maxDelaySamples = maxDelayS * sr;
+            line.fill (0.0);
+            pos = 0;
+        }
+
+        /// `wind` is 0..1; the delay is that fraction of the maximum.
+        double process (double x, double wind) noexcept
+        {
+            line[static_cast<size_t> (pos)] = x;
+
+            const auto delay = std::clamp (wind * maxDelaySamples, 0.0,
+                                           double (kPitchWindMaxDelay - 2));
+            const auto whole = static_cast<int> (delay);
+            const auto frac = delay - whole;
+
+            const auto idx0 = (pos - whole + kPitchWindMaxDelay) % kPitchWindMaxDelay;
+            const auto idx1 = (idx0 - 1 + kPitchWindMaxDelay) % kPitchWindMaxDelay;
+            const auto value = line[static_cast<size_t> (idx0)]
+                             + (line[static_cast<size_t> (idx1)] - line[static_cast<size_t> (idx0)]) * frac;
+
+            pos = (pos + 1 == kPitchWindMaxDelay) ? 0 : (pos + 1);
+            return value;
+        }
+
+    private:
+        double sr { 44100.0 }, maxDelaySamples { 0.0 };
+        int pos { 0 };
+        std::array<double, kPitchWindMaxDelay> line {};
+    };
+
     inline constexpr double kDriveMatchS = 0.4;
+    inline constexpr double kStereoBassMonoHz = 150.0;
+
+    /// Longest spread delay the amount can ask for, at 96 kHz with headroom.
+    inline constexpr int kStereoMaxDelay = 512;
+
+    /** Disperses into the stereo field, keeping the bass centred.
+
+        Below kStereoBassMonoHz stays mono unconditionally so the low end
+        holds together on a club system; placement lives above it.
+    */
+    class StereoSpread
+    {
+    public:
+        void prepare (double sampleRate) noexcept
+        {
+            sr = sampleRate;
+            lowL.reset();
+            lowR.reset();
+            lowL.setCoefficients (lowpass (kStereoBassMonoHz, 0.707, sr));
+            lowR.setCoefficients (lowpass (kStereoBassMonoHz, 0.707, sr));
+            line.fill (0.0);
+            pos = 0;
+            set (0.0);
+        }
+
+        void set (double spreadAmount) noexcept
+        {
+            amount = spreadAmount;
+            delay = std::min (static_cast<int> (amount * 0.004 * sr), kStereoMaxDelay - 1);
+            sideGain = 1.0 + 2.2 * amount;
+        }
+
+        void process (double xL, double xR, double& outL, double& outR) noexcept
+        {
+            if (amount <= 0.0)
+            {
+                outL = xL;
+                outR = xR;
+                return;
+            }
+
+            const auto bassL = lowL.process (xL);
+            const auto bassR = lowR.process (xR);
+            const auto highL = xL - bassL;
+            const auto highR = xR - bassR;
+
+            // Only the right side is shifted, and the prototype zero-fills
+            // ahead of it, which a zero-initialised line reproduces exactly.
+            line[static_cast<size_t> (pos)] = highR;
+            const auto readPos = (pos - delay + kStereoMaxDelay) % kStereoMaxDelay;
+            const auto shiftedR = delay > 0 ? line[static_cast<size_t> (readPos)] : highR;
+            pos = (pos + 1 == kStereoMaxDelay) ? 0 : (pos + 1);
+
+            const auto mid = 0.5 * (highL + shiftedR);
+            const auto side = 0.5 * (highL - shiftedR) * sideGain;
+            const auto mono = 0.5 * (bassL + bassR);
+
+            outL = mono + mid + side;
+            outR = mono + mid - side;
+        }
+
+    private:
+        double sr { 44100.0 }, amount { 0.0 }, sideGain { 1.0 };
+        int delay { 0 }, pos { 0 };
+        Biquad lowL, lowR;
+        std::array<double, kStereoMaxDelay> line {};
+    };
 
     /** The gain that puts one running level onto another, safely.
 
