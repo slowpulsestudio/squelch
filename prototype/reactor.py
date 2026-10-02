@@ -622,21 +622,20 @@ def _radiation_engine(
     which depends on in-loop tanh to self-limit.
     """
     n, channels = x.shape
-    # Each stochastic stream gets its own generator rather than sharing one:
-    # drawing n samples from a shared stream leaves it at a position that
-    # depends on n, so a shorter render would silently draw a different m[]
-    # than the same prefix of a longer one, breaking the one-block-at-a-time
-    # guarantee the plugin depends on.
-    seed_base = 1_000_003 * (p.seed + 1)
-
+    # Each stochastic stream hashes (seed, stream id, sample index) rather
+    # than drawing from a stateful generator: a draw of length n from
+    # np.random.default_rng needs the whole render length up front, which a
+    # block-wise processBlock never has. Hashing the absolute sample index
+    # instead gives every sample the same value regardless of how long the
+    # render turns out to be or where it gets cut into blocks.
     volatility = p.volatility
     a_q = float(np.exp(-1.0 / max(RADIATION_TAU_Q_S * sr, 1.0)))
     b_q = float(np.sqrt(1.0 - a_q**2)) * volatility
     a_m = float(np.exp(-1.0 / max(RADIATION_TAU_M_S * sr, 1.0)))
     b_m = float(np.sqrt(1.0 - a_m**2)) * volatility
 
-    r_q = np.random.default_rng(seed_base + 1).uniform(-1.0, 1.0, n)
-    r_m = np.random.default_rng(seed_base + 2).uniform(-1.0, 1.0, n)
+    r_q = rng.ubipolar_array(n, p.seed, 601)
+    r_m = rng.ubipolar_array(n, p.seed, 602)
     q = lfilter([b_q], [1.0, -a_q], r_q)
     m = lfilter([b_m], [1.0, -a_m], r_m)
     q_b, m_b = np.tanh(q), np.tanh(m)
@@ -676,7 +675,7 @@ def _radiation_engine(
 
     # Continuous low-level rounded tick source.
     a_g = float(np.exp(-1.0 / max(RADIATION_TAU_G_S * sr, 1.0)))
-    tick = lfilter([1.0 - a_g], [1.0, -a_g], np.random.default_rng(seed_base + 3).uniform(-1.0, 1.0, n))
+    tick = lfilter([1.0 - a_g], [1.0, -a_g], rng.ubipolar_array(n, p.seed, 603))
 
     input_level = filters.running_rms(x, sr, RADIATION_EXCITATION_TRACK_S)
     excite_gain = np.clip(input_level / RADIATION_EXCITATION_REF, 0.0, 1.0)
@@ -931,17 +930,14 @@ def _fission_engine(
     relationship itself diverges, not from a final pan stage.
     """
     n, channels = x.shape
-    # Independent generator per stream, as in RADIATION: a shared one would
-    # leave r_d starting from a position that depends on how long r_m's draw
-    # was, decorrelating both streams from a shorter render's.
-    seed_base = 2_000_003 * (p.seed + 1)
-
+    # Hash (seed, stream id, sample index) rather than drawing from a
+    # stateful generator — see _radiation_engine for why.
     a_m = float(np.exp(-1.0 / max(FISSION_TAU_M_S * sr, 1.0)))
-    r_m = np.random.default_rng(seed_base + 1).uniform(-1.0, 1.0, n)
+    r_m = rng.ubipolar_array(n, p.seed, 701)
     m = lfilter([1.0 - a_m], [1.0, -a_m], r_m)
 
     a_d = float(np.exp(-1.0 / max(FISSION_TAU_D_S * sr, 1.0)))
-    r_d = np.random.default_rng(seed_base + 2).uniform(-1.0, 1.0, n)
+    r_d = rng.ubipolar_array(n, p.seed, 702)
     m_d = lfilter([1.0 - a_d], [1.0, -a_d], r_d)
 
     delta_f = FISSION_DELTA_F_SEMITONES * p.spread

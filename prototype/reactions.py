@@ -123,7 +123,12 @@ def _passthrough(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: i
 
 
 def _noise(n: int, seed: int) -> np.ndarray:
-    return np.random.default_rng(seed).standard_normal((n, 2))
+    # Hashes (seed, channel, sample index) rather than drawing from a
+    # stateful generator: standard_normal(n) needs the whole render length n
+    # up front, which a block-wise processBlock never has (see rng.py).
+    left = rng.gaussian_array(n, seed, 0)
+    right = rng.gaussian_array(n, seed, 1)
+    return np.stack([left, right], axis=1)
 
 
 def _ctrl_time(c: Controls, sr: int) -> np.ndarray:
