@@ -192,7 +192,7 @@ def build_controls(
             q *= ACCENT_RESONANCE
         q = float(np.clip(hold * prev_q + (1.0 - hold) * q, 0.7, q_hi * 1.4))
 
-        # prompt.md lists stereo position among the things VOLATILITY varies.
+        # README.md lists stereo position among the things VOLATILITY varies.
         pan_spread = p.volatility * (1.0 - 0.7 * damping)
         placement = ev.pan
         if ionize > 0.0:

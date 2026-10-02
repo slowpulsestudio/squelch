@@ -536,7 +536,7 @@ def check_beds_follow_the_input() -> tuple[bool, str]:
 
 
 def check_containment_thins_events() -> tuple[bool, str]:
-    """CONTAINMENT must reduce event density, which prompt.md lists explicitly."""
+    """CONTAINMENT must reduce event density, which README.md lists explicitly."""
     from .params import Params
     from .scheduler import schedule
 
@@ -1247,6 +1247,52 @@ def check_clip_trades_lookahead_for_hardness() -> tuple[bool, str]:
     )
 
 
+def check_reactions_are_distinct() -> tuple[bool, str]:
+    """Every reaction must be a different effect, not the same one retuned.
+
+    Measured against each other, which is the point. Measuring each reaction
+    against the dry signal only proves it did something, and five processes
+    that each do something can still all be the same process: that is exactly
+    how RADIATION and CHEMICAL shipped at 10% apart without anyone noticing.
+
+    Level is divided out first so this reports a difference in sound rather
+    than a difference in loudness.
+    """
+    import itertools
+
+    from . import engine
+    from .params import Params
+    from .reactions import PROFILES
+
+    dry, sr = audio_io.load(_source())
+    rendered = {}
+    for name in PROFILES:
+        p = Params(
+            reaction=name, mode="GRID", grid="1/8", probability=1.0, spread=1.0,
+            exposure=0.85, toxicity=0.45, decay=0.3, half_life=0.4, seed=3,
+        )
+        y, _ = engine.process(dry, sr, p, 140.0)
+        rendered[name] = y / (np.sqrt(np.mean(y**2)) + 1e-18)
+
+    worst = []
+    for a, b in itertools.combinations(rendered, 2):
+        difference = 20.0 * np.log10(
+            np.sqrt(np.mean((rendered[a] - rendered[b]) ** 2))
+            / (np.sqrt(np.mean(rendered[b] ** 2)) + 1e-18)
+        )
+        worst.append((difference, a, b))
+    worst.sort()
+
+    # More negative means more alike: the difference signal is further below the
+    # signal itself. -9dB means the two reactions differ by a third of the
+    # signal, and anything quieter than that is a retune rather than another
+    # effect.
+    alike = [w for w in worst if w[0] < -9.0]
+    ok = not alike
+    head = ", ".join(f"{a}/{b} {d:.1f}dB" for d, a, b in worst[:3])
+    return ok, f"{len(alike)}/{len(worst)} pairs too alike; closest: {head}"
+
+
 CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
@@ -1279,6 +1325,7 @@ CHECKS = [
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("range drives each character", check_range_drives_each_character),
+    ("reactions are distinct", check_reactions_are_distinct),
     ("fallout disperses per reaction", check_fallout_disperses_per_reaction),
     ("house voicing curve", check_voicing_curve),
     ("scheduling determinism", check_scheduling_is_deterministic),

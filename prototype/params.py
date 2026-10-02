@@ -1,7 +1,7 @@
 """The canonical SQUELCH parameters.
 
-Names and semantics come from prompt.md, which is the authoritative spec.
-Continuous parameters are normalised 0..1 here deliberately: prompt.md does not
+Names and semantics come from README.md, which is the authoritative spec.
+Continuous parameters are normalised 0..1 here deliberately: README.md does not
 specify real-world ranges or defaults, and those are meant to be fixed from
 Designer feedback on Round 1 sweep renders rather than invented up front.
 """
@@ -40,7 +40,7 @@ GRID_NAMES = list(GRID_DIVISIONS)
 #: ENRICHMENT spans this many dB either side of unity.
 ENRICHMENT_RANGE_DB = 18.0
 
-#: Continuous parameters, in the order prompt.md lists them.
+#: Continuous parameters, in the order README.md lists them.
 CONTINUOUS = [
     "enrichment",
     "flux",

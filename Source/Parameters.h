@@ -8,9 +8,10 @@
     APVTS layout, the preset system and Randomise. Keeping separate lists in
     separate places is how they end up disagreeing.
 
-    Names follow prototype/params.py, which is the live spec. prompt.md is the
-    original brief and is kept as a record, so it still lists the names these
-    replaced.
+    Names follow prototype/params.py, which is current for parameter names and
+    ranges. README.md is the design brief and still lists some of the names
+    these replaced; it governs what each reaction has to do, not what the
+    controls are called.
 */
 namespace squelch
 {
@@ -74,7 +75,7 @@ namespace squelch
 
     /** The knobs, in the order the prototype lists them.
 
-        Tooltips open with the parameter's glyph from prompt.md, so the panel,
+        Tooltips open with the parameter's glyph from README.md, so the panel,
         the spec and the maths all name the same thing. Bracketed glyphs are
         labels rather than terms in the equations.
     */

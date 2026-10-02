@@ -3,7 +3,7 @@
 Each profile sets the reactor's filter/envelope territory, then contributes one
 extra stage that gives that reaction its character. Every number here is a
 prototype starting point to be swept and confirmed from Designer feedback, not a
-final value — prompt.md describes these reactions qualitatively only.
+final value — README.md describes these reactions qualitatively only.
 """
 
 from __future__ import annotations
@@ -62,7 +62,16 @@ class ReactionProfile:
     drive_lo: float
     drive_hi: float
     #: Which poles are summed: lowpass, bandpass or highpass out of the one
-    #: ladder.
+    #: ladder. The weights sum to the tap's gain at DC, so a set that sums to
+    #: zero has no low end at all: that is what left FISSION and ALIEN thin and
+    #: reading as harsh. A small positive sum keeps the bandpass or highpass
+    #: character while putting the body back under it.
+    #:
+    #: Which stage carries the negative weight sets the top end, because each
+    #: stage rolls off 6 dB/octave steeper than the one before it. Moving that
+    #: weight down the ladder takes the harshness out without touching the
+    #: feedback, which turned out to be worth only 0.2 dB here and is the one
+    #: thing that must not be traded away: the feedback is the squelch.
     tap: tuple[float, float, float, float]
     #: Which steps are accented. Accents open the sweep further and push the
     #: feedback closer to oscillation, so they change character and not level.
@@ -427,7 +436,7 @@ PROFILES = {
         feedback_hi=3.82,
         drive_lo=1.0,
         drive_hi=2.1,
-        tap=(0.0, -1.0, 0.0, 1.0),
+        tap=(0.0, 0.0, -0.65, 1.0),
         accents=(0, 1, 0, 0, 1, 0, 1, 0),
         cutoff_lo_hz=340.0,
         cutoff_hi_hz=3600.0,
@@ -452,7 +461,7 @@ PROFILES = {
     ),
     "SLUDGE": ReactionProfile(
         name="SLUDGE",
-        base_hz=70.0,
+        base_hz=100.0,
         sweep_octaves=2.4,
         tau_lo_s=0.12,
         tau_hi_s=0.7,
@@ -460,7 +469,7 @@ PROFILES = {
         feedback_hi=2.95,
         drive_lo=1.6,
         drive_hi=3.6,
-        tap=(0.0, 0.0, 0.0, 1.0),
+        tap=(0.0, 0.3, 0.0, 0.8),
         accents=(0, 0, 0, 1, 0, 0, 1, 0),
         cutoff_lo_hz=150.0,
         cutoff_hi_hz=1300.0,
@@ -527,10 +536,10 @@ PROFILES = {
         tau_lo_s=0.02,
         tau_hi_s=0.16,
         feedback_lo=2.2,
-        feedback_hi=3.92,
+        feedback_hi=3.6,
         drive_lo=1.0,
         drive_hi=1.8,
-        tap=(1.0, -2.0, 0.0, 1.0),
+        tap=(0.5, -1.15, 0.0, 1.0),
         accents=(1, 0, 1, 0, 1, 1, 0, 1),
         cutoff_lo_hz=440.0,
         cutoff_hi_hz=6500.0,

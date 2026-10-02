@@ -153,7 +153,7 @@ def schedule(
     for k, t in _base_times(x, sr, p, bpm):
         moment = int(t * sr)
         containment = md.at("containment", moment) if md else p.containment
-        # CONTAINMENT suppresses the reactor, and prompt.md lists event density
+        # CONTAINMENT suppresses the reactor, and README.md lists event density
         # among the things it damps, not just the depth of what fires.
         density = 1.0 - DENSITY_SUPPRESSION * containment
         probability = (md.at("probability", moment) if md else p.probability) * density
