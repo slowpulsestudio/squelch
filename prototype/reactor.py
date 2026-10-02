@@ -7,6 +7,8 @@ VOLATILITY, HALF-LIFE, TOXICITY and CONTAINMENT act.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 from scipy.signal import lfilter
 
@@ -389,6 +391,40 @@ def _glide(ctrl: np.ndarray, samples: int) -> np.ndarray:
     return lfilter([1.0 - coeff], [1.0, -coeff], ctrl, zi=np.array([coeff * ctrl[0]]))[0]
 
 
+def _ladder_engine(
+    x: np.ndarray,
+    cutoff: np.ndarray,
+    feedback: np.ndarray,
+    drive: np.ndarray,
+    sr: int,
+    profile: ReactionProfile,
+    events: list[Event],
+    controls: Controls,
+    p: Params,
+    md: Meltdown,
+) -> np.ndarray:
+    """CHEMICAL's engine: the nonlinear resonant feedback ladder.
+
+    maths.md's audit table names this mechanism CHEMICAL's and forbids the
+    other four from using it as their own voice. It is still every other
+    reaction's placeholder engine until each gets the one maths.md specifies
+    for it (see plan.md); until then they measure as one effect, which is the
+    open defect `check_reactions_are_distinct` exists to catch.
+    """
+    return filters.ladder(x, cutoff, feedback, drive, sr, tap=profile.tap)
+
+
+#: One engine per REACTION. All five are CHEMICAL's ladder today; replacing an
+#: entry is how a reaction gets its own mechanism instead of the ladder's.
+ENGINES: dict[str, Callable] = {
+    "CHEMICAL": _ladder_engine,
+    "RADIATION": _ladder_engine,
+    "FISSION": _ladder_engine,
+    "SLUDGE": _ladder_engine,
+    "ALIEN": _ladder_engine,
+}
+
+
 def process(
     x: np.ndarray, sr: int, p: Params, bpm: float, open_rest: bool = False
 ) -> tuple[np.ndarray, Controls]:
@@ -398,7 +434,8 @@ def process(
     controls = build_controls(events, len(x), sr, p, profile, md, open_rest)
 
     cutoff, feedback, drive = envelopes(events, len(x), sr, p, profile, md)
-    wet = filters.ladder(x, cutoff, feedback, drive, sr, tap=profile.tap)
+    engine = ENGINES[p.reaction]
+    wet = engine(x, cutoff, feedback, drive, sr, profile, events, controls, p, md)
 
     wet = contaminate(wet, x, controls, p, profile, sr, md)
     return wet, controls, md
