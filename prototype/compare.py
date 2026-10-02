@@ -282,6 +282,27 @@ def _unity_match_reference() -> np.ndarray:
     return output_stage.unity_match(y, y, SR)[::40].reshape(-1)
 
 
+def _drive_reference() -> np.ndarray:
+    """Source/Dsp/OutputStage.h's Drive against output_stage.drive.
+
+    Drive runs its curve through saturation.oversampled, so the same acausal
+    boundary applies as everywhere else that does: skip the oversampler's
+    latency and its cold-start region, (81 + 81) / 4 = 41 samples.
+    """
+    from . import output_stage
+
+    n = 6000
+    settle = 41
+    latency = 20
+    t = np.arange(n) / SR
+    tone = 0.4 * np.sin(2.0 * np.pi * 180.0 * t)
+    x = np.stack([tone, 0.7 * tone], axis=1)
+    p = Params(drive=0.6)
+    ref = output_stage.drive(x, SR, p, weight=1.3)
+    indices = np.arange(settle, n, 40)
+    return ref[indices - latency].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -315,6 +336,7 @@ def expectations() -> dict:
         "peak_limiter": _limiter_reference(),
         "collimate": _collimate_reference(),
         "unity_match": _unity_match_reference(),
+        "drive": _drive_reference(),
     }
 
 

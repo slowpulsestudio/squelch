@@ -1,10 +1,13 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
 #include "Filters.h"
+#include "Oversampler.h"
+#include "Saturation.h"
 
 /** The output stage, ported from `prototype/output_stage.py`.
 
@@ -37,6 +40,117 @@ namespace squelch::dsp
     inline constexpr double kLevelMatchRangeDb = 36.0;
     inline constexpr double kLevelMatchGateDb = -60.0;
     inline constexpr double kGainSmoothS = 0.05;
+    inline constexpr double kDriveMatchS = 0.4;
+
+    /** The gain that puts one running level onto another, safely.
+
+        Dividing two level trackers is the easy part; the rest is what stops
+        it doing something stupid. In a gap it would ask for enormous gain to
+        lift noise to the level of music, so below the gate it holds the last
+        sensible figure, and unity until there has been one.
+
+        The gate reads the TARGET, not the source. Reading the source refuses
+        to work on exactly the material that needs it most: a noise bed before
+        normalisation is legitimately far below any sensible threshold.
+    */
+    class MatchingGain
+    {
+    public:
+        void prepare (double sr, double rangeDb, double gateDb = kLevelMatchGateDb) noexcept
+        {
+            ceiling = std::pow (10.0, rangeDb / 20.0);
+            gate = std::pow (10.0, gateDb / 20.0);
+            smooth = std::exp (-1.0 / std::max (kGainSmoothS * sr, 1.0));
+            held = 1.0;
+            sounded = false;
+            value = 1.0;
+        }
+
+        double process (double target, double source) noexcept
+        {
+            if (target > gate)
+            {
+                held = std::clamp (target / std::max (source, 1e-12), 1.0 / ceiling, ceiling);
+                sounded = true;
+            }
+
+            const auto wanted = sounded ? held : 1.0;
+            value = (1.0 - smooth) * wanted + smooth * value;
+            return value;
+        }
+
+    private:
+        double ceiling { 1.0 }, gate { 0.0 }, smooth { 0.0 };
+        double held { 1.0 }, value { 1.0 };
+        bool sounded { false };
+    };
+
+    /** Saturation with the level change taken back out.
+
+        DRIVE is a contamination control, not a gain control, so the RMS it
+        adds is removed afterwards. Makeup is referenced to the knob position
+        rather than to the realised output, so a MELTDOWN is allowed to get
+        louder, which it should.
+    */
+    class Drive
+    {
+    public:
+        void prepare (double sampleRate) noexcept
+        {
+            sr = sampleRate;
+            before.prepare (sr, kDriveMatchS);
+            after.prepare (sr, kDriveMatchS);
+            makeup.prepare (sr, kLevelMatchRangeDb);
+            oversamplerL.reset();
+            oversamplerR.reset();
+            gainDelay.fill (1.0);
+            gainDelayPos = 0;
+        }
+
+        void set (double driveAmount, double weight) noexcept
+        {
+            amount = driveAmount;
+            gain = 1.0 + 11.0 * (std::pow (amount, 0.6) * weight);
+        }
+
+        void process (double xL, double xR, double& outL, double& outR) noexcept
+        {
+            if (amount <= 0.0)
+            {
+                outL = xL;
+                outR = xR;
+                return;
+            }
+
+            // running_rms averages POWER across channels.
+            const auto meanSquare = 0.5 * (xL * xL + xR * xR);
+            const auto plainL = softClip (xL, gain);
+            const auto plainR = softClip (xR, gain);
+
+            const auto levelBefore = before.process (std::sqrt (meanSquare));
+            const auto levelAfter = after.process (std::sqrt (0.5 * (plainL * plainL + plainR * plainR)));
+            const auto g = makeup.process (levelBefore, levelAfter);
+
+            // The makeup is derived from live level but scales audio the
+            // oversampler has already delayed, so it has to wait the same
+            // number of samples or it is applied to the wrong material.
+            const auto delayedGain = gainDelay[static_cast<size_t> (gainDelayPos)];
+            gainDelay[static_cast<size_t> (gainDelayPos)] = g;
+            gainDelayPos = (gainDelayPos + 1 == kOversamplerLatencySamples) ? 0 : (gainDelayPos + 1);
+
+            const auto curve = [] (double u) noexcept { return softClip (u); };
+            outL = oversamplerL.process (xL * gain, curve) * delayedGain;
+            outR = oversamplerR.process (xR * gain, curve) * delayedGain;
+        }
+
+    private:
+        double sr { 44100.0 }, amount { 0.0 }, gain { 1.0 };
+        RunningRms before, after;
+        MatchingGain makeup;
+        Oversampler oversamplerL, oversamplerR;
+        std::array<double, kOversamplerLatencySamples> gainDelay {};
+        int gainDelayPos { 0 };
+    };
 
     /** Closes a high-pass and a low-pass in on kCollimatorCentreHz.
 

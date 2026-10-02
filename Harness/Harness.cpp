@@ -392,7 +392,31 @@ int main()
                 values.push_back (r);
             }
         }
-        printArray ("unity_match", values, true);
+        printArray ("unity_match", values);
+    }
+
+    // Drive runs its curve through the oversampler, so the same latency and
+    // cold-start region apply as to the oversampler on its own.
+    {
+        constexpr int settle = 41;
+        dsp::Drive drive;
+        drive.prepare (sampleRate);
+        drive.set (0.6, 1.3);
+
+        std::vector<double> values;
+        for (int i = 0; i < 6000; ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto tone = 0.4 * std::sin (2.0 * M_PI * 180.0 * t);
+            double l = 0.0, r = 0.0;
+            drive.process (tone, 0.7 * tone, l, r);
+            if (i >= settle && (i - settle) % 40 == 0)
+            {
+                values.push_back (l);
+                values.push_back (r);
+            }
+        }
+        printArray ("drive", values, true);
     }
 
     std::printf ("}\n");
