@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../Source/Dsp/Alien.h"
+#include "../Source/Dsp/Chemical.h"
 #include "../Source/Dsp/Filters.h"
 #include "../Source/Dsp/Oversampler.h"
 #include "../Source/Dsp/Rng.h"
@@ -218,7 +219,34 @@ int main()
                 values.push_back (r);
             }
         }
-        printArray ("alien_engine", values, true);
+        printArray ("alien_engine", values);
+    }
+
+    // CHEMICAL: two events, so the register's zero-order hold is exercised
+    // and not just the ladder underneath it.
+    {
+        dsp::ChemicalEngine engine;
+        engine.prepare (sampleRate);
+        engine.setSeed (9);
+        engine.setEvent (2);
+
+        std::vector<double> values;
+        for (int i = 0; i < 4000; ++i)
+        {
+            if (i == 2000)
+                engine.setEvent (7);
+
+            const auto t = i / sampleRate;
+            const auto x = 0.3 * std::sin (2.0 * M_PI * 150.0 * t);
+            const auto y = engine.process (x, 700.0, 2.2, 1.4);
+
+            if (i % 20 == 0)
+            {
+                values.push_back (y);
+                values.push_back (y);
+            }
+        }
+        printArray ("chemical_engine", values, true);
     }
 
     std::printf ("}\n");

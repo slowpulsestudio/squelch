@@ -133,6 +133,34 @@ def _alien_reference() -> np.ndarray:
     return out[::20].reshape(-1)
 
 
+def _chemical_reference() -> np.ndarray:
+    """Source/Dsp/Chemical.h against reactor._chemical_engine.
+
+    Two events, so the zero-order hold is exercised rather than just the
+    ladder: the register must change at the second event's start and not
+    before. No oversampler anywhere in CHEMICAL, so sample 0 must agree.
+    """
+    from .scheduler import Event
+
+    n = 4000
+    t = np.arange(n) / SR
+    x = np.repeat((0.3 * np.sin(2.0 * np.pi * 150.0 * t))[:, None], 2, axis=1)
+    p = Params(reaction="CHEMICAL", seed=9)
+    profile = PROFILES["CHEMICAL"]
+
+    def event(start, index):
+        return Event(start=start, index=index, intensity=1.0, decay_scale=1.0,
+                     tone=0.5, pan=0.0, shape=0.5, depth=0.0, accent=False,
+                     slide=False)
+
+    cutoff = np.full(n, 700.0)
+    feedback = np.full(n, 2.2)
+    drive = np.full(n, 1.4)
+    out = reactor._chemical_engine(x, cutoff, feedback, drive, SR, profile,
+                                   [event(0, 2), event(2000, 7)], None, p, None)
+    return out[::20].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -159,6 +187,7 @@ def expectations() -> dict:
         "sludge_engine": _sludge_reference(SLUDGE_PARAMS_A),
         "sludge_engine_b": _sludge_reference(SLUDGE_PARAMS_B),
         "alien_engine": _alien_reference(),
+        "chemical_engine": _chemical_reference(),
     }
 
 
