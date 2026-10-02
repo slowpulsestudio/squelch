@@ -586,6 +586,17 @@ RADIATION_EPS_P = 0.8
 RADIATION_TAU_G_S = 0.008
 RADIATION_EPS_G = 0.015
 
+#: The pulse/tick excitation is self-generated rather than drawn from x, so on
+#: its own it would not back off when the input is trimmed down: the plugin
+#: would sound the same however it is fed, which is the one thing DRIVE's own
+#: check explicitly forbids. Tracking the input's own running level and
+#: scaling the excitation by it against this reference restores that: typical
+#: programme material sits near this RMS, so the excitation runs at its
+#: designed level there and recedes with the input below it, the way a real
+#: circuit's self-noise would relative to a fading signal.
+RADIATION_EXCITATION_TRACK_S = 0.3
+RADIATION_EXCITATION_REF = 0.3
+
 
 def _radiation_engine(
     x: np.ndarray,
@@ -636,7 +647,14 @@ def _radiation_engine(
     decay_time = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
     bandwidth = 1.0 / (np.pi * max(decay_time, 0.005)) * (1.0 - 0.7 * p.exposure)
     bandwidth = max(bandwidth, 5.0)
-    r_damp = float(np.clip(np.exp(-np.pi * bandwidth / sr), 0.0, 0.999))
+    # Capped below the theoretical 0.999 ceiling: the natural bandwidth formula
+    # above sits below the old floor for almost every realistic decay/exposure
+    # setting, so that ceiling was the one actually in force nearly all the
+    # time, pinning RADIATION at its absolute sharpest resonance regardless of
+    # the controls. 0.99 still rings hard but leaves the output stage's slow,
+    # intentionally non-compressing level match (see unity_match) enough
+    # headroom to track real program material without pumping.
+    r_damp = float(np.clip(np.exp(-np.pi * bandwidth / sr), 0.0, 0.99))
 
     # Event-local percussive pulse.
     pulse = np.zeros(n)
@@ -655,14 +673,23 @@ def _radiation_engine(
     a_g = float(np.exp(-1.0 / max(RADIATION_TAU_G_S * sr, 1.0)))
     tick = lfilter([1.0 - a_g], [1.0, -a_g], rng_np.uniform(-1.0, 1.0, n))
 
-    excitation = RADIATION_EPS_P * pulse + RADIATION_EPS_G * tick
+    input_level = filters.running_rms(x, sr, RADIATION_EXCITATION_TRACK_S)
+    excite_gain = np.clip(input_level / RADIATION_EXCITATION_REF, 0.0, 1.0)
+    excitation = excite_gain * (RADIATION_EPS_P * pulse + RADIATION_EPS_G * tick)
     e = x + excitation[:, None]
 
-    # A narrow-bandwidth resonator rings for a long time, which also means it
-    # integrates a steady excitation up to a huge steady-state amplitude
-    # (sum 1/(1-r_damp)): normalise the excitation by that same factor so
-    # resonance changes the ring, not the delivered level.
-    e = e * max(1.0 - r_damp, 1e-4)
+    # The driving signal here is broadband (programme material plus a
+    # broadband tick), not a sustained tone at resonance, so the resonator's
+    # steady-state gain is set by its ENERGY response, not its DC response:
+    # a narrow-bandwidth resonator driven by noise accumulates variance
+    # proportional to 1/(1-r_damp^2), not amplitude proportional to
+    # 1/(1-r_damp). Normalising by (1-r_damp) assumes the latter and left
+    # RADIATION's delivered level roughly an order of magnitude under every
+    # other reaction once the engines were real. sqrt(1-r_damp^2) is the
+    # correct energy-domain normalisation for a resonator fed broadband
+    # content; resonance still changes the ring, not the delivered level,
+    # it is just measured in RMS rather than in peak amplitude.
+    e = e * max(np.sqrt(1.0 - r_damp**2), 1e-4)
 
     out = np.zeros((n, channels))
     v_re = np.zeros(channels)
