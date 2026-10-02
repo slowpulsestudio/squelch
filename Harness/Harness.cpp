@@ -13,7 +13,9 @@
 #include <vector>
 
 #include "../Source/Dsp/Filters.h"
+#include "../Source/Dsp/Oversampler.h"
 #include "../Source/Dsp/Rng.h"
+#include "../Source/Dsp/Saturation.h"
 
 namespace
 {
@@ -84,7 +86,30 @@ int main()
             if (i % 100 == 0)
                 levels.push_back (value);
         }
-        printArray ("running_rms", levels, true);
+        printArray ("running_rms", levels);
+    }
+
+    // The oversampler is causal (ordinary delay-line state), where the Python
+    // reference is acausal (scipy's zero-phase resample_poly). They produce
+    // the same values, just kOversamplerLatencySamples apart -- see
+    // Oversampler.h's docstring. Skip latency, then a further settling
+    // region: the FIR's zero initial state takes longer than the bare
+    // latency to settle for low-frequency content, so comparing right at
+    // latency alone catches it still ringing from a cold start.
+    {
+        constexpr int settle = 320;
+        dsp::Oversampler oversampler;
+        std::vector<double> values;
+        for (int i = 0; i < 2500; ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto x = 0.6 * std::sin (2.0 * M_PI * 300.0 * t)
+                         + 0.5 * std::sin (2.0 * M_PI * 5000.0 * t);
+            const auto y = oversampler.process (x, [] (double v) { return dsp::softClip (v); });
+            if (i >= settle && (i - settle) % 20 == 0)
+                values.push_back (y);
+        }
+        printArray ("oversampler_soft_clip", values, true);
     }
 
     std::printf ("}\n");

@@ -15,18 +15,14 @@ Measured, not estimated.
 | | state |
 |---|---|
 | specification | all five reactions specified in maths.md |
-| implementation | one ladder with five coefficient sets |
-| `prototype/checks.py` | 28/32 passing |
-| reaction distinctness | 10/10 pairs too alike; RADIATION/CHEMICAL at −26.0 dB |
-| C++ port | DSP primitives only, 9/9 agreeing to machine precision |
-| git | one local commit `d9636b7`, nothing pushed |
+| implementation | five distinct engines (SLUDGE, ALIEN, CHEMICAL, RADIATION, FISSION), dispatched per-reaction; no shared ladder |
+| `prototype/checks.py` | 37/37 passing |
+| reaction distinctness | 0/10 pairs too alike; closest FISSION/CHEMICAL at −6.1 dB |
+| noise generation | fully causal: every stochastic value hashes (seed, stream, sample index), no stateful RNG left in reactor.py/reactions.py/rng.py |
+| C++ port | DSP primitives only, 9/9 agreeing to machine precision; no engine ported yet |
+| git | `fc734b8`, nothing pushed |
 
-The distinctness check fails by design. It is the red test this plan exists to
-turn green, and it must not be relaxed to make progress look better.
-
-Three other failures — drive, enrichment, ionize — are calibrated against the
-old single ladder. Leave them. They will need re-deriving once the engines are
-real, and chasing them now is work that gets thrown away.
+Steps 1-6 below are done. Step 7 (the C++ port) is in progress.
 
 ---
 

@@ -19,7 +19,7 @@ import sys
 import numpy as np
 from scipy.signal import lfilter
 
-from . import filters, rng
+from . import filters, rng, saturation
 
 SR = 44100
 
@@ -36,6 +36,25 @@ def _running_rms_reference() -> np.ndarray:
     tone = np.sin(2.0 * np.pi * 220.0 * t)[:, None]
     level = filters.running_rms(np.repeat(tone, 2, axis=1), SR, 1.5)
     return level[::100]
+
+
+def _oversampler_reference() -> np.ndarray:
+    """Source/Dsp/Oversampler.h's causal pipeline matches scipy's acausal
+    resample_poly round trip, but delayed by its measured latency (see that
+    header's docstring) rather than compensating the group delay out. Skip
+    latency, then a further settling region: starting from zero state, low
+    frequency content takes longer than the bare latency to stop ringing
+    from the cold start, so comparing too early would catch a real (if
+    transient) difference rather than a bug.
+    """
+    n = 2500
+    settle = 320
+    latency = 20
+    t = np.arange(n) / SR
+    x = 0.6 * np.sin(2.0 * np.pi * 300.0 * t) + 0.5 * np.sin(2.0 * np.pi * 5000.0 * t)
+    ref = saturation.oversampled(x[:, None], saturation.soft_clip)[:, 0]
+    indices = np.arange(settle, n, 20)
+    return ref[indices - latency]
 
 
 def expectations() -> dict:
@@ -60,6 +79,7 @@ def expectations() -> dict:
         "low_shelf": filters.low_shelf(stereo, 70.0, 2.5, SR)[:, 0],
         "high_shelf": filters.high_shelf(stereo, 15000.0, 1.0, SR)[:, 0],
         "running_rms": _running_rms_reference(),
+        "oversampler_soft_clip": _oversampler_reference(),
     }
 
 
