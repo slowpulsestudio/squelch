@@ -45,6 +45,29 @@ BED_MATCH_S = 1.5
 @dataclass
 class ReactionProfile:
     name: str
+
+    #: Where the ladder rests, and how far SPREAD can carry it above that in
+    #: octaves. Octaves rather than hertz so the sweep stays musical wherever
+    #: it starts.
+    base_hz: float
+    sweep_octaves: float
+    #: How long the cutoff takes to fall back to rest, at DECAY zero and full.
+    tau_lo_s: float
+    tau_hi_s: float
+    #: Loop feedback. Four is self-oscillation, so this is how close this
+    #: reaction gets to singing on its own.
+    feedback_lo: float
+    feedback_hi: float
+    #: Saturation inside the feedback loop.
+    drive_lo: float
+    drive_hi: float
+    #: Which poles are summed: lowpass, bandpass or highpass out of the one
+    #: ladder.
+    tap: tuple[float, float, float, float]
+    #: Which steps are accented. Accents open the sweep further and push the
+    #: feedback closer to oscillation, so they change character and not level.
+    accents: tuple[int, ...]
+
     cutoff_lo_hz: float
     cutoff_hi_hz: float
     decay_lo_s: float
@@ -363,6 +386,16 @@ def _shift(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) ->
 PROFILES = {
     "RADIATION": ReactionProfile(
         name="RADIATION",
+        base_hz=220.0,
+        sweep_octaves=4.4,
+        tau_lo_s=0.03,
+        tau_hi_s=0.22,
+        feedback_lo=1.6,
+        feedback_hi=3.55,
+        drive_lo=1.1,
+        drive_hi=2.6,
+        tap=(0.0, 0.0, 0.0, 1.0),
+        accents=(0, 0, 1, 0, 1, 0, 0, 1),
         cutoff_lo_hz=420.0,
         cutoff_hi_hz=7500.0,
         decay_lo_s=0.025,
@@ -386,6 +419,16 @@ PROFILES = {
     ),
     "FISSION": ReactionProfile(
         name="FISSION",
+        base_hz=320.0,
+        sweep_octaves=3.2,
+        tau_lo_s=0.06,
+        tau_hi_s=0.38,
+        feedback_lo=2.0,
+        feedback_hi=3.82,
+        drive_lo=1.0,
+        drive_hi=2.1,
+        tap=(0.0, -1.0, 0.0, 1.0),
+        accents=(0, 1, 0, 0, 1, 0, 1, 0),
         cutoff_lo_hz=340.0,
         cutoff_hi_hz=3600.0,
         decay_lo_s=0.08,
@@ -409,6 +452,16 @@ PROFILES = {
     ),
     "SLUDGE": ReactionProfile(
         name="SLUDGE",
+        base_hz=70.0,
+        sweep_octaves=2.4,
+        tau_lo_s=0.12,
+        tau_hi_s=0.7,
+        feedback_lo=1.4,
+        feedback_hi=2.95,
+        drive_lo=1.6,
+        drive_hi=3.6,
+        tap=(0.0, 0.0, 0.0, 1.0),
+        accents=(0, 0, 0, 1, 0, 0, 1, 0),
         cutoff_lo_hz=150.0,
         cutoff_hi_hz=1300.0,
         decay_lo_s=0.25,
@@ -432,6 +485,16 @@ PROFILES = {
     ),
     "CHEMICAL": ReactionProfile(
         name="CHEMICAL",
+        base_hz=180.0,
+        sweep_octaves=4.8,
+        tau_lo_s=0.035,
+        tau_hi_s=0.26,
+        feedback_lo=1.5,
+        feedback_hi=3.25,
+        drive_lo=1.1,
+        drive_hi=2.5,
+        tap=(0.0, 0.0, 0.0, 1.0),
+        accents=(0, 0, 1, 0, 0, 1, 0, 1),
         cutoff_lo_hz=180.0,
         cutoff_hi_hz=3800.0,
         decay_lo_s=0.03,
@@ -459,6 +522,16 @@ PROFILES = {
     ),
     "ALIEN": ReactionProfile(
         name="ALIEN",
+        base_hz=400.0,
+        sweep_octaves=5.2,
+        tau_lo_s=0.02,
+        tau_hi_s=0.16,
+        feedback_lo=2.2,
+        feedback_hi=3.92,
+        drive_lo=1.0,
+        drive_hi=1.8,
+        tap=(1.0, -2.0, 0.0, 1.0),
+        accents=(1, 0, 1, 0, 1, 1, 0, 1),
         cutoff_lo_hz=440.0,
         cutoff_hi_hz=6500.0,
         decay_lo_s=0.04,

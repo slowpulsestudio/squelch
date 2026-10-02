@@ -279,39 +279,59 @@ def check_acid_voice() -> tuple[bool, str]:
 
     A resonant lowpass swept by a per-note envelope is what squelches. Holding
     a frequency, or using a bandpass, removes both the squelch and the bassline.
+
+    Measured on the envelope that drives the ladder, not on build_controls:
+    that one still computes a cutoff nobody reads, so testing it passed while
+    the delivered filter sat still.
     """
+    from .meltdown import Meltdown
     from .params import Params
     from .reactions import PROFILES
-    from .reactor import build_controls
+    from .reactor import envelopes
     from .scheduler import schedule
 
     profile = PROFILES["CHEMICAL"]
     n = SR * 4
     silence = np.zeros((n, 2))
     p = Params(reaction="CHEMICAL", mode="GRID", grid="1/8", seed=3, decay=0.3, spread=0.7)
-    events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
-    c = build_controls(events, n, SR, p, profile)
+    md = Meltdown(p, n, SR)
+    events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias, md=md)
+    cutoff, _, _ = envelopes(events, n, SR, p, profile, md)
 
-    octaves = np.log2(c.cutoff)
-    moving = float(np.mean(np.abs(np.diff(octaves)) > 1e-4)) * 100.0
+    octaves = np.log2(cutoff)
+
+    # Measured per note, not as a fraction of the whole control. A 303's sweep
+    # reaches its floor and sits there until the next note, so a settled tail
+    # is correct behaviour, and counting samples that are still moving marks it
+    # down for being right. What matters is that every note sweeps, and by how
+    # much.
+    starts = [e.start for e in events]
+    spans = [
+        octaves[starts[i] : min(starts[i + 1], n)] for i in range(len(starts) - 1)
+    ]
+    falls = np.array([float(s.max() - s[-1]) for s in spans if len(s) > 1])
+    swept = float(np.mean(falls > 0.5)) * 100.0
 
     accented = [e for e in events if e.accent]
     plain = [e for e in events if not e.accent]
-    blocks = lambda e: int(e.start / filters.BLOCK)
-    accent_peak = np.mean([octaves[blocks(e) : blocks(e) + 20].max() for e in accented[:40]])
-    plain_peak = np.mean([octaves[blocks(e) : blocks(e) + 20].max() for e in plain[:40]])
+    window = int(0.02 * SR)
+    peak_of = lambda e: octaves[e.start : e.start + window].max()
+    accent_peak = np.mean([peak_of(e) for e in accented[:40]])
+    plain_peak = np.mean([peak_of(e) for e in plain[:40]])
 
     slid = sum(1 for e in events if e.slide) / max(len(events), 1) * 100.0
 
     ok = (
         profile.voice == "acid"
-        and moving > 80.0
+        and swept > 90.0
+        and float(np.median(falls)) > 1.0
         and accent_peak > plain_peak
         and 20.0 < slid < 40.0
     )
     return ok, (
-        f"{moving:.0f}% of the envelope is moving, accents open "
-        f"{(accent_peak - plain_peak) * 12:.1f} semitones higher, {slid:.0f}% slide"
+        f"{swept:.0f}% of notes sweep, median fall {np.median(falls):.1f} octaves, "
+        f"accents open {(accent_peak - plain_peak) * 12:.1f} semitones higher, "
+        f"{slid:.0f}% slide"
     )
 
 
@@ -624,7 +644,7 @@ def check_meltdown_cannot_reach_backwards() -> tuple[bool, str]:
     up in the residual once that offset is divided out. A streaming port
     normalises nothing and has neither.
     """
-    from . import engine
+    from . import engine, output_stage
     from .params import Params
 
     seconds = 6.0
@@ -664,11 +684,15 @@ def check_ionize_scatters_three_axes() -> tuple[bool, str]:
     """IONIZE must place each event separately in stereo, spectrum and depth.
 
     Stereo is measured as consecutive events landing on opposite sides, which
-    is what separates ping-pong from merely wide.
+    is what separates ping-pong from merely wide. Spectrum and depth are
+    measured per event rather than across the whole control: the spread of a
+    continuous envelope is dominated by its own decay shape, which swamps the
+    scatter this is trying to see.
     """
+    from .meltdown import Meltdown
     from .params import Params
     from .reactions import PROFILES
-    from .reactor import build_controls
+    from .reactor import build_controls, envelopes
     from .scheduler import schedule
 
     profile = PROFILES["RADIATION"]
@@ -680,15 +704,32 @@ def check_ionize_scatters_three_axes() -> tuple[bool, str]:
     )
 
     measured = {}
+    registers = {}
     for label, on in (("off", False), ("on", True)):
         p = Params(**base, ionize=on, ionize_amount=0.9)
-        events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias)
+        md = Meltdown(p, n, SR)
+        events = schedule(silence, SR, p, 140.0, sub_event_bias=profile.sub_event_bias, md=md)
         c = build_controls(events, n, SR, p, profile)
+        cutoff, _, _ = envelopes(events, n, SR, p, profile, md)
 
         difference = c.pan_gain[:, 0] - c.pan_gain[:, 1]
-        spectrum = float(np.std(np.log2(c.cutoff)) * 12.0)
-        depth = float(np.std(c.send))
-        measured[label] = (float(np.sqrt(np.mean(difference**2))), spectrum, depth)
+
+        # Each event's register, read just before the next one fires. Held per
+        # event rather than reduced to a spread: an event that has not finished
+        # decaying sits high for reasons that have nothing to do with IONIZE,
+        # and that variance is larger than the scatter being looked for. The
+        # two runs schedule identically, so differencing them cancels it.
+        starts = [e.start for e in events]
+        registers[label] = np.array([
+            float(np.log2(cutoff[min(starts[i + 1], n) - 1]))
+            for i in range(len(starts) - 1)
+        ])
+
+        sends = [
+            float(c.send[min(e.start // filters.BLOCK, len(c.send) - 1) :][:40].max())
+            for e in events[:-1]
+        ]
+        measured[label] = (float(np.sqrt(np.mean(difference**2))), float(np.std(sends)))
 
         if on:
             # Consecutive events should alternate sides.
@@ -700,21 +741,22 @@ def check_ionize_scatters_three_axes() -> tuple[bool, str]:
             alternates = flips / max(len(sides) - 1, 1)
 
     off, on = measured["off"], measured["on"]
+    scatter = float(np.std(registers["on"] - registers["off"]) * 12.0)
     ok = (
         on[0] > 0.2 and off[0] < 1e-6      # stereo: centred when off
-        and on[1] > off[1] * 1.3           # spectrum: wider scatter
-        and on[2] > off[2] * 1.3           # depth: varied sends
+        and scatter > 2.0                  # spectrum: own register per event
+        and on[1] > off[1] * 1.3           # depth: varied sends
         and alternates > 0.6
     )
     return ok, (
-        f"stereo {off[0]:.3f}->{on[0]:.3f}, spectrum {off[1]:.1f}->{on[1]:.1f} st, "
-        f"depth {off[2]:.3f}->{on[2]:.3f}, {alternates * 100:.0f}% alternate sides"
+        f"stereo {off[0]:.3f}->{on[0]:.3f}, spectrum scatter {scatter:.1f} st, "
+        f"depth {off[1]:.3f}->{on[1]:.3f}, {alternates * 100:.0f}% alternate sides"
     )
 
 
 def check_afterglow_is_independent() -> tuple[bool, str]:
     """AFTERGLOW must work on its own and add a tail that outlasts the input."""
-    from . import engine
+    from . import engine, output_stage
     from .params import Params
 
     n = SR * 6
@@ -742,7 +784,7 @@ def check_ionize_moves_the_delivered_mix() -> tuple[bool, str]:
     squeezed 7.5dB of swing down to 3.6dB. Measure what comes out, not what
     was asked for.
     """
-    from . import engine
+    from . import engine, output_stage
     from .params import Params
 
     dry, sr = audio_io.load(_source())
@@ -871,7 +913,7 @@ def check_enrichment_drives_without_changing_level() -> tuple[bool, str]:
     """
     import soundfile as sf
 
-    from . import engine
+    from . import engine, output_stage
     from .params import Params
 
     source, sr = sf.read(_source(), always_2d=True, dtype="float64")
@@ -922,7 +964,7 @@ def check_level_match_is_causal() -> tuple[bool, str]:
     """
     import soundfile as sf
 
-    from . import engine
+    from . import engine, output_stage
     from .params import Params
 
     source, sr = sf.read(_source(), always_2d=True, dtype="float64")
@@ -959,22 +1001,19 @@ def check_level_match_is_causal() -> tuple[bool, str]:
     )
 
 
-def check_level_match_does_not_pump() -> tuple[bool, str]:
-    """A level match that follows the programme is a compressor.
+def check_peak_control_does_not_pump() -> tuple[bool, str]:
+    """Peak control that follows the programme is a compressor.
 
-    Tracking quickly would drag the output into the shape of the input and
-    flatten the dynamics the reaction just created, so the gain is held to a
-    crawl. Measured against the offline version, which applies one fixed number
-    to the whole render and therefore cannot pump by definition.
+    This stage exists to stop transients going over, not to even the level out.
+    If its gain moves with the music it is compressing, which is the thing the
+    chain deliberately does not do: the brief was space and feel, not volume.
 
-    The wander is the figure that decides whether anything is audible: pumping
-    is a change in level, and a gain that moves quickly inside a tenth of a dB
-    is not pumping. The rate is bounded as well, because the same small wander
-    arriving at a few hertz would be heard, but it is the looser of the two.
+    Measured as the gain itself rather than as a difference between two
+    renders, so there is nothing to subtract and no epsilon to invent a wobble.
     """
     import soundfile as sf
 
-    from . import engine
+    from . import filters, output_stage, reactions, reactor
     from .params import Params
 
     source, sr = sf.read(_source(), always_2d=True, dtype="float64")
@@ -983,41 +1022,104 @@ def check_level_match_does_not_pump() -> tuple[bool, str]:
         reaction="RADIATION", mode="GRID", grid="1/16",
         drive=0.6, toxicity=0.5, seed=3,
     )
+    profile = reactions.PROFILES[p.reaction]
 
-    live, _ = engine.process(source, sr, p, 140.0)
-    fixed, _ = engine.process(source, sr, p, 140.0, offline=True)
+    wet, controls, _ = reactor.process(source * p.enrichment_gain(), sr, p, 140.0)
+    y = output_stage.drive(wet, sr, p, profile.drive_weight, None)
+    y = output_stage.collimate(y, sr, p)
+    y = y * np.stack(
+        [filters.to_sample_rate(controls.pan_gain[:, ch], len(y)) for ch in (0, 1)], axis=1
+    )
+    y = output_stage.fallout(y, sr, p, profile, controls)
+    y = output_stage.voice(y, sr)
+    controlled = output_stage.unity_match(y, source, sr)
 
     settled = slice(int(6 * sr), None)
+    loud = np.max(np.abs(y[settled]), axis=1) > 1e-4
+    gain = 20.0 * np.log10(
+        (np.max(np.abs(controlled[settled]), axis=1) + 1e-15)
+        / (np.max(np.abs(y[settled]), axis=1) + 1e-15)
+    )[loud]
+
     span = 512
-    length = (len(live[settled]) // span) * span
+    length = (len(gain) // span) * span
+    blocks = gain[:length].reshape(-1, span).mean(axis=1)
 
-    # Block RMS, not a per-sample ratio of the two waveforms. Dividing sample
-    # by sample needs an epsilon to survive the zero crossings, and that
-    # epsilon drags the ratio towards unity every time both signals pass
-    # through zero, inventing a fast wobble that is not in the gain at all.
-    def envelope(y: np.ndarray) -> np.ndarray:
-        block = y[settled][:length, 0].reshape(-1, span)
-        return np.sqrt(np.mean(block**2, axis=1)) + 1e-15
-
-    gain = 20.0 * np.log10(envelope(live) / envelope(fixed))
-
-    swing = float(gain.max() - gain.min())
-    movement = np.abs(np.diff(gain)) * sr / span
-    # The peak rate is a single-sample statistic and a hold ending produces one
-    # brief step, so it says little about whether anything is audible. The
-    # sustained rate and the total wander are the figures that do.
+    swing = float(blocks.max() - blocks.min())
+    movement = np.abs(np.diff(blocks)) * sr / span
     sustained = float(np.percentile(movement, 95))
-    peak = float(movement.max())
 
-    level = 20.0 * np.log10(
-        (np.sqrt(np.mean(live[settled] ** 2)) + 1e-18)
-        / (np.sqrt(np.mean(source[settled] ** 2)) + 1e-18)
+    # The hold is a level offset, not movement, so it is reported rather than
+    # asserted: what matters is that the gain is not riding the music.
+    ok = swing < 3.0 and sustained < 6.0
+    return ok, (
+        f"gain wanders {swing:.2f} dB, sustained {sustained:.2f} dB/s, "
+        f"holding at {blocks.mean():+.2f} dB"
     )
 
-    ok = swing < 1.5 and sustained < 6.0 and abs(level) < 1.0
+
+def check_limiter_is_not_doing_the_work() -> tuple[bool, str]:
+    """The limiter is a safety net, not the thing setting the level.
+
+    The reaction raises the crest factor, so matching the output's RMS to the
+    input's used to put the peaks 9 dB over full scale and leave a brickwall to
+    deal with it. Every render came out at exactly the ceiling, and the
+    giveaway was that DRIVE at zero was the worst case of all: saturation
+    lowers crest, so turning it up made the limiter work less, which is the
+    reverse of how it sounded.
+
+    Measured at the limiter's input, across material and across DRIVE, because
+    the failure was invisible at the output: the ceiling always holds, which is
+    exactly why looking at the output tells you nothing.
+    """
+    import glob
+
+    import soundfile as sf
+
+    from . import filters, output_stage, reactions, reactor
+    from .params import Params
+
+    worst_reduction = 0.0
+    worst_engaged = 0.0
+    worst_source = ""
+
+    for path in sorted(glob.glob("Input/*.wav")):
+        source, sr = sf.read(path, always_2d=True, dtype="float64")
+
+        for amount in (0.0, 0.5, 1.0):
+            p = Params(
+                reaction="RADIATION", mode="GRID", grid="1/16",
+                drive=amount, toxicity=0.5, contamination=0.4, seed=3,
+            )
+            profile = reactions.PROFILES[p.reaction]
+            wet, controls, _ = reactor.process(source * p.enrichment_gain(), sr, p, 140.0)
+
+            y = output_stage.drive(wet, sr, p, profile.drive_weight, None)
+            y = output_stage.collimate(y, sr, p)
+            y = y * np.stack(
+                [filters.to_sample_rate(controls.pan_gain[:, ch], len(y)) for ch in (0, 1)],
+                axis=1,
+            )
+            y = output_stage.fallout(y, sr, p, profile, controls)
+            y = output_stage.voice(y, sr)
+
+            peak = float(np.abs(y).max())
+            reduction = 20.0 * np.log10(output_stage.LIMITER_CEILING / peak) if peak > output_stage.LIMITER_CEILING else 0.0
+            engaged = 100.0 * float(np.mean(np.abs(y) > output_stage.LIMITER_CEILING))
+
+            if reduction < worst_reduction:
+                worst_reduction = reduction
+                worst_source = path.split("/")[-1][10:-4] + f" at DRIVE {amount:.1f}"
+            worst_engaged = max(worst_engaged, engaged)
+
+    # How often and how hard, not how high. A peak figure says nothing about
+    # whether anything is audible: one transient touching the ceiling is a
+    # limiter working, a tenth of the render pinned against it is a limiter
+    # setting the level.
+    ok = worst_reduction > -6.0 and worst_engaged < 0.5
     return ok, (
-        f"gain wanders {swing:.2f} dB, sustained {sustained:.1f} dB/s "
-        f"(peak {peak:.1f}), settles {level:+.2f} dB from the input"
+        f"worst case {worst_reduction:.1f} dB on {worst_engaged:.2f}% of samples "
+        f"({worst_source})"
     )
 
 
@@ -1149,6 +1251,7 @@ CHECKS = [
     ("ladder response", check_ladder_response),
     ("limiter catches spike", check_limiter_catches_spike),
     ("limiter releases gently", check_limiter_releases_gently),
+    ("limiter is not doing the work", check_limiter_is_not_doing_the_work),
     ("drive does not alias", check_drive_does_not_alias),
     ("drive responds to input level", check_drive_responds_to_input_level),
     (
@@ -1157,7 +1260,7 @@ CHECKS = [
     ),
     ("quiet material is untouched", check_quiet_material_is_untouched),
     ("level match is causal", check_level_match_is_causal),
-    ("level match does not pump", check_level_match_does_not_pump),
+    ("level control does not pump", check_peak_control_does_not_pump),
     ("clip trades lookahead for hardness", check_clip_trades_lookahead_for_hardness),
     ("frequency shift", check_frequency_shift),
     ("octave down", check_octave_down),

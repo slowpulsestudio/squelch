@@ -8,14 +8,14 @@ VOLATILITY, HALF-LIFE, TOXICITY and CONTAINMENT act.
 from __future__ import annotations
 
 import numpy as np
+from scipy.signal import lfilter
 
 from . import filters, rng
 from .controls import Controls
 from .meltdown import Meltdown
 from .params import Params
 from .reactions import PROFILES, ReactionProfile, contaminate
-from .reverb import reverb
-from .scheduler import Event, schedule
+from .scheduler import MAX_SUB_EVENTS, Event, schedule
 
 #: Envelope attack. Long enough that the ramp spans many control blocks, so the
 #: envelope glides rather than stepping into a click on short, high-Q events.
@@ -23,7 +23,7 @@ ATTACK_S = 0.005
 
 #: Always-on smoothing of the control signals, short enough to leave fast
 #: squelch movement intact but long enough to take the staircase off each step.
-ANTI_STEP_S = 0.0015
+ANTI_STEP_S = 0.015
 
 #: Where a fully-closed sweep rests, as a fraction up the reaction's span. A
 #: static filter parked at the bottom of its range is just mud.
@@ -42,6 +42,24 @@ ACCENT_ENV_MOD = 1.45
 ACCENT_RESONANCE = 1.30
 UNACCENTED_LEVEL = 0.74
 SLIDE_S = 0.060
+
+#: How hard the cutoff and feedback envelopes are rounded off at the instant an
+#: event retriggers. This is de-stepping, not sliding: it has to be far shorter
+#: than the sweep's own decay or it flattens the thing it is smoothing. At
+#: SLIDE_S it cost RADIATION 0.8 of its 5.2 octaves and left ALIEN with a
+#: quarter of the movement its reference render has.
+GLIDE_S = 0.002
+
+#: An accent opens the sweep further and pushes the feedback nearer to
+#: oscillation. It changes the voice of the note, not its volume.
+ACCENT_SWEEP_OCT = 0.8
+ACCENT_FEEDBACK = 0.25
+
+#: How far the feedback falls back between events, as a fraction of its peak,
+#: across HALF-LIFE's travel. This is the length of the ring: at the bottom the
+#: filter stops dead between events, at the top it never quite stops.
+CARRY_LO = 0.30
+CARRY_HI = 0.95
 
 #: How far VOLATILITY bends an event envelope away from a plain exponential.
 SHAPE_RANGE = 0.8
@@ -88,6 +106,7 @@ def build_controls(
     p: Params,
     profile: ReactionProfile,
     md: Meltdown | None = None,
+    open_rest: bool = False,
 ) -> Controls:
     nb = filters.n_blocks(n_samples)
     ctrl_sr = sr / filters.BLOCK
@@ -108,6 +127,13 @@ def build_controls(
     # it, so a static filter sits in the middle of its range rather than parked
     # at the bottom stripping everything above it.
     resting_ctrl = base_oct + span_oct * STATIC_CENTRE * (1.0 - spread_ctrl)
+
+    if open_rest:
+        # The filter idles open and only comes down as REACTIVITY asks it to,
+        # so at the bottom of the control the plugin passes the source through
+        # instead of lowpassing it at under a kilohertz.
+        open_oct = float(np.log2(sr * 0.45))
+        resting_ctrl = resting_ctrl + (open_oct - resting_ctrl) * (1.0 - p.reactivity)
 
     env_total = np.zeros(nb)
     pan_gain = np.ones((nb, 2))
@@ -254,34 +280,125 @@ def build_controls(
     )
 
 
-def process(x: np.ndarray, sr: int, p: Params, bpm: float) -> tuple[np.ndarray, Controls]:
+def envelopes(
+    events: list[Event], n: int, sr: int, p: Params, profile: ReactionProfile, md
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cutoff, feedback and loop drive, one sample at a time.
+
+    The cutoff is the 303's: it jumps to its peak the instant an event fires
+    and falls back exponentially,
+
+        fc(t) = base * 2 ** (sweep * exp(-t / tau))
+
+    with the sweep in octaves so it stays musical wherever base sits. An
+    accented step opens the sweep further and pushes the feedback nearer to
+    oscillation, so accents change the voice rather than the volume.
+
+    Nothing here touches amplitude. Multiplying the source by an event envelope
+    replaces its dynamics with a uniform stream, which is what flattened the
+    first build: 6.2dB of range in the source came out as 2.8dB.
+    """
+    spread = md.at("spread", 0)
+    toxicity = md.at("toxicity", 0)
+    exposure = md.at("exposure", 0)
+    containment = md.at("containment", 0)
+
+    sweep = profile.sweep_octaves * spread * (1.0 - 0.7 * containment)
+    tau = profile.tau_lo_s + (profile.tau_hi_s - profile.tau_lo_s) * p.decay
+    drive_amount = profile.drive_lo + (profile.drive_hi - profile.drive_lo) * toxicity
+
+    # HALF-LIFE sets how far the feedback falls between events, which is what
+    # decides how long the filter keeps ringing. Letting it drop all the way
+    # back kills the tail: measured 8.7dB of decay per 100ms against 5.2dB when
+    # the floor is held at just over half the peak. The ring is the reverb —
+    # there is no reverb in this path at all.
+    peak = profile.feedback_lo + (profile.feedback_hi - profile.feedback_lo) * exposure
+    carry = CARRY_LO + (CARRY_HI - CARRY_LO) * p.half_life
+    floor = peak * carry
+
+    ionize = p.ionize_amount if p.ionize else 0.0
+    base_oct = float(np.log2(profile.base_hz))
+
+    cutoff = np.full(n, profile.base_hz)
+    feedback = np.full(n, floor)
+    drive = np.full(n, drive_amount)
+
+    slide = max(int(SLIDE_S * sr), 1)
+    held = base_oct
+    starts = [max(int(e.start), 0) for e in events]
+    for i, event in enumerate(events):
+        start = starts[i]
+        if start >= n:
+            continue
+        end = min(starts[i + 1], n) if i + 1 < len(starts) else n
+        if end <= start:
+            continue
+
+        # The reaction's own accent pattern rides on the grid step, so each one
+        # keeps its rhythmic signature whatever the seed does, and the
+        # scheduler's own accents add to it. Indexing by the event's own index
+        # instead would step through the pattern five at a time, because the
+        # scheduler numbers sub-events inside each step, which scrambles it.
+        pattern = profile.accents[(event.index // MAX_SUB_EVENTS) % len(profile.accents)]
+        accent = min(1.0, pattern + (0.6 if event.accent else 0.0))
+
+        # A step that fans out into sub-events marks the extras as weaker. The
+        # sweep has to honour that: retriggering every one of them to full
+        # depth means the cutoff is pulled back to the top before it has fallen
+        # anywhere, and a filter that never falls does not squelch.
+        weight = event.intensity
+
+        tau_event = max(tau * event.decay_scale, 0.005)
+        shape = np.exp(-np.arange(end - start) / (tau_event * sr))
+
+        # IONIZE throws each event into its own register, so they pop apart
+        # instead of every sweep starting from the same place.
+        register = base_oct + ionize * IONIZE_SPECTRAL * rng.ubipolar(p.seed, 22, event.index)
+
+        depth = (sweep + ACCENT_SWEEP_OCT * accent * spread) * weight
+        curve = register + depth * shape
+        if event.slide:
+            # A slid note glides in from wherever the last one finished rather
+            # than jumping. This is the 303's portamento, and it is the reason
+            # the glide that de-steps the envelope has to stay separate from
+            # it: one is a musical gesture, the other is an anti-click.
+            #
+            # Capped at half the note. SLIDE_S is a fixed time, so against a
+            # fast grid it would otherwise cover most of the step and the
+            # sweep would spend its life ramping instead of falling.
+            ramp = np.linspace(0.0, 1.0, min(slide, max(len(curve) // 2, 1)))
+            curve[: len(ramp)] = held * (1.0 - ramp) + curve[: len(ramp)] * ramp
+        held = float(curve[-1])
+
+        cutoff[start:end] = np.power(2.0, curve)
+        feedback[start:end] = (
+            floor
+            + (peak - floor) * shape * weight
+            + ACCENT_FEEDBACK * accent * exposure * weight
+        )
+
+    # The ladder rings hard, so a step in its cutoff is a click.
+    glide = max(int(GLIDE_S * sr), 1)
+    cutoff = np.maximum(_glide(cutoff, glide), 20.0)
+    feedback = np.clip(_glide(feedback, glide), 0.0, 3.95)
+    return cutoff, feedback, drive
+
+
+def _glide(ctrl: np.ndarray, samples: int) -> np.ndarray:
+    coeff = float(np.exp(-1.0 / max(samples, 1)))
+    return lfilter([1.0 - coeff], [1.0, -coeff], ctrl, zi=np.array([coeff * ctrl[0]]))[0]
+
+
+def process(
+    x: np.ndarray, sr: int, p: Params, bpm: float, open_rest: bool = False
+) -> tuple[np.ndarray, Controls]:
     profile = PROFILES[p.reaction]
     md = Meltdown(p, len(x), sr)
     events = schedule(x, sr, p, bpm, sub_event_bias=profile.sub_event_bias, md=md)
-    controls = build_controls(events, len(x), sr, p, profile, md)
+    controls = build_controls(events, len(x), sr, p, profile, md, open_rest)
 
-    toxicity = md.ctrl("toxicity")
-    containment = md.ctrl("containment")
+    cutoff, feedback, drive = envelopes(events, len(x), sr, p, profile, md)
+    wet = filters.ladder(x, cutoff, feedback, drive, sr, tap=profile.tap)
 
-    inner_sat = profile.inner_sat * (0.3 + 0.7 * toxicity) * (1.0 - 0.7 * containment)
-    wet = filters.varying_ladder(x, controls.cutoff, controls.resonance, sr, inner_sat=inner_sat)
-
-    depth = (1.0 - profile.amp_floor) * (0.35 + 0.65 * toxicity) * (1.0 - 0.6 * containment)
-    # IONIZE needs each transient to stand alone, so the gaps between events
-    # open up: riding on a continuous bed, a placed event has nothing to be
-    # distinct from.
-    ionize = p.ionize_amount if p.ionize else 0.0
-    depth = depth + ionize * IONIZE_ARTICULATION * (1.0 - depth)
-    articulation = filters.to_sample_rate(1.0 - depth + depth * controls.env, len(x))
-    wet *= articulation[:, None]
-
-    # SPREAD is how far a reaction travels in pitch, so it drives the wind as
-    # well as the filter excursion.
-    wind_depth = md.ctrl("spread") * profile.wind_depth * (1.0 - 0.6 * containment)
-    if wind_depth.max() > 0.0:
-        wind = filters.smooth(controls.env, WIND_SMOOTH_S, sr) * wind_depth
-        wet = filters.pitch_wind(wet, wind, sr, MAX_WIND_S)
-
-    wet = profile.post(wet, x, controls, p, sr)
     wet = contaminate(wet, x, controls, p, profile, sr, md)
     return wet, controls, md

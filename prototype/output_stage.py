@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.ndimage import maximum_filter1d
-from scipy.signal import lfilter
 
 from . import filters, rng, saturation
 from .controls import Controls
@@ -35,6 +34,16 @@ AFTERGLOW_LEVEL = 0.9
 LIMITER_LOOKAHEAD_S = 0.005
 LIMITER_CEILING = 0.97
 LIMITER_RELEASE_S = 0.050
+
+#: Where the output aims its peaks, and how slowly it gets there. Slow enough
+#: that it sets a level rather than following an envelope. The rise is slower
+#: than the fall but both are long: an instant attack snaps the gain down on
+#: every transient, which measured 11.7 dB/s of sustained movement and is a
+#: compressor by any other name. The limiter catches what gets past this.
+PEAK_TARGET = 0.89
+PEAK_TRACK_S = 1.2
+PEAK_ATTACK_S = 0.6
+
 
 #: How slowly the streaming level match tracks. Long on purpose: anything near
 #: the speed of the programme turns a level match into a compressor.
@@ -183,28 +192,33 @@ def match_rms(y: np.ndarray, reference: np.ndarray, until: int | None = None) ->
     return y * (target / current)
 
 
-def running_match(y: np.ndarray, reference: np.ndarray, sr: int) -> np.ndarray:
-    """The same level match, but only ever looking backwards.
+def unity_match(y: np.ndarray, reference: np.ndarray, sr: int) -> np.ndarray:
+    """Aim the peaks just under the ceiling, in both directions.
 
-    match_rms measures the whole render before deciding on a gain, which no
-    plugin can do. This tracks both levels through a slow one-pole instead and
-    divides one by the other as it goes.
+    This used to match the output's RMS to the input's, which fought the
+    instrument. The ladder makes energy — that is what resonance is — so a
+    level match reads the resonance as too loud and removes it. Measured
+    against a peak-normalised reference it was 3 dB down overall and 6 dB down
+    through the midrange, which is where the squelch lives.
 
-    The time constant is the whole design. The job is to match average level,
-    not to follow the input's envelope: track too quickly and the output is
-    dragged into the shape of the dry signal, which flattens the dynamics the
-    reaction just created. It is slow enough to settle on a figure and stay
-    there.
-
-    Quiet passages hold the last gain rather than being matched. Dividing two
-    small numbers gives a large gain for no good reason, and resetting to unity
-    instead of holding biases the whole render upwards.
+    Slow enough to be a level and not an envelope. It does lift quiet material,
+    unlike the peak control it replaces: a reaction that rings less is not
+    meant to be quieter, it is meant to be a different sound at the same level.
     """
-    coeff = float(np.exp(-1.0 / max(LEVEL_MATCH_S * sr, 1.0)))
-    wet = filters.running_rms(y, sr, LEVEL_MATCH_S)
-    dry = filters.running_rms(reference, sr, LEVEL_MATCH_S)
+    magnitude = np.max(np.abs(y), axis=1)
+
+    attack = float(np.exp(-1.0 / max(PEAK_ATTACK_S * sr, 1.0)))
+    release = float(np.exp(-1.0 / max(PEAK_TRACK_S * sr, 1.0)))
+    level = np.empty(len(magnitude))
+    held = 0.0
+    for i, value in enumerate(magnitude):
+        coeff = attack if value > held else release
+        held = value + (held - value) * coeff
+        level[i] = held
+
     gain = filters.matching_gain(
-        dry, wet, sr, LEVEL_MATCH_S, LEVEL_MATCH_RANGE_DB, LEVEL_MATCH_GATE_DB
+        np.full(len(y), PEAK_TARGET), level, sr, PEAK_TRACK_S,
+        LEVEL_MATCH_RANGE_DB, LEVEL_MATCH_GATE_DB,
     )
     return y * gain[:, None]
 
@@ -321,9 +335,6 @@ def process(
 
     y = fallout(y, sr, p, profile, c)
     y = voice(y, sr)
-    if offline:
-        y = match_rms(y, dry, until if until > sr // 4 else None)
-    else:
-        y = running_match(y, dry, sr)
+    y = match_rms(y, dry, until if until > sr // 4 else None) if offline else unity_match(y, dry, sr)
     y = (1.0 - mix) * dry + mix * y
     return clip(y, sr) if p.clip else peak_limit(y, sr)

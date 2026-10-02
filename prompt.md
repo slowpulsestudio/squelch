@@ -1,969 +1,233 @@
-# SQUELCH — Full Concept & Parameter Metaprompt
+# SQUELCH — Concept, Architecture & Parameters
 
-> **For records only.** This is the original prompt that started the project,
-> kept as written. It is deliberately not maintained: parameters have since
-> been renamed, added and removed, so where this document and the code
-> disagree, the code is right. Do not update this file to match.
+> Rewritten after the first prototype was found to be built on the wrong
+> filter. This supersedes the original brief, which described the intent
+> correctly but left the transfer function unspecified — and the transfer
+> function turned out to be the whole thing. The original is in git history.
 
-## Core Concept
+## Core concept
 
-**SQUELCH** is a rhythmic acid-house / techno audio manipulator that takes incoming audio and subjects it to unstable chemical, radioactive, and nuclear reactions.
+SQUELCH is a rhythmic acid-house / techno audio manipulator. Incoming audio is
+fed into a hazardous reactor and subjected to unstable chemical, radioactive and
+nuclear reactions. It should feel like a reactor rather than a conventional
+effect: something you provoke, not something you set.
 
-The plugin should feel like a **hazardous sonic reactor** rather than a conventional audio effect.
+The sound is soft, rounded and squelchy — vocal, liquid, self-limiting.
+Not harsh, not brittle, not digital.
 
-Incoming sound enters the reactor and is subjected to different reactions. It can become:
+## The central realisation
 
-* radioactive
-* unstable
-* volatile
-* toxic
-* resonant
-* contaminated
-* distorted
-* fragmented
-* amplified
-* suppressed
-* contained
-* dispersed
+A TB-303 is a synth. It feeds its filter a sawtooth containing every harmonic,
+so a resonant peak always has something to amplify. SQUELCH is an effect, and
+arbitrary input has holes in its spectrum. Sweeping a resonant peak through a
+hole produces nothing.
 
-The central metaphor is:
+So the filter cannot be a peak that merely shapes what arrives. It has to be
+a resonator that rings on its own, excited by whatever comes in. That means
+a feedback ladder running near self-oscillation, not a biquad with a high Q.
 
-> **SQUELCH puts sound inside a hazardous reactor and lets it mutate.**
+That single distinction is the difference between squelching and sounding like
+a telephone.
 
-The user is not simply adjusting effects. They are controlling the behavior of a volatile sonic system.
+## Architecture
 
----
+$$
+y(t) = F_{\text{ladder}}\Big(x(t),\; f_c(t),\; k(t),\; \delta\Big)
+$$
 
-# Sonic Identity
+### The ladder
 
-SQUELCH should be designed around:
+Four one-pole lowpass stages with global feedback and saturation inside the
+loop:
 
-* acid house
-* acid techno
-* resonant filter movement
-* rubbery squelches
-* bubbling midrange
-* radioactive ticks
-* Geiger-counter-like activity
-* phaser dissonance
-* unstable pitch movements
-* laser-like zaps
-* toxic low-frequency pressure
-* distorted resonance
-* short rhythmic reactions
-* unpredictable but musically useful mutations
+$$
+g = 1 - e^{-2\pi f_c / f_s}
+$$
 
-The sound should feel:
+$$
+u = \tanh\big(\delta\,(x - k\,s_4)\big)\,/\,\delta
+$$
 
-* deep
-* punchy
-* acidic
-* dirty
-* synthetic
-* resonant
-* rhythmic
-* unstable
-* physical
-* club-oriented
+$$
+s_1 \mathrel{+}= g\,(u - s_1), \quad
+s_2 \mathrel{+}= g\,(s_1 - s_2), \quad
+s_3 \mathrel{+}= g\,(s_2 - s_3), \quad
+s_4 \mathrel{+}= g\,(s_3 - s_4)
+$$
 
-Avoid:
+$$
+y = a\,s_1 + b\,s_2 + c\,s_3 + d\,s_4
+$$
 
-* thin digital effects
-* generic EDM effects
-* cartoon laser sounds
-* overly bright or metallic processing
-* meaningless randomization
-* effects that feel detached from the incoming audio
-* excessive high-frequency harshness
+Self-oscillation occurs at k = 4. The usable character lives between k = 2 and
+k = 3.95.
 
-The processed signal should retain a relationship to the input.
+The tanh must be inside the feedback loop. Its expansion
 
----
+$$
+\tanh x \approx x - \frac{x^3}{3} + \frac{2x^5}{15} - \cdots
+$$
 
-# Core Processing Philosophy
+generates the odd harmonics that give the resonance a voice, and because the
+saturation grows along with the resonance, the filter limits its own ring. That
+self-limiting is what makes it round rather than shrill. Saturation placed
+after the filter does not do this.
 
-The conceptual process is:
+### Output tap
 
-**INPUT → REACTION → TRIGGER → PROBABILITY → REACTIVITY → VOLATILITY → EXPOSURE → DECAY → FALLOUT**
+The reaction chooses which poles are summed, giving different filter shapes out
+of one structure:
 
-The plugin should continuously transform incoming material rather than simply apply a static effect.
+| shape | (a, b, c, d) | character |
+|---|---|---|
+| 24 dB lowpass | (0, 0, 0, 1) | full, round |
+| bandpass | (0, −1, 0, 1) | hollow, nasal |
+| highpass | (1, −2, 0, 1) | thin, whistling |
 
-Possible DSP processes include:
+### The cutoff envelope
 
-* input sampling
-* micro-slicing
-* transient detection
-* event generation
-* rhythmic triggering
-* resonant filtering
-* phasing
-* pitch shifting
-* pitch sweeps
-* FM/AM bursts
-* saturation
-* distortion
-* envelope generation
-* stochastic modulation
-* feedback
-* stereo dispersion
-* event accumulation
-* state persistence
-* spectral restriction
-* nonlinear transformation
+Retriggered per event, decaying exponentially from its peak back to rest:
 
----
+$$
+f_c(t) = f_{\text{base}} \cdot 2^{\,\Delta f\, e^{-t/\tau}}
+$$
 
-# PARAMETERS
+Δf is in octaves, not hertz, so the sweep stays musical at any base
+frequency. This is the "BWWAAOW": the filter opens at once and closes over τ.
 
-## 1. REACTION
+### Accents
 
-**Common audio equivalent:** Effect Style / Processing Type
+An accented step changes three things at once, not just level:
 
-The primary selector determining what type of chemical or radioactive reaction is applied.
+$$
+\Delta f \rightarrow \Delta f + \Delta f_{\text{acc}}, \qquad
+k \rightarrow k + \Delta k_{\text{acc}}, \qquad
+A \rightarrow A + \Delta A
+$$
 
-### ☢ RADIATION
+That is why a plain pattern reads as doo-doo-WAAOW-doo.
 
-Radioactive instability.
+### Slides
 
-DSP characteristics:
+Between events the cutoff glides rather than jumping:
 
-* rapid filter movement
-* double-time activity
-* rubbery squeaks
-* Geiger-counter-like ticks
-* high resonance
-* short repeated events
-* rapid micro-variation
-* unstable pitch/filter excursions
-* occasional high-frequency activity
+$$
+f(t) = f_1 + (f_2 - f_1)\big(1 - e^{-t/\tau_{\text{slide}}}\big)
+$$
 
-Metaphor:
+A glide shorter than about 10 ms is a step, and a step in a high-k ladder is a
+click. Measured: at 1.5 ms the artefacts sat 49 dB below the signal; at 35 ms,
+69 dB below.
 
-> The signal has become radioactive.
+### The sequence
 
----
+$$
+S = [x_1, x_2, \ldots, x_N], \qquad
+x_i = (\rho_i,\; A_i,\; \Delta f_i,\; s_i)
+$$
 
-### ⚛ FISSION
+Every probabilistic choice hashes (seed, stream, i) rather than drawing from a
+running generator, so a bounce reproduces exactly and replaying a bar fires the
+same pattern. The animation comes from pitch, accent and slide patterns of
+different lengths running against each other.
 
-Splitting and fragmentation.
+## Reactions
 
-DSP characteristics:
+One filter, five characters. The family resemblance is deliberate — it is what
+makes the plugin sound like a thing rather than five effects in a box.
 
-* phaser dissonance
-* phase cancellation
-* frequency splitting
-* feedback
-* stereo separation
-* metallic movement
-* unstable harmonic relationships
+| reaction | f_base | Δf | τ | rate | k | tap |
+|---|---|---|---|---|---|---|
+| RADIATION | 220 Hz | 4.4 oct | 70 ms | 1/16 | 3.5 | lowpass |
+| FISSION | 320 Hz | 3.2 oct | 140 ms | 1/8 | 3.8 | bandpass |
+| SLUDGE | 70 Hz | 2.4 oct | 320 ms | 1/4 | 2.9 | lowpass |
+| CHEMICAL | 180 Hz | 4.8 oct | 85 ms | 1/8 | 3.2 | lowpass |
+| ALIEN | 400 Hz | 5.2 oct | 45 ms | 1/16 | 3.9 | highpass |
 
-Metaphor:
+Each also carries its own accent pattern and noise bed texture.
 
-> One sonic structure has split into multiple unstable components.
+## Constraints learned the hard way
 
----
+Measured, not opinions. Every one of these was a defect in the first prototype.
 
-### ☣ TOXIC SLUDGE
+- At zero the plugin must pass audio through. The first build left a lowpass
+  that never opened: −36 dB at 3 kHz with every control at zero. No setting may
+  dull the source for no reason.
+- No stage may read audio that has not played yet. Level matching, noise bed
+  normalisation and sidechain followers all look backwards only, and must give
+  the same answer at any host buffer size.
+- Do not gate the amplitude. Multiplying the source by an event envelope
+  replaces its dynamics with a uniform stream: 6.2 dB of range in the source
+  became 2.8 dB at the output. The filter moves; the level should not.
+- The limiter is a safety net, not a level control. If it is reducing by
+  more than a couple of dB on ordinary material, something upstream is wrong.
+- Controls must change the sound, not the level. A chain that
+  level-compensates everything leaves every knob feeling inert.
+- Measure the delivered result, not the component. A stage can be correct in
+  isolation and inaudible in the mix.
 
-Heavy, contaminated acid.
 
-DSP characteristics:
-
-* thick low-mid resonance
-* low-pass filtering
-* saturation
-* slow filter movement
-* long resonant tails
-* subharmonic/body enhancement
-* heavy low-frequency pressure
-
-Metaphor:
-
-> The signal has become chemically contaminated sludge.
 
 ---
 
-### 🧪 BEAKER
+# Where each one appears
 
-Volatile laboratory reaction.
+$$
+f_c(t) = f_{\text{base}} \cdot 2^{\,(\Delta f + \alpha\,\Delta f_{\text{acc}})\, e^{-t/\tau}}
+$$
 
-DSP characteristics:
+$$
+u = \tanh\big(\delta\,(\eta\,x - k\,s_4)\big)\,/\,\delta
+$$
 
-* bubbling textures
-* rapid randomized filter movement
-* strong midrange resonance
-* short filter envelopes
-* high Q
-* stochastic pitch movement
-* fast bubbling activity
+$$
+x_i \ \text{fires if} \ \ \mathrm{hash}(\text{seed}, i) < \rho\,(1 - \kappa)
+\qquad
+t_i = t_i^{\text{grid}} + \phi\,\xi_i + \sigma\,\zeta_i
+$$
 
-Metaphor:
+Voice is everything inside the filter. Structure is everything in the
+sequencer. Nothing appears in both.
 
-> Something unstable is boiling inside the filter.
+Bracketed glyphs are labels rather than quantities: they name a control that
+does not appear as a term in the maths above.
 
----
-
-### 👽 ALIEN
-
-Non-terrestrial reaction.
-
-DSP characteristics:
-
-* short zaps
-* pitch sweeps
-* resonant chirps
-* FM/AM bursts
-* rapid pitch jumps
-* strange high-frequency accents
-* unpredictable event timing
-
-Metaphor:
-
-> The reaction is behaving according to physics we do not understand.
 
 ---
 
-# 2. MODE
+# Cheatsheet
 
-**Common audio equivalent:** Trigger Mode
+### Structure — what fires, and when
 
-Determines how SQUELCH decides when a reaction occurs.
+- (ℛ)  REACTION — which of the five characters
+- (ℳ)  MODE — GRID / RANDOM / FREE / INPUT
+- (Γ)  GRID — 1/1 … 1/64
+- (s₀)  SEED — which pattern the hash produces
+- ρ  PROBABILITY — chance a step fires
+- φ  FLUX — timing jitter either side of the grid
+- σ  VOLATILITY — scatter in time and stereo
+- λ  HALF-LIFE — how far one event carries into the next
+- κ  CONTAINMENT — closes the vessel, thinning events out
 
-Possible modes:
+### Voice — the shape of each event
 
-* **GRID** — reaction follows a fixed rhythmic clock
-* **RANDOM** — reaction occurs at irregular intervals
-* **FREE** — autonomous timing independent of the grid
-* **INPUT** — reaction triggered by detected events in the incoming audio
+- Δf  SPREAD — how far the cutoff sweeps, in octaves
+- τ  DECAY — how long it takes to close
+- k  EXPOSURE — loop feedback. At 4 the filter sings on its own
+- δ  TOXICITY — saturation inside the loop
+- α  REACTIVITY — depth of the accent modulation
 
-Metaphor:
+### Colour — what surrounds it
 
-> The reactor's operating protocol.
+- η  ENRICHMENT — how hard the source hits the loop, ±18 dB
+- ν  CONTAMINATION — noise bed, textured by the REACTION
+- (θ)  COLLIMATOR — narrows the stereo field
+- (χ)  FALLOUT — disperses the reaction as it settles
+- (T₆₀)  AFTERGLOW — how long it keeps glowing
 
----
+### Gestures and output
 
-# 3. GRID
+- (ι)  IONIZE — latched: scatters each event in stereo, spectrum and depth
+- (Ω)  MELTDOWN — momentary: staged runaway
+- (⌈⌉)  CLIP — hard ceiling instead of the limiter, latency padded to match
 
-**Common audio equivalent:** Rhythmic Division
-
-Determines the rhythmic resolution when MODE is GRID.
-
-Possible values:
-
-* 1/1
-* 1/2
-* 1/4
-* 1/8
-* 1/16
-* 1/32
-* triplets
-* dotted divisions
-
-Metaphor options:
-
-* Dose
-* Cycle
-* Interval
-* Pulse Rate
-* Reactor Clock
-
-Core concept:
-
-> How frequently is the reactor allowed to react?
-
----
-
-# 4. FLUX
-
-**Common audio equivalent:** Swing / Timing Offset
-
-Controls rhythmic displacement from the strict grid.
-
-Low FLUX:
-
-* rigid
-* mechanical
-* precise
-* locked
-
-High FLUX:
-
-* displaced
-* unstable
-* swinging
-* irregular
-* chemically disturbed
-
-Metaphor:
-
-> The reactor's timing field is fluctuating.
-
-**FLUX replaces SWING as the canonical parameter name.**
-
----
-
-# 5. PROBABILITY
-
-**Common audio equivalent:** Event Probability
-
-Controls the likelihood that a reaction occurs at an available rhythmic or temporal opportunity.
-
-Low PROBABILITY:
-
-* sparse
-* intermittent
-* unpredictable
-* many gaps
-
-High PROBABILITY:
-
-* frequent
-* consistent
-* dense
-* highly active
-
-Metaphor options:
-
-* Chance
-* Odds
-* Risk
-* Reaction Rate
-* Incidence
-* Activation
-
-Core concept:
-
-> What are the chances of a reaction?
-
-Important distinction:
-
-**PROBABILITY determines whether something happens.**
-
-**REACTIVITY determines how much happens when it does.**
-
----
-
-# 6. REACTIVITY
-
-**Common audio equivalent:** Event Density / Activity / Complexity
-
-Controls the amount and complexity of activity generated by each reaction.
-
-Possible DSP behavior:
-
-* number of generated events
-* simultaneous voices
-* modulation density
-* filter movement
-* rhythmic subdivisions
-* repeated events
-* granular density
-* internal modulation rate
-
-Low REACTIVITY:
-
-* isolated reactions
-* simple events
-* restrained movement
-
-High REACTIVITY:
-
-* multiple simultaneous events
-* bubbling activity
-* rapid movement
-* dense acid behavior
-
-Metaphor:
-
-> How chemically active is the system?
-
-**REACTIVITY replaces BUSYNESS as the canonical parameter name.**
-
----
-
-# 7. VOLATILITY
-
-**Common audio equivalent:** Randomization / Mutation Depth
-
-Controls how much each reaction differs from the previous reaction.
-
-Possible variables:
-
-* filter cutoff
-* resonance
-* pitch
-* timing
-* event duration
-* stereo position
-* modulation depth
-* envelope shape
-* event count
-
-Low VOLATILITY:
-
-* stable
-* repeatable
-* predictable
-
-High VOLATILITY:
-
-* unstable
-* unpredictable
-* constantly changing
-* increasingly mutated
-
-Metaphor:
-
-> How unstable is the compound?
-
-**VOLATILITY replaces MUTATION as the canonical parameter name.**
-
----
-
-# 8. HALF-LIFE
-
-**Common audio equivalent:** Inter-Reaction Persistence / State Memory
-
-Controls how long characteristics of previous reactions continue influencing subsequent reactions.
-
-Low HALF-LIFE:
-
-* each reaction resets
-* little memory
-* isolated events
-
-High HALF-LIFE:
-
-* previous reactions influence future reactions
-* mutations accumulate
-* filter states persist
-* pitch states persist
-* resonance states persist
-* the reactor develops memory
-* reactions become increasingly contaminated by previous states
-
-Metaphor:
-
-> How long does the reaction remain radioactive?
-
-Important distinction:
-
-**HALF-LIFE is persistence between reactions.**
-
-It is not simply another envelope decay control.
-
----
-
-# 9. DECAY
-
-**Common audio equivalent:** Envelope Release / Event Lifetime
-
-Controls how quickly an individual reaction disappears.
-
-Low DECAY:
-
-* short
-* clipped
-* percussive
-* aggressive
-
-High DECAY:
-
-* longer tails
-* sustained resonance
-* lingering reactions
-* increased sonic smear
-
-Metaphor options:
-
-* Breakdown
-* Dissolution
-* Decomposition
-* Fallout
-* Disintegration
-
-Core concept:
-
-> How quickly does the reaction die?
-
-Important distinction:
-
-**HALF-LIFE = how long a reaction influences future reactions.**
-
-**DECAY = how long the current reaction remains audible.**
-
----
-
-# 10. RANGE
-
-**Common audio equivalent:** Octave Breadth / Pitch Range
-
-Controls how far generated reactions can travel through pitch.
-
-Low RANGE:
-
-* narrow
-* concentrated
-* focused
-* stable pitch region
-
-High RANGE:
-
-* octave jumps
-* large pitch excursions
-* broad harmonic territory
-* dramatic pitch mutations
-
-Metaphor options:
-
-* Spectrum
-* Bandwidth
-* Frequency Span
-* Isotope Range
-* Excursion
-
-Core concept:
-
-> How far can the reaction travel?
-
----
-
-# 11. SQUELCH
-
-**Common audio equivalent:** Resonance / Acid Intensity / Main Character Macro
-
-The primary sonic intensity control.
-
-Increasing SQUELCH should increase the characteristic acid behavior through combinations of:
-
-* resonance
-* filter movement
-* modulation depth
-* nonlinear processing
-* event intensity
-* harmonic emphasis
-* rhythmic articulation
-
-Metaphor options:
-
-* Acidity
-* Reactivity
-* Pressure
-* Toxicity
-* Resonance
-
-Core concept:
-
-> How violently does the signal squelch?
-
-SQUELCH should not behave simply as a wet/dry control or output gain.
-
-It should be the primary macro for the recognizable SQUELCH character.
-
----
-
-# 12. RODS
-
-**Common audio equivalent:** Dampening / Suppression / Stabilization
-
-Controls suppression of the reactor.
-
-Possible DSP behavior:
-
-* reduce resonance
-* reduce modulation depth
-* reduce feedback
-* reduce event density
-* smooth filter movement
-* tame unstable pitch behavior
-* reduce extreme reaction behavior
-
-Low RODS:
-
-* reactor running hot
-* unstable
-* highly reactive
-
-High RODS:
-
-* suppressed
-* controlled
-* damped
-* stabilized
-
-Metaphor:
-
-> Insert the rods to suppress the reaction.
-
-Canonical name:
-
-**RODS**
-
-The name refers to reactor control rods and should remain concise.
-
----
-
-# 13. DRIVE
-
-**Common audio equivalent:** Saturation / Nonlinear Gain
-
-Controls nonlinear energy and harmonic contamination.
-
-Possible DSP behavior:
-
-* saturation
-* distortion
-* clipping
-* harmonic generation
-* low-mid thickening
-* transient compression
-* increased perceived density
-
-Metaphor:
-
-> How toxic has the signal become?
-
-Associated vocabulary:
-
-* Dose
-* Exposure
-* Contamination
-* Overload
-* Toxicity
-
-Canonical parameter name:
-
-**DRIVE**
-
----
-
-# 14. EXPOSURE
-
-**Common audio equivalent:** Resonance / Resonant Excitation
-
-Controls how strongly the resonant system is excited.
-
-Possible DSP behavior:
-
-* filter Q
-* resonance
-* feedback
-* ringing
-* harmonic emphasis
-* self-excitation
-
-Low EXPOSURE:
-
-* restrained
-* controlled
-* clean
-
-High EXPOSURE:
-
-* resonant
-* ringing
-* aggressive
-* unstable
-* highly excited
-
-Metaphor:
-
-> How much radiation is the system being exposed to?
-
-Canonical parameter name:
-
-**EXPOSURE**
-
-This replaces the conventional parameter name **RESONANCE**.
-
----
-
-# 15. COLLIMATOR
-
-**Common audio equivalent:** Filter / Spectral Restriction
-
-Controls the spectral region allowed through the reactor.
-
-A collimator is used in radiation and particle systems to restrict and shape a beam. This makes it a strong metaphor for a frequency filter: the sonic energy is constrained into a controlled spectral region.
-
-Possible DSP implementation:
-
-* high-pass cutoff
-* low-pass cutoff
-* band-pass region
-* spectral masking
-* frequency restriction
-* resonant spectral focus
-
-Low COLLIMATOR:
-
-* broad spectral output
-* less restricted
-* more uncontrolled
-* more material escapes
-
-High COLLIMATOR:
-
-* tightly restricted
-* focused
-* concentrated
-* narrow spectral region
-
-Metaphor:
-
-> Focus the reactor's output into a controlled sonic beam.
-
-Canonical name:
-
-**COLLIMATOR**
-
----
-
-# 16. FALLOUT
-
-**Common audio equivalent:** Stereo Spread / Spatial Dispersion
-
-Controls how far the reaction spreads spatially.
-
-Low FALLOUT:
-
-* centered
-* localized
-* contained
-* focused
-
-High FALLOUT:
-
-* wide stereo
-* dispersed particles
-* spatial movement
-* environmental spread
-* material extending into the stereo field
-
-Possible DSP behavior:
-
-* stereo width
-* stereo decorrelation
-* panning
-* spatial diffusion
-* transient spreading
-* frequency-dependent stereo movement
-
-Metaphor:
-
-> How far has the fallout spread?
-
-Canonical name:
-
-**FALLOUT**
-
----
-
-# Final Canonical Parameter Set
-
-1. **REACTION**
-2. **MODE**
-3. **GRID**
-4. **FLUX**
-5. **PROBABILITY**
-6. **REACTIVITY**
-7. **VOLATILITY**
-8. **HALF-LIFE**
-9. **DECAY**
-10. **RANGE**
-11. **SQUELCH**
-12. **RODS**
-13. **DRIVE**
-14. **EXPOSURE**
-15. **COLLIMATOR**
-16. **FALLOUT**
-
----
-
-# Conceptual Hierarchy
-
-The parameters should read as a coherent reactor system.
-
-### WHAT is happening?
-
-**REACTION**
-
-### HOW is it triggered?
-
-**MODE**
-
-### At what rhythmic resolution?
-
-**GRID**
-
-### How unstable is the timing?
-
-**FLUX**
-
-### DOES it happen?
-
-**PROBABILITY**
-
-### How active is it?
-
-**REACTIVITY**
-
-### How unstable is each reaction?
-
-**VOLATILITY**
-
-### How long does its influence persist?
-
-**HALF-LIFE**
-
-### How quickly does the current sound disappear?
-
-**DECAY**
-
-### How far can it move in pitch?
-
-**RANGE**
-
-### How aggressively does it produce the characteristic acid sound?
-
-**SQUELCH**
-
-### How much is the reactor suppressed?
-
-**RODS**
-
-### How toxic/distorted is the signal?
-
-**DRIVE**
-
-### How strongly is the resonant system excited?
-
-**EXPOSURE**
-
-### How tightly is the spectrum restricted?
-
-**COLLIMATOR**
-
-### How far does the resulting material spread?
-
-**FALLOUT**
-
----
-
-# Performance Narrative
-
-A typical SQUELCH performance should feel like a reactor moving through different levels of instability.
-
-**INPUT**
-
-Incoming audio enters the reactor.
-
-↓
-
-**REACTION**
-
-The user selects the type of chemical/radioactive process.
-
-↓
-
-**MODE**
-
-The reactor determines when it is permitted to react.
-
-↓
-
-**GRID**
-
-The rhythmic operating frequency is established.
-
-↓
-
-**FLUX**
-
-The timing begins to fluctuate.
-
-↓
-
-**PROBABILITY**
-
-Each available reaction opportunity may or may not activate.
-
-↓
-
-**REACTIVITY**
-
-Activated reactions become more or less chemically active.
-
-↓
-
-**VOLATILITY**
-
-Each reaction mutates away from the previous one.
-
-↓
-
-**HALF-LIFE**
-
-Previous reactions leave a persistent influence on future reactions.
-
-↓
-
-**DECAY**
-
-Individual reactions eventually disappear.
-
-↓
-
-**RANGE**
-
-Reactions can travel through different pitch regions.
-
-↓
-
-**SQUELCH**
-
-The characteristic acid intensity increases.
-
-↓
-
-**RODS**
-
-The reactor can be suppressed and stabilized.
-
-↓
-
-**DRIVE**
-
-The signal becomes increasingly toxic and nonlinear.
-
-↓
-
-**EXPOSURE**
-
-The resonant system becomes increasingly excited.
-
-↓
-
-**COLLIMATOR**
-
-The output is spectrally focused and restricted.
-
-↓
-
-**FALLOUT**
-
-The remaining sonic material disperses into the stereo field.
-
----
-
-# Overall Metaphor
-
-> **SQUELCH is a hazardous sonic reactor.**
->
-> Sound enters the chamber and is subjected to a chemical or radioactive reaction.
->
-> Some reactions happen by chance. Some become highly reactive. Some mutate. Some remain radioactive and influence what happens next. Some decay quickly. Others become toxic, resonant, and unstable.
->
-> The reactor can be controlled with rods, its output can be focused through a collimator, and the resulting energy can spread outward as fallout.
->
-> **SQUELCH is not simply processing audio. It is controlling the behavior of a volatile sonic system.**

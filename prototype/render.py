@@ -30,6 +30,10 @@ def main() -> None:
         "--clip", action="store_true", help="hard ceiling instead of the limiter"
     )
     parser.add_argument(
+        "--topology", choices=("through", "open", "parallel"), default="through",
+        help="comparison switch for how the filter sits in the signal path",
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="whole-render level match, which the plugin cannot do",
@@ -52,7 +56,7 @@ def main() -> None:
     )
 
     dry, sr = audio_io.load(args.source)
-    wet, _ = engine.process(dry, sr, p, args.bpm, mix=args.mix, offline=args.offline)
+    wet, _ = engine.process(dry, sr, p, args.bpm, mix=args.mix, offline=args.offline, topology=args.topology)
 
     out_dir = Path("Output") / args.name
     audio_io.save(out_dir / f"{args.name}.wav", wet, sr)

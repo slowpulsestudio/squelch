@@ -14,7 +14,9 @@ REACTIONS = ["RADIATION", "FISSION", "SLUDGE", "CHEMICAL", "ALIEN"]
 
 MODES = ["GRID", "RANDOM", "FREE", "INPUT"]
 
-# Division name -> length in beats.
+# Division name -> length in beats. One bar down to a 64th: the events are
+# meant to run at double and quadruple time against the track, so the useful
+# half of this list is the fast end.
 GRID_DIVISIONS = {
     "1/1": 4.0,
     "1/2": 2.0,
@@ -28,6 +30,9 @@ GRID_DIVISIONS = {
     "1/16D": 0.375,
     "1/16T": 1.0 / 6.0,
     "1/32": 0.125,
+    "1/32D": 0.1875,
+    "1/32T": 1.0 / 12.0,
+    "1/64": 0.0625,
 }
 
 GRID_NAMES = list(GRID_DIVISIONS)
@@ -81,18 +86,25 @@ class Params:
     enrichment: float = 0.5
 
     flux: float = 0.0
-    probability: float = 1.0
-    reactivity: float = 0.3
+    probability: float = 0.65
+    #: Opens at zero: one event per grid step, which is the plain pattern the
+    #: approved character renders were made with. Above zero each step fans out
+    #: into sub-events, and on reactions whose sweep is slow against their grid
+    #: that trades movement for density.
+    reactivity: float = 0.0
     volatility: float = 0.3
-    half_life: float = 0.0
+    half_life: float = 0.4
     decay: float = 0.3
-    spread: float = 0.4
+    spread: float = 0.75
     toxicity: float = 0.5
     containment: float = 0.0
-    drive: float = 0.3
+    #: Saturation after the filter. Off by default: the ladder's own loop
+    #: saturation is the character, and this adds peaks that force the output
+    #: stage to pull everything else down to fit them.
+    drive: float = 0.0
     #: Noise/grain emitted by the reaction. Its texture is set by the REACTION.
     contamination: float = 0.25
-    exposure: float = 0.5
+    exposure: float = 0.6
     collimator: float = 0.0
     fallout: float = 0.3
     #: How long the reaction keeps glowing after it has happened.

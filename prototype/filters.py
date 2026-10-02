@@ -282,6 +282,54 @@ def pitch_wind(x: np.ndarray, wind_ctrl: np.ndarray, sr: int, max_delay_s: float
 
 
 
+def ladder(
+    x: np.ndarray,
+    cutoff: np.ndarray,
+    feedback: np.ndarray,
+    drive: np.ndarray,
+    sr: int,
+    tap: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+) -> np.ndarray:
+    """Four one-pole stages with global feedback, saturating inside the loop.
+
+    This is the instrument. A biquad with a high Q only amplifies what is
+    already at its cutoff, which is fine for a synth feeding it a sawtooth and
+    useless for an effect handed material with holes in its spectrum: sweeping
+    a peak through a gap produces nothing. Feedback makes the filter ring on
+    its own, excited by whatever arrives, and that is the squelch.
+
+    The saturation has to be inside the loop. There it grows with the
+    resonance, so the filter limits its own ring and stays round; after the
+    filter it is just distortion on top.
+
+    Feedback reaches self-oscillation at 4. Summing different poles gives
+    different shapes from the one structure: (0,0,0,1) is a 24dB lowpass,
+    (0,-1,0,1) a bandpass, (1,-2,0,1) a highpass.
+    """
+    n, channels = x.shape
+    g = 1.0 - np.exp(-2.0 * np.pi * np.clip(cutoff, 20.0, sr * 0.45) / sr)
+    k = np.clip(feedback, 0.0, 3.97)
+    a, b, c, d = tap
+
+    y = np.zeros_like(x)
+    s1 = np.zeros(channels)
+    s2 = np.zeros(channels)
+    s3 = np.zeros(channels)
+    s4 = np.zeros(channels)
+
+    for i in range(n):
+        gi = g[i]
+        di = drive[i]
+        u = np.tanh((x[i] - k[i] * s4) * di) / di
+        s1 += gi * (u - s1)
+        s2 += gi * (s1 - s2)
+        s3 += gi * (s2 - s3)
+        s4 += gi * (s3 - s4)
+        y[i] = a * s1 + b * s2 + c * s3 + d * s4
+
+    return y
+
+
 def varying_ladder(
     x: np.ndarray,
     fc_ctrl: np.ndarray,
