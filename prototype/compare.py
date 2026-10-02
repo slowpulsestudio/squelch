@@ -109,6 +109,30 @@ SLUDGE_PARAMS_B = Params(
 )
 
 
+def _alien_reference() -> np.ndarray:
+    """Source/Dsp/Alien.h's voice against reactor._alien_engine.
+
+    One event, so the comparison is a single voice rather than a sum of
+    overlaps: the voice maths is what is being checked, and the pool that
+    sums them is ordinary addition. ALIEN has no oversampler and no acausal
+    stage anywhere, so there is no latency and no settling window -- sample 0
+    must already agree.
+    """
+    from .scheduler import Event
+
+    n = 4000
+    silence = np.zeros((n, 2))
+    p = Params(reaction="ALIEN", spread=0.6, decay=0.35, toxicity=0.7,
+               exposure=0.4, seed=5)
+    profile = PROFILES["ALIEN"]
+    event = Event(start=0, index=3, intensity=1.0, decay_scale=1.0, tone=0.5,
+                  pan=0.0, shape=0.5, depth=0.0, accent=False, slide=False)
+    zeros = np.zeros(n)
+    out = reactor._alien_engine(silence, zeros, zeros, zeros, SR, profile,
+                               [event], None, p, None)
+    return out[::20].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -134,6 +158,7 @@ def expectations() -> dict:
         "oversampler_soft_clip": _oversampler_reference(),
         "sludge_engine": _sludge_reference(SLUDGE_PARAMS_A),
         "sludge_engine_b": _sludge_reference(SLUDGE_PARAMS_B),
+        "alien_engine": _alien_reference(),
     }
 
 

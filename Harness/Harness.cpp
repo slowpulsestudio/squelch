@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "../Source/Dsp/Alien.h"
 #include "../Source/Dsp/Filters.h"
 #include "../Source/Dsp/Oversampler.h"
 #include "../Source/Dsp/Rng.h"
@@ -187,7 +188,37 @@ int main()
         b.toxicity = 0.75;
 
         printArray ("sludge_engine", sludgeRun (profile, a));
-        printArray ("sludge_engine_b", sludgeRun (profile, b), true);
+        printArray ("sludge_engine_b", sludgeRun (profile, b));
+    }
+
+    // One ALIEN voice. No oversampler and no acausal stage anywhere in it, so
+    // there is no latency and no settling window to skip.
+    {
+        dsp::AlienProfile profile;
+        dsp::AlienParams params;
+        params.spread = 0.6;
+        params.decay = 0.35;
+        params.toxicity = 0.7;
+        params.exposure = 0.4;
+        params.seed = 5;
+
+        dsp::AlienEngine engine;
+        engine.prepare (sampleRate);
+        engine.configure (profile, params);
+        engine.trigger (3, false, 0.0, 0.0);
+
+        std::vector<double> values;
+        for (int i = 0; i < 4000; ++i)
+        {
+            double l = 0.0, r = 0.0;
+            engine.process (l, r);
+            if (i % 20 == 0)
+            {
+                values.push_back (l);
+                values.push_back (r);
+            }
+        }
+        printArray ("alien_engine", values, true);
     }
 
     std::printf ("}\n");
