@@ -585,12 +585,66 @@ def check_alien_oscillator() -> tuple[bool, str]:
     fm_ok = spread_fm_on > spread_fm_off * 1.5
     am_ok = ripple_am_on > ripple_am_off * 1.2
 
-    ok = gated_ok and pitch_ok and fm_ok and am_ok
+    # dsp-maths.md: "Each event receives a deterministic pitch selection" and
+    # the summary calls for discrete pitch transitions. Nothing above compares
+    # one event with another, so a constant-pitch oscillator passed: the
+    # single-window band is also wider than the first event and narrower than
+    # the hash's own range, which makes it loose and seed-fragile at once.
+    # Measured per event instead, on a sparse grid so events do not overlap.
+    from .meltdown import Meltdown
+    from .scheduler import schedule
+
+    # Long enough for a usable number of events at a spacing that keeps them
+    # from overlapping, which the envelope measurement below needs.
+    n_sparse = SR * 8
+    sparse_silence = np.zeros((n_sparse, 2))
+    p_sparse = Params(reaction="ALIEN", mode="GRID", grid="1/2", probability=1.0,
+                      spread=0.0, toxicity=0.0, exposure=0.0, decay=0.1, seed=0)
+    wet_sparse, _, _ = reactor.process(sparse_silence, SR, p_sparse, 140.0)
+    events = schedule(sparse_silence, SR, p_sparse, 140.0,
+                      sub_event_bias=PROFILES["ALIEN"].sub_event_bias,
+                      md=Meltdown(p_sparse, n_sparse, SR))
+
+    window = int(0.05 * SR)
+    pitches = []
+    for e in events:
+        if e.start + window >= n_sparse:
+            continue
+        f, pw = welch(wet_sparse[e.start : e.start + window].mean(axis=1), fs=SR,
+                      window="blackmanharris", nperseg=1024)
+        pitches.append(float(f[np.argmax(pw)]))
+
+    if len(pitches) < 4 or not _finite(pitches):
+        return False, f"only {len(pitches)} usable ALIEN events"
+
+    # In semitones against the reactor frequency, so the figure is independent
+    # of where base_hz happens to sit. One semitone is the smallest interval
+    # that counts as a different pitch at all; a constant selection gives zero.
+    semitones = 12.0 * np.log2(np.array(pitches) / base_hz)
+    pitch_spread = float(np.std(semitones))
+    jumps_ok = pitch_spread > 1.0
+
+    # dsp-maths.md: "Each oscillator event has an attack/release envelope."
+    # Rise then fall inside one event, which a removed envelope does not do.
+    rises, falls = [], []
+    for e in events:
+        if e.start + window >= n_sparse:
+            continue
+        env = np.abs(wet_sparse[e.start : e.start + window].mean(axis=1))
+        smoothed = np.convolve(env, np.ones(64) / 64, mode="valid")
+        peak = int(np.argmax(smoothed))
+        rises.append(peak > 0)
+        falls.append(smoothed[-1] < smoothed[peak] * 0.9)
+    envelope_ok = float(np.mean(rises)) > 0.8 and float(np.mean(falls)) > 0.8
+
+    ok = gated_ok and pitch_ok and fm_ok and am_ok and jumps_ok and envelope_ok
     return ok, (
         f"event burst RMS {burst_rms:.4f} vs no-event {quiet_rms:.6f}, "
         f"measured {measured_hz:.0f}Hz vs base {base_hz:.0f}Hz, "
         f"FM spread {spread_fm_off:.0f} -> {spread_fm_on:.0f} Hz, "
-        f"AM ripple {ripple_am_off:.3f} -> {ripple_am_on:.3f}"
+        f"AM ripple {ripple_am_off:.3f} -> {ripple_am_on:.3f}, "
+        f"per-event pitch spread {pitch_spread:.1f} st over {len(pitches)} events, "
+        f"envelope rises {float(np.mean(rises)) * 100:.0f}% falls {float(np.mean(falls)) * 100:.0f}%"
     )
 
 
