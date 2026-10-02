@@ -70,6 +70,84 @@ def _bed_controls(n: int):
     )
 
 
+def _finite(*values) -> bool:
+    """NaN and Inf must fail a check, never slip through one.
+
+    `nan < threshold` is False, so a metric that goes non-finite drops out of
+    every ordinary comparison and reads as success. Each check that reduces
+    audio to a number gates on this first.
+    """
+    for v in values:
+        if not np.all(np.isfinite(np.asarray(v, dtype=float))):
+            return False
+    return True
+
+
+def _fixtures() -> list[str]:
+    """The real material some checks need. Never silently empty.
+
+    A check that loops over a glob and asserts on an initialiser passes
+    without processing anything when the glob misses, so the callers assert
+    on the length of this and report how many files they actually consumed.
+    """
+    from pathlib import Path
+
+    return [str(p) for p in sorted(Path("Input").glob("*.wav"))]
+
+
+def _held_vs_evolving(reaction: str, engine, seed: int = 0) -> tuple[float, float, int]:
+    """How a reaction's own modulation state moves, measured from its audio.
+
+    dsp-maths.md separates CHEMICAL and RADIATION by the DOMAIN of their
+    stochastic state: CHEMICAL's register is event-domain and zero-order held
+    for the whole event, RADIATION's is sample-domain and evolves inside one.
+    Both are observed the same way here, so the two reactions can be run
+    against each other as dsp-testing.md's discrimination test asks.
+
+    The engine is handed a FLAT cutoff, which is what makes this independent:
+    with nothing sweeping, the only thing left that can move the delivered
+    filter is the reaction's own state, so the measurement does not need to
+    know how that state is calculated and does not repeat the formula.
+
+    Returns the spread of the per-event spectral centroid BETWEEN events and
+    the drift WITHIN events, both in octaves, plus the event count.
+    """
+    from .meltdown import Meltdown
+    from .reactions import PROFILES
+    from .scheduler import schedule
+
+    n = SR * 3
+    source = np.random.default_rng(0).standard_normal((n, 2)) * 0.2
+    p = Params(reaction=reaction, mode="GRID", grid="1/4", probability=1.0,
+               spread=0.6, toxicity=0.3, volatility=0.8, seed=seed)
+    profile = PROFILES[reaction]
+    md = Meltdown(p, n, SR)
+    events = schedule(source, SR, p, 140.0, sub_event_bias=profile.sub_event_bias, md=md)
+
+    flat = np.full(n, 600.0)
+    out = engine(source, flat, np.full(n, 2.0), np.full(n, 1.0), SR,
+                 profile, events, None, p, md)
+
+    def centroid(seg: np.ndarray) -> float:
+        power = np.abs(np.fft.rfft(seg * np.hanning(len(seg)))) ** 2
+        freqs = np.fft.rfftfreq(len(seg), 1.0 / SR)
+        return float(np.sum(freqs * power) / (np.sum(power) + 1e-30))
+
+    # One event's worth of audio, split in half to see movement inside it.
+    span = 3000
+    starts = [e.start for e in events if e.start < n - span - 1000]
+    if len(starts) < 4:
+        return 0.0, 0.0, len(starts)
+
+    between = float(np.std(np.log2([centroid(out[s : s + span, 0]) for s in starts])))
+    inside = float(np.std([
+        np.log2(centroid(out[s + span // 2 : s + span, 0]))
+        - np.log2(centroid(out[s : s + span // 2, 0]))
+        for s in starts
+    ]))
+    return between, inside, len(starts)
+
+
 def check_ladder_response() -> tuple[bool, str]:
     """A 4-pole lowpass must roll off near 24 dB/octave with one resonant peak.
 
@@ -540,19 +618,29 @@ def check_sludge_subharmonics() -> tuple[bool, str]:
     def level_near(target: float) -> float:
         return float(power_db[np.argmin(np.abs(freqs - target))])
 
-    def floor_near(target: float) -> float:
-        """Median level a third of an octave either side, as the local noise floor."""
-        band = (freqs > target * 0.8) & (freqs < target * 1.25) & (np.abs(freqs - target) > target * 0.08)
-        return float(np.median(power_db[band]))
-
     h1, h2 = f_reactor / 2.0, f_reactor / 4.0
-    rise1 = level_near(h1) - floor_near(h1)
-    rise2 = level_near(h2) - floor_near(h2)
 
-    ok = rise1 > 6.0 and rise2 > 6.0
+    # dsp-testing.md Test 9's actual discriminator: the RATIO of energy at
+    # f_h/2 against f_h. A /2 oscillator wrapped at 2*pi instead of 4*pi puts
+    # its energy at f_h, so the two swap places. The old check measured rise
+    # above a local noise floor either side, which the second harmonic of the
+    # f_h/4 oscillator satisfies just as well as a real f_h/2 one -- the 2*pi
+    # wrap passed it.
+    #
+    # The discrimination point is 0 dB, where the subharmonic and its parent
+    # carry equal energy. 6 dB is the margin: it is four times the power, far
+    # beyond what a Welch estimate wobbles by, and it sits in open space
+    # between the two states of the mechanism rather than against either.
+    ratio_h1 = level_near(h1) - level_near(f_reactor)
+    ratio_h2 = level_near(h2) - level_near(h1)
+
+    if not _finite(ratio_h1, ratio_h2):
+        return False, "spectrum went non-finite"
+
+    ok = ratio_h1 > 6.0 and ratio_h2 > -6.0
     return ok, (
-        f"input silent; f_h/2 ({h1:.0f}Hz) {rise1:+.1f} dB above its band, "
-        f"f_h/4 ({h2:.0f}Hz) {rise2:+.1f} dB above its band"
+        f"input silent; f_h/2 ({h1:.0f}Hz) sits {ratio_h1:+.1f} dB over f_h "
+        f"({f_reactor:.0f}Hz), f_h/4 ({h2:.0f}Hz) {ratio_h2:+.1f} dB against f_h/2"
     )
 
 
@@ -1226,8 +1314,6 @@ def check_limiter_is_not_doing_the_work() -> tuple[bool, str]:
     the failure was invisible at the output: the ceiling always holds, which is
     exactly why looking at the output tells you nothing.
     """
-    import glob
-
     import soundfile as sf
 
     from . import filters, output_stage, reactions, reactor
@@ -1236,8 +1322,13 @@ def check_limiter_is_not_doing_the_work() -> tuple[bool, str]:
     worst_reduction = 0.0
     worst_engaged = 0.0
     worst_source = ""
+    processed = 0
 
-    for path in sorted(glob.glob("Input/*.wav")):
+    sources = _fixtures()
+    if not sources:
+        return False, "no Input/*.wav fixtures: nothing was measured"
+
+    for path in sources:
         source, sr = sf.read(path, always_2d=True, dtype="float64")
 
         for amount in (0.0, 0.5, 1.0):
@@ -1260,6 +1351,7 @@ def check_limiter_is_not_doing_the_work() -> tuple[bool, str]:
             peak = float(np.abs(y).max())
             reduction = 20.0 * np.log10(output_stage.LIMITER_CEILING / peak) if peak > output_stage.LIMITER_CEILING else 0.0
             engaged = 100.0 * float(np.mean(np.abs(y) > output_stage.LIMITER_CEILING))
+            processed += 1
 
             if reduction < worst_reduction:
                 worst_reduction = reduction
@@ -1286,9 +1378,11 @@ def check_limiter_is_not_doing_the_work() -> tuple[bool, str]:
     # correctly-loud RADIATION produces at its best available Q; -20 dB is
     # comfortably inside what the limiter is built to absorb without being
     # audible as compression (see "limiter releases gently").
-    ok = worst_reduction > -20.0 and worst_engaged < 50.0
+    ok = processed > 0 and _finite(worst_reduction, worst_engaged) \
+        and worst_reduction > -20.0 and worst_engaged < 50.0
     return ok, (
-        f"worst case {worst_reduction:.1f} dB on {worst_engaged:.2f}% of samples "
+        f"{processed} renders across {len(sources)} fixtures; worst case "
+        f"{worst_reduction:.1f} dB on {worst_engaged:.2f}% of samples "
         f"({worst_source})"
     )
 
@@ -1420,152 +1514,155 @@ def check_clip_trades_lookahead_for_hardness() -> tuple[bool, str]:
 def check_chemical_register() -> tuple[bool, str]:
     """dsp-testing.md Test 6's stochastic register diagnostic.
 
-    CHEMICAL's randomness is a discrete, event-held register: q_i must stay
-    piecewise constant for a whole event (not continuously evolving, which
-    would mean CHEMICAL had been built with RADIATION's mechanism), and
-    changing q_i must change WHERE the sweep lands, never remove, scale or
-    reverse the sweep itself.
+    The previous version of this check built the register array itself and
+    then asserted that array was piecewise constant, which a constant fill is
+    by construction. It never read the engine, and deleting the register
+    mechanism outright left it green.
+
+    This one observes the delivered filter instead. dsp-maths.md specifies
+    q[n] = q_i held for t_i <= n < t_{i+1}, entering the cutoff as a
+    log-frequency OFFSET and never as a multiplier on the sweep depth. Held
+    state means the centroid must move BETWEEN events and sit still WITHIN
+    one; the engine is driven with a flat cutoff so nothing else can move it.
+
+    R_q itself is deliberately not asserted: dsp-maths.md calls it an internal
+    CHEMICAL parameter and gives it no value, so a figure here could only have
+    come from the implementation and would move whenever it did.
     """
     from . import reactor
-    from .params import Params
+
+    between, inside, events = _held_vs_evolving("CHEMICAL", reactor._chemical_engine)
+    if not _finite(between, inside) or events < 4 or inside <= 0.0:
+        return False, f"unusable measurement: {events} events, {between=}, {inside=}"
+
+    # Zero-order held means between-event movement dominates within-event
+    # movement. Two-to-one is the least that states "dominates"; measured, a
+    # working register gives about six and a removed one about one half, so
+    # the line sits in a wide gap rather than against either reading.
+    ratio = between / inside
+    held = ratio > 2.0
+
+    # Same seed, same register sequence.
+    again, _, _ = _held_vs_evolving("CHEMICAL", reactor._chemical_engine)
+    repeatable = abs(again - between) < 1e-12
+
+    # A different seed must deal a different register, not merely reorder it.
+    other, _, _ = _held_vs_evolving("CHEMICAL", reactor._chemical_engine, seed=11)
+    seed_matters = abs(other - between) > 1e-9
+
+    ok = held and repeatable and seed_matters
+    return ok, (
+        f"between-event {between:.3f} oct vs within-event {inside:.3f} oct "
+        f"(ratio {ratio:.2f}, held if >2), repeatable {repeatable}, "
+        f"seed changes the register {seed_matters}"
+    )
+
+
+def check_chemical_register_is_an_offset() -> tuple[bool, str]:
+    """dsp-maths.md: the register may not scale, suppress or reverse the sweep.
+
+    The forbidden form is 2^(df q_i e^(-a/tau)), where the register multiplies
+    the sweep depth; the specified one is 2^(R_q q_i) 2^(df e^(-a/tau)), where
+    it only offsets it. Under the forbidden form the per-event sweep DEPTH
+    varies with q_i, so it scatters as widely as the placement does. Under the
+    specified one the depth is the same for every event while the placement
+    moves, which is what is measured here: both from the delivered audio, with
+    no formula repeated from the engine.
+    """
+    from . import reactor
+    from .meltdown import Meltdown
     from .reactions import PROFILES
     from .scheduler import schedule
-    from . import rng
 
-    n = SR * 2
+    n = SR * 4
     source = np.random.default_rng(0).standard_normal((n, 2)) * 0.2
     p = Params(reaction="CHEMICAL", mode="GRID", grid="1/4", probability=1.0,
-                spread=0.6, toxicity=0.3, seed=0)
-    events = schedule(source, SR, p, 140.0)
-
-    register = np.zeros(n)
-    starts = [max(int(e.start), 0) for e in events]
-    for i, event in enumerate(events):
-        start = starts[i]
-        if start >= n:
-            continue
-        end = min(starts[i + 1], n) if i + 1 < len(starts) else n
-        if end <= start:
-            continue
-        q_i = 2.0 * rng.urand(p.seed, reactor.CHEMICAL_REGISTER_STREAM, event.index) - 1.0
-        register[start:end] = q_i
-
-    # Piecewise constant: within each event's interval the register must not
-    # move at all.
-    held_ok = True
-    for i, event in enumerate(events):
-        start = starts[i]
-        if start >= n:
-            continue
-        end = min(starts[i + 1], n) if i + 1 < len(starts) else n
-        if end <= start + 1:
-            continue
-        if register[start:end].std() > 1e-12:
-            held_ok = False
-            break
-
-    # Reproducibility: same seed gives the same register sequence.
-    p_again = Params(reaction="CHEMICAL", mode="GRID", grid="1/4", probability=1.0,
-                       spread=0.6, toxicity=0.3, seed=0)
-    events_again = schedule(source, SR, p_again, 140.0)
-    repeatable = [e.index for e in events] == [e.index for e in events_again]
-
-    # Register changes WHERE the sweep lands (cutoff offset), not whether the
-    # full sweep happens: measure the cutoff envelope's own excursion
-    # (peak-to-rest ratio in octaves) with the register forced to two
-    # different fixed values and confirm it is unchanged.
+               spread=0.7, toxicity=0.3, decay=0.3, seed=0)
     profile = PROFILES["CHEMICAL"]
-    cutoff, feedback, drive = reactor.envelopes(events, n, SR, p, profile, reactor.Meltdown(p, n, SR))
-    sweep_octaves = {}
-    for forced_q in (-1.0, 1.0):
-        cutoff_reg = cutoff * np.power(2.0, reactor.CHEMICAL_REGISTER_OCT * forced_q)
-        peak = float(np.log2(cutoff_reg.max()))
-        rest = float(np.log2(np.median(cutoff_reg[-200:])))
-        sweep_octaves[forced_q] = peak - rest
+    md = Meltdown(p, n, SR)
+    events = schedule(source, SR, p, 140.0, sub_event_bias=profile.sub_event_bias, md=md)
+    cutoff, feedback, drive = reactor.envelopes(events, n, SR, p, profile, md)
+    out = reactor._chemical_engine(source, cutoff, feedback, drive, SR,
+                                   profile, events, None, p, md)
 
-    sweep_preserved = abs(sweep_octaves[-1.0] - sweep_octaves[1.0]) < 0.05
-    register_moves_things = abs(
-        float(np.log2(np.power(2.0, reactor.CHEMICAL_REGISTER_OCT * -1.0)))
-        - float(np.log2(np.power(2.0, reactor.CHEMICAL_REGISTER_OCT * 1.0)))
-    ) > 1.0
+    def centroid(seg: np.ndarray) -> float:
+        power = np.abs(np.fft.rfft(seg * np.hanning(len(seg)))) ** 2
+        freqs = np.fft.rfftfreq(len(seg), 1.0 / SR)
+        return float(np.sum(freqs * power) / (np.sum(power) + 1e-30))
 
-    ok = held_ok and repeatable and sweep_preserved and register_moves_things
+    step = 2000
+    depths, placements = [], []
+    starts = [e.start for e in events if e.start < n - 4 * step]
+    for s in starts:
+        track = [np.log2(centroid(out[s + k * step : s + (k + 1) * step, 0])) for k in range(4)]
+        depths.append(max(track) - min(track))
+        placements.append(float(np.mean(track)))
+
+    if len(depths) < 4 or not _finite(depths, placements):
+        return False, f"unusable measurement: {len(depths)} events"
+
+    depth_spread = float(np.std(depths))
+    placement_spread = float(np.std(placements))
+    # An offset moves placement and leaves depth alone, so placement must
+    # scatter further than depth. A multiplier ties the two together.
+    ok = placement_spread > depth_spread and float(np.median(depths)) > 0.2
     return ok, (
-        f"register held per event: {held_ok}, seed repeatable: {repeatable}, "
-        f"sweep depth at q=-1 vs q=1: {sweep_octaves[-1.0]:.2f} vs "
-        f"{sweep_octaves[1.0]:.2f} oct (register offset "
-        f"{reactor.CHEMICAL_REGISTER_OCT * 2.0:.1f} oct)"
+        f"sweep depth scatter {depth_spread:.3f} oct vs placement scatter "
+        f"{placement_spread:.3f} oct (offset if placement is wider), "
+        f"median sweep {float(np.median(depths)):.2f} oct"
     )
 
 
 def check_radiation_stochastic_state() -> tuple[bool, str]:
     """dsp-testing.md Test 7's stochastic state diagnostic.
 
-    RADIATION's modulation state must evolve sample to sample (no intervals
-    of constant value spanning a whole event, unlike CHEMICAL's register) and
-    must be temporally correlated rather than white, since maths.md's AR(1)
-    states are what give the slow rubbery wander its continuity.
+    The previous version built its own AR(1) from a hardcoded tau and
+    np.random.default_rng, which is the scheme the engine no longer uses, so
+    two of its three assertions could not observe the implementation at all.
+
+    This measures the engine. dsp-maths.md puts RADIATION's state in the
+    sample domain against CHEMICAL's event domain, so the same measurement
+    that proves CHEMICAL is held must show RADIATION is not: movement inside
+    an event, not only between events. Run against CHEMICAL here, which is
+    what dsp-testing.md's discrimination section asks for.
     """
-    from .params import Params
+    from . import reactor
 
-    sr = SR
-    n = sr * 2
-    tau_q = 0.22
-    a_q = float(np.exp(-1.0 / (tau_q * sr)))
-    b_q = float(np.sqrt(1.0 - a_q**2))
-    rng_np = np.random.default_rng(1_000_003 * (0 + 1))
-    r_q = rng_np.uniform(-1.0, 1.0, n)
-    from scipy.signal import lfilter
-    q = lfilter([b_q], [1.0, -a_q], r_q)
+    between, inside, events = _held_vs_evolving("RADIATION", reactor._radiation_engine)
+    chem_between, chem_inside, _ = _held_vs_evolving("CHEMICAL", reactor._chemical_engine)
+    if not _finite(between, inside, chem_between, chem_inside) or events < 4 or inside <= 0.0:
+        return False, f"unusable measurement: {events} events"
 
-    # Continuous: no run of consecutive equal samples longer than a couple of
-    # samples (which would indicate an event-held register, not a per-sample
-    # AR(1) state).
-    longest_run = 1
-    run = 1
-    for i in range(1, len(q)):
-        if q[i] == q[i - 1]:
-            run += 1
-            longest_run = max(longest_run, run)
-        else:
-            run = 1
-    continuous_ok = longest_run < 5
+    # Sample-domain state keeps moving through an event, so the within-event
+    # figure is not dwarfed by the between-event one the way a held register's
+    # is. The same 2.0 line as the CHEMICAL check, read the other way.
+    ratio = between / inside
+    evolving = ratio < 2.0
+    distinct_from_chemical = ratio < (chem_between / max(chem_inside, 1e-12))
 
-    # Correlated: autocorrelation at small positive lag must be well above
-    # zero (a white-noise-like state would sit near zero).
-    centred = q - q.mean()
-    denom = float(np.sum(centred**2))
-    lag = max(int(0.01 * sr), 1)
-    r_lag = float(np.sum(centred[:-lag] * centred[lag:]) / (denom + 1e-18))
-    correlated_ok = r_lag > 0.3
-
-    # VOLATILITY must scale how much the state (and therefore the resonant
-    # frequency) moves: render the same input at VOLATILITY min and max and
-    # compare short-timescale spectral movement.
-    from . import reactor as reactor_mod
-
-    def centroid_variance(volatility: float) -> float:
+    def centroid_series(volatility: float) -> float:
         p = Params(reaction="RADIATION", mode="GRID", grid="1/8", probability=1.0,
-                    volatility=volatility, spread=0.8, exposure=0.5, decay=0.3, seed=0)
-        source = np.random.default_rng(2).standard_normal((n, 2)) * 0.2
-        wet, _, _ = reactor_mod.process(source, sr, p, 140.0)
+                   volatility=volatility, spread=0.8, exposure=0.5, decay=0.3, seed=0)
+        source = np.random.default_rng(2).standard_normal((SR * 2, 2)) * 0.2
+        wet, _, _ = reactor.process(source, SR, p, 140.0)
         hop = 1024
-        centroids = []
         mono = wet.mean(axis=1)
-        for i in range(0, n - hop, hop):
-            freqs, power = welch(mono[i : i + hop], fs=sr, nperseg=hop)
+        centroids = []
+        for i in range(0, len(mono) - hop, hop):
+            freqs, power = welch(mono[i : i + hop], fs=SR, nperseg=hop)
             centroids.append(float(np.sum(freqs * power) / (np.sum(power) + 1e-18)))
         return float(np.var(centroids))
 
-    variance_lo = centroid_variance(0.0)
-    variance_hi = centroid_variance(1.0)
+    variance_lo, variance_hi = centroid_series(0.0), centroid_series(1.0)
+    if not _finite(variance_lo, variance_hi):
+        return False, "centroid variance went non-finite"
     volatility_ok = variance_hi > variance_lo * 1.5
 
-    ok = continuous_ok and correlated_ok and volatility_ok
+    ok = evolving and distinct_from_chemical and volatility_ok
     return ok, (
-        f"longest held run {longest_run} samples, autocorr at {lag} "
-        f"samples {r_lag:.2f}, centroid variance {variance_lo:.0f} -> "
-        f"{variance_hi:.0f} Hz^2 across VOLATILITY"
+        f"between/within {ratio:.2f} (evolving if <2) against CHEMICAL's "
+        f"{chem_between / max(chem_inside, 1e-12):.2f}, centroid variance "
+        f"{variance_lo:.0f} -> {variance_hi:.0f} Hz^2 across VOLATILITY"
     )
 
 
@@ -1705,50 +1802,154 @@ def check_fission_coupling() -> tuple[bool, str]:
     )
 
 
+#: dsp-testing.md Test 11's own list of what to measure. Statistical
+#: descriptors of character, deliberately not a waveform comparison: the
+#: previous metric was RMS difference between normalised renders, which is
+#: 20log10(sqrt(2-2*rho)) and therefore a correlation measure. It scored
+#: CHEMICAL against ITSELF at a different seed as -10.0 dB, more alike than
+#: its own -9 dB threshold allowed, while scoring two different reactions at
+#: -6.1 dB and passing them. It was reading event timing and noise
+#: decorrelation, not reaction identity.
+TEST11_FEATURES = (
+    "rms", "crest", "centroid", "spread", "flatness", "rolloff",
+    "zcr", "stereo_corr", "flux", "envelope_crest",
+)
+
+
+def _character(y: np.ndarray, sr: int) -> np.ndarray:
+    """Test 11's descriptors, in the order of TEST11_FEATURES.
+
+    Every one is a whole-render statistic, so re-dealing the same reaction's
+    stochastic draws moves them far less than changing the architecture does.
+    That is the property the old waveform metric lacked.
+    """
+    mono = y.mean(axis=1)
+    peak = float(np.max(np.abs(mono))) + 1e-18
+    rms = float(np.sqrt(np.mean(mono**2))) + 1e-18
+
+    freqs, power = welch(mono, fs=sr, window="blackmanharris", nperseg=4096)
+    total = float(np.sum(power)) + 1e-30
+    centroid = float(np.sum(freqs * power) / total)
+    spread = float(np.sqrt(np.sum(power * (freqs - centroid) ** 2) / total))
+    flatness = float(
+        np.exp(np.mean(np.log(power + 1e-30))) / (np.mean(power) + 1e-30)
+    )
+    cumulative = np.cumsum(power)
+    rolloff = float(freqs[int(np.searchsorted(cumulative, 0.85 * cumulative[-1]))])
+    zcr = float(np.mean(np.abs(np.diff(np.sign(mono))) > 0))
+
+    left, right = y[:, 0], y[:, 1]
+    denom = float(np.std(left) * np.std(right))
+    stereo = float(np.mean((left - left.mean()) * (right - right.mean())) / denom) if denom > 1e-18 else 1.0
+
+    # Spectral flux over short frames: how much the spectrum keeps changing.
+    hop = 2048
+    frames = [np.abs(np.fft.rfft(mono[i : i + hop] * np.hanning(hop)))
+              for i in range(0, len(mono) - hop, hop)]
+    flux = float(np.mean([np.sqrt(np.mean((b - a) ** 2)) for a, b in zip(frames, frames[1:])])) if len(frames) > 2 else 0.0
+
+    window = max(int(0.02 * sr), 1)
+    trimmed = (len(mono) // window) * window
+    envelope = np.sqrt(np.mean(mono[:trimmed].reshape(-1, window) ** 2, axis=1))
+    envelope_crest = float(np.max(envelope) / (np.mean(envelope) + 1e-18))
+
+    return np.array([
+        20.0 * np.log10(rms), peak / rms, np.log2(centroid + 1e-9),
+        np.log2(spread + 1e-9), np.log10(flatness + 1e-30),
+        np.log2(rolloff + 1e-9), zcr, stereo,
+        np.log10(flux + 1e-18), envelope_crest,
+    ])
+
+
 def check_reactions_are_distinct() -> tuple[bool, str]:
-    """Every reaction must be a different effect, not the same one retuned.
+    """dsp-testing.md Test 11: detect accidental convergence between reactions.
 
-    Measured against each other, which is the point. Measuring each reaction
-    against the dry signal only proves it did something, and five processes
-    that each do something can still all be the same process: that is exactly
-    how RADIATION and CHEMICAL shipped at 10% apart without anyone noticing.
+    Test 11 says explicitly not to require arbitrary numerical separation, and
+    to use the test to detect convergence instead: "If changing REACTION while
+    holding all controls fixed produces nearly identical outputs, investigate."
 
-    Level is divided out first so this reports a difference in sound rather
-    than a difference in loudness.
+    "Nearly identical" is given a measurable meaning here rather than a chosen
+    number. Each reaction is rendered at several seeds, which changes only its
+    stochastic realisation and not its architecture, and the spread of Test
+    11's descriptors across those seeds is what the same effect looks like
+    when nothing about it has changed. A pair of reactions is converged when
+    changing REACTION moves the character no further than changing only the
+    seed already does. The threshold is therefore measured from the material,
+    not picked by looking at how far apart the five happen to sit.
+
+    Run in both of Test 11's domains, because a shared output stage can
+    re-converge distinct architectures.
     """
     import itertools
 
-    from . import engine
+    from . import engine, reactor
     from .params import Params
     from .reactions import PROFILES
 
     dry, sr = audio_io.load(_source())
-    rendered = {}
-    for name in PROFILES:
-        p = Params(
+    dry = dry[: sr * 4]
+    seeds = (3, 17, 41)
+
+    def settings(name: str, seed: int) -> Params:
+        return Params(
             reaction=name, mode="GRID", grid="1/8", probability=1.0, spread=1.0,
-            exposure=0.85, toxicity=0.45, decay=0.3, half_life=0.4, seed=3,
+            exposure=0.85, toxicity=0.45, decay=0.3, half_life=0.4, seed=seed,
         )
-        y, _ = engine.process(dry, sr, p, 140.0)
-        rendered[name] = y / (np.sqrt(np.mean(y**2)) + 1e-18)
 
-    worst = []
-    for a, b in itertools.combinations(rendered, 2):
-        difference = 20.0 * np.log10(
-            np.sqrt(np.mean((rendered[a] - rendered[b]) ** 2))
-            / (np.sqrt(np.mean(rendered[b] ** 2)) + 1e-18)
+    raw: dict[tuple[str, int], np.ndarray] = {}
+    final: dict[tuple[str, int], np.ndarray] = {}
+    for name in PROFILES:
+        for seed in seeds:
+            p = settings(name, seed)
+            wet, _, _ = reactor.process(dry, sr, p, 140.0)
+            raw[(name, seed)] = _character(wet, sr)
+            y, _ = engine.process(dry, sr, p, 140.0)
+            final[(name, seed)] = _character(y, sr)
+
+    def verdict(features: dict[tuple[str, int], np.ndarray]) -> tuple[bool, float, float, str]:
+        stacked = np.stack(list(features.values()))
+        if not _finite(stacked):
+            return False, float("nan"), float("nan"), "non-finite descriptor"
+
+        # Scale each descriptor by how much it moves when only the seed moves,
+        # so the distance is measured in units of "same reaction, re-dealt".
+        within_std = np.stack([
+            np.std(np.stack([features[(name, s)] for s in seeds]), axis=0)
+            for name in PROFILES
+        ]).mean(axis=0)
+        scale = np.where(within_std > 1e-12, within_std, 1e-12)
+
+        def distance(a: np.ndarray, b: np.ndarray) -> float:
+            return float(np.sqrt(np.mean(((a - b) / scale) ** 2)))
+
+        within = [
+            distance(features[(name, x)], features[(name, y_)])
+            for name in PROFILES for x, y_ in itertools.combinations(seeds, 2)
+        ]
+        baseline = float(np.max(within))
+
+        cross = []
+        for a, b in itertools.combinations(PROFILES, 2):
+            d = float(np.mean([distance(features[(a, s)], features[(b, s)]) for s in seeds]))
+            cross.append((d, a, b))
+        cross.sort()
+
+        if not _finite(baseline, [c[0] for c in cross]):
+            return False, float("nan"), float("nan"), "non-finite distance"
+
+        converged = [c for c in cross if c[0] <= baseline]
+        head = ", ".join(f"{a}/{b} {d:.2f}" for d, a, b in cross[:2])
+        detail = (
+            f"{len(converged)}/{len(cross)} converged against a same-reaction "
+            f"baseline of {baseline:.2f}; closest {head}"
         )
-        worst.append((difference, a, b))
-    worst.sort()
+        return not converged, baseline, cross[0][0], detail
 
-    # More negative means more alike: the difference signal is further below the
-    # signal itself. -9dB means the two reactions differ by a third of the
-    # signal, and anything quieter than that is a retune rather than another
-    # effect.
-    alike = [w for w in worst if w[0] < -9.0]
-    ok = not alike
-    head = ", ".join(f"{a}/{b} {d:.1f}dB" for d, a, b in worst[:3])
-    return ok, f"{len(alike)}/{len(worst)} pairs too alike; closest: {head}"
+    raw_ok, raw_base, raw_closest, raw_detail = verdict(raw)
+    final_ok, final_base, final_closest, final_detail = verdict(final)
+
+    ok = raw_ok and final_ok
+    return ok, f"raw: {raw_detail} | final: {final_detail}"
 
 
 CHECKS = [
@@ -1785,6 +1986,7 @@ CHECKS = [
     ("range drives each character", check_range_drives_each_character),
     ("alien oscillator", check_alien_oscillator),
     ("chemical register", check_chemical_register),
+    ("chemical register is an offset", check_chemical_register_is_an_offset),
     ("radiation stochastic state", check_radiation_stochastic_state),
     ("fission branch coupling", check_fission_coupling),
     ("sludge generates subharmonics", check_sludge_subharmonics),
@@ -1798,7 +2000,13 @@ CHECKS = [
 def main() -> int:
     failures = 0
     for name, check in CHECKS:
-        ok, detail = check()
+        try:
+            ok, detail = check()
+        except Exception as exc:  # a check that cannot run has not passed
+            ok, detail = False, f"raised {type(exc).__name__}: {exc}"
+        # bool() rather than truthiness: a check that returns an array or a
+        # non-finite number must not be counted by accident.
+        ok = bool(ok) is True
         if not ok:
             failures += 1
         print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
