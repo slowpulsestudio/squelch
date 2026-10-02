@@ -184,6 +184,32 @@ def _radiation_reference() -> np.ndarray:
     return out[::20].reshape(-1)
 
 
+def _fission_reference() -> np.ndarray:
+    """Source/Dsp/Fission.h against reactor._fission_engine.
+
+    The branch pair reads v2 back through a moving fractional delay. The
+    prototype does that with np.interp over the whole array and clamps the
+    read index at 0, so for the first D samples it reads v2[0]; a real delay
+    line reads zeros there instead. That is a boundary convention, not a
+    porting error, and it is bounded by the longest delay the parameters can
+    ask for: (D0 + Dm) * sr = (0.0025 + 0.0035) * 44100 = 265 samples at
+    SPREAD 1. 300 is that figure rounded up, not a guess.
+    """
+    from .scheduler import Event
+
+    n = 4000
+    settle = 300
+    t = np.arange(n) / SR
+    x = np.stack([0.3 * np.sin(2.0 * np.pi * 320.0 * t),
+                  0.3 * np.sin(2.0 * np.pi * 300.0 * t)], axis=1)
+    p = Params(reaction="FISSION", spread=0.8, decay=0.5, exposure=0.6, seed=2)
+    profile = PROFILES["FISSION"]
+    zeros = np.zeros(n)
+    out = reactor._fission_engine(x, zeros, zeros, zeros, SR, profile,
+                                  [], None, p, None)
+    return out[settle::20].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -212,6 +238,7 @@ def expectations() -> dict:
         "alien_engine": _alien_reference(),
         "chemical_engine": _chemical_reference(),
         "radiation_engine": _radiation_reference(),
+        "fission_engine": _fission_reference(),
     }
 
 

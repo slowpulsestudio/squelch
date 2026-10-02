@@ -15,6 +15,7 @@
 #include "../Source/Dsp/Alien.h"
 #include "../Source/Dsp/Chemical.h"
 #include "../Source/Dsp/Filters.h"
+#include "../Source/Dsp/Fission.h"
 #include "../Source/Dsp/Radiation.h"
 #include "../Source/Dsp/Oversampler.h"
 #include "../Source/Dsp/Rng.h"
@@ -279,7 +280,40 @@ int main()
                 values.push_back (r);
             }
         }
-        printArray ("radiation_engine", values, true);
+        printArray ("radiation_engine", values);
+    }
+
+    // FISSION. The prototype clamps its fractional-delay read index at 0, so
+    // it reads v2[0] where a real delay line reads zeros; that disagreement
+    // is bounded by the longest delay the parameters can ask for,
+    // (D0 + Dm) * sr = 265 samples at SPREAD 1. 300 is that rounded up.
+    {
+        constexpr int settle = 300;
+        dsp::FissionProfile profile;
+        dsp::FissionParams params;
+        params.spread = 0.8;
+        params.decay = 0.5;
+        params.exposure = 0.6;
+        params.seed = 2;
+
+        dsp::FissionEngine engine;
+        engine.prepare (sampleRate);
+        engine.configure (profile, params);
+
+        std::vector<double> values;
+        for (int i = 0; i < 4000; ++i)
+        {
+            const auto t = i / sampleRate;
+            double l = 0.0, r = 0.0;
+            engine.process (0.3 * std::sin (2.0 * M_PI * 320.0 * t),
+                            0.3 * std::sin (2.0 * M_PI * 300.0 * t), l, r);
+            if (i >= settle && (i - settle) % 20 == 0)
+            {
+                values.push_back (l);
+                values.push_back (r);
+            }
+        }
+        printArray ("fission_engine", values, true);
     }
 
     std::printf ("}\n");
