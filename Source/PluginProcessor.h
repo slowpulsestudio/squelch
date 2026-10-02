@@ -3,6 +3,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "Parameters.h"
+#include "Dsp/Alien.h"
+#include "Dsp/Sludge.h"
 
 class SquelchAudioProcessor : public juce::AudioProcessor
 {
@@ -44,7 +46,21 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
+    /// Reads the APVTS once per block, off the audio thread's hot loop.
+    void refreshReactionSettings();
+
     juce::SmoothedValue<float> inputGain, outputGain, wetMix;
+
+    squelch::dsp::SludgeEngine sludge;
+    squelch::dsp::AlienEngine alien;
+
+    /// SLUDGE runs its saturation through a causal oversampler, which lags by
+    /// kOversamplerLatencySamples. The dry path is delayed to match so the mix
+    /// does not comb-filter, and the same figure is reported to the host.
+    juce::AudioBuffer<float> dryDelay;
+    int dryDelayPos { 0 };
+
+    int currentReaction { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SquelchAudioProcessor)
 };

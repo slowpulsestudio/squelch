@@ -62,9 +62,42 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     outputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (outputTrimDb.load()));
     wetMix.setCurrentAndTargetValue (mix.load());
 
-    // Both ceilings delay by the limiter's lookahead, so this figure does not
-    // change when CLIP is switched and the host never has to re-sync.
-    setLatencySamples (static_cast<int> (0.005 * sampleRate));
+    sludge.prepare (sampleRate);
+    alien.prepare (sampleRate);
+
+    dryDelay.setSize (2, squelch::dsp::kOversamplerLatencySamples);
+    dryDelay.clear();
+    dryDelayPos = 0;
+
+    refreshReactionSettings();
+
+    // SLUDGE's causal oversampler is the only latency the plugin currently
+    // has. The previous figure here was the output stage's limiter lookahead,
+    // which is not ported yet and so was latency the host was told about but
+    // never actually given.
+    setLatencySamples (squelch::dsp::kOversamplerLatencySamples);
+}
+
+void SquelchAudioProcessor::refreshReactionSettings()
+{
+    using namespace squelch;
+
+    const auto value = [this] (const char* id)
+    {
+        return static_cast<double> (apvts.getRawParameterValue (id)->load());
+    };
+
+    currentReaction = static_cast<int> (apvts.getRawParameterValue (ids::reaction)->load());
+
+    dsp::SludgeProfile profile;
+    dsp::SludgeParams params;
+    params.decay = value (ids::decay);
+    params.halfLife = value (ids::halfLife);
+    params.spread = value (ids::spread);
+    params.reactivity = value (ids::reactivity);
+    params.exposure = value (ids::exposure);
+    params.toxicity = value (ids::toxicity);
+    sludge.configure (profile, params);
 }
 
 double SquelchAudioProcessor::getTailLengthSeconds() const
@@ -92,16 +125,53 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     outputGain.setTargetValue (juce::Decibels::decibelsToGain (outputTrimDb.load()));
     wetMix.setTargetValue (mix.load());
 
-    // The reaction itself is not ported yet. Everything above is in place so
-    // the plugin loads, validates and gain stages; the DSP lands next.
+    refreshReactionSettings();
+
+    // Only SLUDGE is wired. ALIEN is ported and verified but is event-gated,
+    // and the scheduler it needs is not ported yet, so it has nothing to
+    // trigger it; the others have no engine here at all. Those reactions pass
+    // the dry signal through rather than pretending to react.
+    const auto sludgeSelected = currentReaction == squelch::reactionNames.indexOf ("SLUDGE");
+
+    const auto channels = buffer.getNumChannels();
+    const auto latency = squelch::dsp::kOversamplerLatencySamples;
+
     for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
     {
         const auto in = inputGain.getNextValue();
         const auto out = outputGain.getNextValue();
-        wetMix.getNextValue();
+        const auto wet = wetMix.getNextValue();
 
-        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
-            buffer.setSample (channel, sample, buffer.getSample (channel, sample) * in * out);
+        const auto dryL = buffer.getSample (0, sample) * in;
+        const auto dryR = channels > 1 ? buffer.getSample (1, sample) * in : dryL;
+
+        // SLUDGE's oversampler lags by `latency`, so the dry path is delayed
+        // by the same amount or the mix comb-filters the two against each
+        // other. Reactions without an engine ride the same delay so switching
+        // reaction never re-syncs the host.
+        const auto delayedL = dryDelay.getSample (0, dryDelayPos);
+        const auto delayedR = dryDelay.getSample (1, dryDelayPos);
+        dryDelay.setSample (0, dryDelayPos, dryL);
+        dryDelay.setSample (1, dryDelayPos, dryR);
+        dryDelayPos = (dryDelayPos + 1 == latency) ? 0 : (dryDelayPos + 1);
+
+        auto wetL = delayedL;
+        auto wetR = delayedR;
+
+        if (sludgeSelected)
+        {
+            double sl = 0.0, sr = 0.0;
+            sludge.process (dryL, dryR, sl, sr);
+            wetL = static_cast<float> (sl);
+            wetR = static_cast<float> (sr);
+        }
+
+        const auto mixedL = delayedL + (wetL - delayedL) * wet;
+        const auto mixedR = delayedR + (wetR - delayedR) * wet;
+
+        buffer.setSample (0, sample, mixedL * out);
+        if (channels > 1)
+            buffer.setSample (1, sample, mixedR * out);
     }
 }
 

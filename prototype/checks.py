@@ -1098,6 +1098,7 @@ def check_ionize_scatters_three_axes() -> tuple[bool, str]:
 
     measured = {}
     registers = {}
+    alternates = 0.0
     for label, on in (("off", False), ("on", True)):
         p = Params(**base, ionize=on, ionize_amount=0.9)
         md = Meltdown(p, n, SR)
@@ -1135,6 +1136,8 @@ def check_ionize_scatters_three_axes() -> tuple[bool, str]:
 
     off, on = measured["off"], measured["on"]
     scatter = float(np.std(registers["on"] - registers["off"]) * 12.0)
+    if not _finite(scatter, alternates, off, on):
+        return False, "ionize measurement went non-finite"
     ok = (
         on[0] > 0.2 and off[0] < 1e-6      # stereo: centred when off
         and scatter > 2.0                  # spectrum: own register per event
