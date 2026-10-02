@@ -194,4 +194,31 @@ namespace squelch::dsp
         double value { 0.0 };
         bool primed { false };
     };
+
+    /** One-pole lowpass with zero initial state, matching
+        `scipy.signal.lfilter`'s default `zi`.
+
+        This is `prototype/reactor.py`'s `_one_pole_hz` and the memory stage's
+        `lfilter([1 - a], [1, -a], ...)`, both of which start their state at
+        zero rather than priming to the first sample like `OnePole` above.
+        The gain `g` is passed per call rather than fixed at `prepare()`-time
+        because SLUDGE's final smoothing stage recomputes it every sample from
+        a time-varying cutoff.
+    */
+    class ZeroStateOnePole
+    {
+    public:
+        void reset() noexcept { state = 0.0; }
+
+        /// g = 1 - e^(-2*pi*f_hz/sr) for a cutoff in Hz, or (1 - a) for a
+        /// direct pole `a` such as `exp(-1/(tau*sr))`.
+        double process (double x, double g) noexcept
+        {
+            state += g * (x - state);
+            return state;
+        }
+
+    private:
+        double state { 0.0 };
+    };
 }

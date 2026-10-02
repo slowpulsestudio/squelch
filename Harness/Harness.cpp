@@ -16,6 +16,7 @@
 #include "../Source/Dsp/Oversampler.h"
 #include "../Source/Dsp/Rng.h"
 #include "../Source/Dsp/Saturation.h"
+#include "../Source/Dsp/Sludge.h"
 
 namespace
 {
@@ -109,7 +110,64 @@ int main()
             if (i >= settle && (i - settle) % 20 == 0)
                 values.push_back (y);
         }
-        printArray ("oversampler_soft_clip", values, true);
+        printArray ("oversampler_soft_clip", values);
+    }
+
+    // SLUDGE's own one-pole stages all start at zero state with no
+    // lookahead, same as the oversampler's envelope followers, so they need
+    // no latency of their own. But the engine runs its saturation through
+    // Oversampler.h internally, same acausal-vs-causal story as that
+    // primitive on its own: skip its latency, then a settling region.
+    {
+        constexpr int settle = 400;
+        dsp::SludgeProfile profile;
+        profile.baseHz = 100.0;
+        profile.cutoffLoHz = 150.0;
+        profile.cutoffHiHz = 1300.0;
+        profile.decayLoS = 0.25;
+        profile.decayHiS = 1.60;
+
+        dsp::SludgeParams params;
+        params.decay = 0.4;
+        params.halfLife = 0.6;
+        params.spread = 0.65;
+        params.reactivity = 0.5;
+        params.exposure = 0.7;
+        params.toxicity = 0.35;
+
+        dsp::SludgeEngine engine;
+        engine.prepare (sampleRate);
+        engine.configure (profile, params);
+
+        std::vector<double> values;
+        for (int i = 0; i < 4000; ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto x = 0.5 * std::sin (2.0 * M_PI * 110.0 * t)
+                         + 0.3 * std::sin (2.0 * M_PI * 850.0 * t);
+
+            // Matches prototype/compare.py's np.roll(x, 3): a circular shift,
+            // not a zero-padded delay, so the first three samples wrap round
+            // to the end of the 4000-sample test signal rather than reading
+            // zero.
+            const auto idx = (i - 3 + 4000) % 4000;
+            const auto tPrev = idx / sampleRate;
+            const auto xPrev = 0.5 * std::sin (2.0 * M_PI * 110.0 * tPrev)
+                             + 0.3 * std::sin (2.0 * M_PI * 850.0 * tPrev);
+
+            const auto xL = x;
+            const auto xR = 0.8 * xPrev;
+
+            double outL = 0.0, outR = 0.0;
+            engine.process (xL, xR, outL, outR);
+
+            if (i >= settle && (i - settle) % 40 == 0)
+            {
+                values.push_back (outL);
+                values.push_back (outR);
+            }
+        }
+        printArray ("sludge_engine", values, true);
     }
 
     std::printf ("}\n");

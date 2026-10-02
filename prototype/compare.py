@@ -19,7 +19,9 @@ import sys
 import numpy as np
 from scipy.signal import lfilter
 
-from . import filters, rng, saturation
+from . import filters, reactor, rng, saturation
+from .params import Params
+from .reactions import PROFILES
 
 SR = 44100
 
@@ -57,6 +59,35 @@ def _oversampler_reference() -> np.ndarray:
     return ref[indices - latency]
 
 
+def _sludge_reference() -> np.ndarray:
+    """Source/Dsp/Sludge.h's SludgeEngine against reactor._sludge_engine.
+
+    The engine's own one-pole stages all start at zero state with no lookahead,
+    same as _one_pole_hz, so they need no latency of their own. But the engine
+    calls saturation.oversampled internally, same acausal-vs-causal story as
+    Oversampler.h itself: skip Source/Dsp/Oversampler.h's latency, then a
+    settling region, same reasoning as _oversampler_reference.
+    """
+    n = 4000
+    settle = 400
+    latency = 20
+    t = np.arange(n) / SR
+    x = 0.5 * np.sin(2.0 * np.pi * 110.0 * t) + 0.3 * np.sin(2.0 * np.pi * 850.0 * t)
+    stereo = np.stack([x, 0.8 * np.roll(x, 3)], axis=1)
+
+    p = Params(
+        decay=0.4, half_life=0.6, spread=0.65, reactivity=0.5, exposure=0.7,
+        toxicity=0.35, seed=1,
+    )
+    profile = PROFILES["SLUDGE"]
+    zeros = np.zeros(n)
+    out = reactor._sludge_engine(
+        stereo, zeros, zeros, zeros, SR, profile, [], None, p, None
+    )
+    indices = np.arange(settle, n, 40)
+    return out[indices - latency].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -80,6 +111,7 @@ def expectations() -> dict:
         "high_shelf": filters.high_shelf(stereo, 15000.0, 1.0, SR)[:, 0],
         "running_rms": _running_rms_reference(),
         "oversampler_soft_clip": _oversampler_reference(),
+        "sludge_engine": _sludge_reference(),
     }
 
 
