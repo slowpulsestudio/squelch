@@ -79,3 +79,9 @@ target_link_libraries(Squelch PRIVATE
 # "it builds" is not evidence that a filter is correct.
 add_executable(SquelchHarness Harness/Harness.cpp)
 target_compile_features(SquelchHarness PRIVATE cxx_std_17)
+
+# dsp-testing.md's Tests 2, 3, 4, 5 and 15, run against the ported DSP rather
+# than the prototype: the comparison harness only ever runs at one sample rate
+# in one block configuration, so it cannot see the faults a port introduces.
+add_executable(SquelchValidate Harness/Validate.cpp)
+target_compile_features(SquelchValidate PRIVATE cxx_std_17)
