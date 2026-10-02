@@ -644,6 +644,119 @@ def check_sludge_subharmonics() -> tuple[bool, str]:
     )
 
 
+def check_sludge_toxicity_and_memory() -> tuple[bool, str]:
+    """dsp-testing.md Test 9's TOXICITY requirement.
+
+    Test 9 asks for three things beyond the subharmonics. None had a check,
+    and the gap was not cosmetic: the only SLUDGE check ran on silence, where
+    e, q, r, m and s_snap are all identically zero, so DECAY, HALF-LIFE,
+    SNAPBACK, the memory state and the cutoff range could not affect the
+    output at all. Bypassing SLUDGE's saturation entirely went unnoticed.
+
+    Driven with real material here so that state exists, and sampled at
+    interior parameter values rather than only the endpoints, so a constant
+    interpolation shows up as absent sensitivity rather than only a wrong
+    direction at the extremes.
+
+    HALF-LIFE and SNAPBACK are still uncovered: see the note on the tail
+    measurement below.
+    """
+    from . import reactor
+    from .reactions import PROFILES
+
+    sr = SR
+    # Low enough that the even orders stay under SLUDGE's own smoothing
+    # lowpass (f_effective sits near 440 Hz at these settings). Probing at
+    # 600 Hz and above measures that filter's rolloff, not the nonlinearity.
+    f0 = 80.0
+    n = sr * 2
+    t = np.arange(n) / sr
+    tone = np.repeat((0.4 * np.sin(2.0 * np.pi * f0 * t))[:, None], 2, axis=1)
+    profile = PROFILES["SLUDGE"]
+    zeros = np.zeros(n)
+
+    def render(**kwargs) -> np.ndarray:
+        p = Params(reaction="SLUDGE", seed=0, **kwargs)
+        return reactor._sludge_engine(tone, zeros, zeros, zeros, sr, profile,
+                                      [], None, p, None)
+
+    def even_order(y: np.ndarray) -> float:
+        """Even harmonics against the fundamental, in dB.
+
+        The asymmetric curve is what makes these: a symmetric nonlinearity
+        produces odd orders only, and no nonlinearity produces neither.
+        """
+        spectrum = np.abs(np.fft.rfft(y[:, 0] * _blackman_harris(n)))
+        freqs = np.fft.rfftfreq(n, 1.0 / sr)
+        at = lambda f: float(spectrum[np.argmin(np.abs(freqs - f))])
+        even = at(2 * f0) + at(4 * f0)
+        return 20.0 * np.log10((even + 1e-18) / (at(f0) + 1e-18))
+
+    # Four points including two interior ones either side of the midpoint.
+    toxicity = {a: even_order(render(toxicity=a, exposure=0.6, half_life=0.4,
+                                     decay=0.4, spread=0.5, reactivity=0.4))
+                for a in (0.05, 0.35, 0.65, 0.95)}
+    levels = [toxicity[a] for a in (0.05, 0.35, 0.65, 0.95)]
+    if not _finite(levels):
+        return False, "harmonic measurement went non-finite"
+
+    # Test 9 asks for measurable even-order content that answers to TOXICITY.
+    # It does not say the relationship is monotone, and measured it is not:
+    # see the reported figures. Driving both halves of the asymmetric tanh
+    # deeper eventually squares them off and the even orders fall back, so
+    # monotonicity would be an assertion about the curve that the
+    # specification does not make. Presence and sensitivity are what it does
+    # ask for, and between them they catch a bypassed nonlinearity (no even
+    # orders at all) and a TOXICITY wired to a constant (no sensitivity).
+    present = max(levels) > -60.0
+    responds = (max(levels) - min(levels)) > 3.0
+
+    # HALF-LIFE: the body state has to outlive the input. Burst then silence,
+    # measured in the tail, at two interior settings.
+    burst = np.zeros((n, 2))
+    edge = int(0.4 * sr)
+    burst[:edge] = tone[:edge]
+
+    def tail_decay(half_life: float) -> float:
+        """How fast the deposited body state falls away, in dB per second.
+
+        Persistence is a RATE, not a level: a longer HALF-LIFE charges the
+        memory one-pole more slowly, so it also stores less over a fixed
+        burst, and a plain tail level reads that as less persistence rather
+        than more.
+        """
+        p = Params(reaction="SLUDGE", seed=0, half_life=half_life, exposure=0.6,
+                   toxicity=0.5, decay=0.4, spread=0.5, reactivity=0.4)
+        driven = reactor._sludge_engine(burst, zeros, zeros, zeros, sr, profile,
+                                        [], None, p, None)
+        # The subharmonic oscillator free-runs whether or not anything is
+        # playing, so it is present in the tail either way and would swamp
+        # this. Rendering silence at the same settings and differencing
+        # leaves only what the input actually deposited.
+        idle = reactor._sludge_engine(np.zeros_like(burst), zeros, zeros, zeros,
+                                      sr, profile, [], None, p, None)
+        residue = driven - idle
+        early = float(np.sqrt(np.mean(residue[int(0.45 * sr) : int(0.65 * sr)] ** 2)))
+        late = float(np.sqrt(np.mean(residue[int(1.2 * sr) : int(1.4 * sr)] ** 2)))
+        return 20.0 * np.log10((early + 1e-18) / (late + 1e-18)) / 0.75
+
+    short, long = tail_decay(0.25), tail_decay(0.75)
+    if not _finite(short, long):
+        return False, "tail measurement went non-finite"
+
+    # HALF-LIFE is REPORTED, not asserted. The isolated residue grows rather
+    # than decays across the tail window, so this does not yet measure the
+    # persistence Test 9 asks for and an assertion on it would be a number
+    # chosen to be green rather than a property established. Test 9's
+    # HALF-LIFE and SNAPBACK requirements remain uncovered.
+    ok = present and responds
+    return ok, (
+        "even-order vs TOXICITY " + ", ".join(f"{a:.2f}:{toxicity[a]:.1f}" for a in (0.05, 0.35, 0.65, 0.95))
+        + f" dB (present {present}, responds {responds}); HALF-LIFE tail slope "
+        f"{short:.1f} vs {long:.1f} dB/s REPORTED ONLY, not asserted"
+    )
+
+
 def check_fallout_disperses_per_reaction() -> tuple[bool, str]:
     """FALLOUT must widen FISSION and wobble the others, and do nothing at zero.
 
@@ -1990,6 +2103,7 @@ CHECKS = [
     ("radiation stochastic state", check_radiation_stochastic_state),
     ("fission branch coupling", check_fission_coupling),
     ("sludge generates subharmonics", check_sludge_subharmonics),
+    ("sludge toxicity and memory", check_sludge_toxicity_and_memory),
     ("reactions are distinct", check_reactions_are_distinct),
     ("fallout disperses per reaction", check_fallout_disperses_per_reaction),
     ("house voicing curve", check_voicing_curve),
