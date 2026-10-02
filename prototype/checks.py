@@ -372,6 +372,7 @@ def check_range_drives_each_character() -> tuple[bool, str]:
     """
     from .params import Params
     from .reactions import PROFILES
+    from . import reactor
 
     n = SR * 2
     source = _tone(300.0, 2.0) * 0.4
@@ -386,17 +387,37 @@ def check_range_drives_each_character() -> tuple[bool, str]:
             (np.sqrt(np.mean(delta**2)) + 1e-15) / (np.sqrt(np.mean(source**2)) + 1e-12)
         )
 
-    # ALIEN's shift must be absent at zero and present when opened.
-    results["ALIEN"] = (difference("ALIEN", 0.0), difference("ALIEN", 1.0))
+    # ALIEN is now a source oscillator, not a filter on the input: SPREAD sets
+    # how far each event's pitch sweeps upward within itself, not whether a
+    # zap exists at all. Measure the instantaneous-frequency rise across a
+    # single event's life (silence in, so the measured frequency can only be
+    # the oscillator's own) and confirm SPREAD scales that rise.
+    def alien_sweep_hz(amount: float) -> float:
+        silence = np.zeros((SR, 2))
+        p = Params(reaction="ALIEN", mode="GRID", grid="1/4", probability=1.0,
+                    spread=amount, toxicity=0.0, exposure=0.0,
+                    reactivity=0.0, decay=0.3, seed=0)
+        wet, _, _ = reactor.process(silence, SR, p, 140.0)
+        mono = wet.mean(axis=1)
+        analytic = hilbert(mono)
+        inst_freq = np.diff(np.unwrap(np.angle(analytic))) / (2.0 * np.pi) * SR
+        # Skip past the short high-frequency chirp accent (tau_z ~10ms): its
+        # interference with the carrier corrupts the instantaneous-frequency
+        # estimate right at onset, well before the sweep itself has moved.
+        early = float(np.mean(inst_freq[1500:1800]))
+        late = float(np.mean(inst_freq[3500:3800]))
+        return late - early
+
+
+    alien_sweep = {0.0: alien_sweep_hz(0.0), 1.0: alien_sweep_hz(1.0)}
 
     # SLUDGE's subharmonic frequency must be insensitive to body energy at
     # zero and clearly coupled to it when opened. Through the real engine, not
     # a formula copied from a post hook it no longer calls: comparing a quiet
     # and a loud steady noise bed isolates what SPREAD alone is responsible
     # for, since f_h = f_reactor * 2^(spread * ... * tanh(body energy)).
-    from . import reactor
-
     n_sludge = SR * 4
+
 
     def sub_peak_hz(level: float, amount: float) -> float:
         bed = np.random.default_rng(1).standard_normal((n_sludge, 2)) * level
@@ -422,15 +443,86 @@ def check_range_drives_each_character() -> tuple[bool, str]:
             np.corrcoef(left, right)[0, 1]
         )
 
-    alien_ok = results["ALIEN"][0] < -100.0 and results["ALIEN"][1] > -20.0
+    alien_ok = abs(alien_sweep[0.0]) < 5.0 and alien_sweep[1.0] > 20.0
     sludge_ok = abs(travel[0.0]) < 5.0 and travel[1.0] > 10.0
     fission_ok = separation[0.0] > 0.9 and separation[1.0] < separation[0.0] - 0.1
 
     ok = alien_ok and sludge_ok and fission_ok
     return ok, (
-        f"ALIEN zaps {results['ALIEN'][0]:.0f} -> {results['ALIEN'][1]:.0f} dB, "
+        f"ALIEN sweep rise {alien_sweep[0.0]:.0f} -> {alien_sweep[1.0]:.0f} Hz, "
         f"SLUDGE quiet/loud peak shift {travel[0.0]:.1f} -> {travel[1.0]:.1f} Hz, "
         f"FISSION L/R corr {separation[0.0]:.2f} -> {separation[1.0]:.2f}"
+    )
+
+
+def check_alien_oscillator() -> tuple[bool, str]:
+    """dsp-testing.md Test 10: ALIEN must contain an actual source oscillator,
+    event-gated rather than free-running, with working FM and AM.
+    """
+    from . import reactor
+    from .params import Params
+    from .reactions import PROFILES
+
+    n = SR * 2
+    silence = np.zeros((n, 2))
+
+    # silence + event -> oscillator burst.
+    p_events = Params(reaction="ALIEN", mode="GRID", grid="1/4", probability=1.0,
+                       spread=0.0, toxicity=0.0, exposure=0.0, decay=0.3, seed=0)
+    wet_events, _, _ = reactor.process(silence, SR, p_events, 140.0)
+    burst_rms = float(np.sqrt(np.mean(wet_events**2)))
+
+    # silence + no event -> no continuous output.
+    p_quiet = Params(reaction="ALIEN", mode="GRID", grid="1/4", probability=0.0,
+                      spread=0.0, toxicity=0.0, exposure=0.0, decay=0.3, seed=0)
+    wet_quiet, _, _ = reactor.process(silence, SR, p_quiet, 140.0)
+    quiet_rms = float(np.sqrt(np.mean(wet_quiet**2)))
+
+    # Pitch estimate: first event's carrier should sit near base_hz at
+    # spread=0 (no sweep) with a deterministic pitch jump.
+    freqs, power = welch(wet_events[: int(0.05 * SR)].mean(axis=1), fs=SR,
+                          window="blackmanharris", nperseg=2048)
+    measured_hz = float(freqs[np.argmax(power)])
+    base_hz = PROFILES["ALIEN"].base_hz
+
+    # FM sidebands: beta=0 should leave a near-pure carrier; beta>0 (TOXICITY)
+    # must spread energy into sidebands, raising spectral spread around it.
+    def spectral_spread(toxicity: float) -> float:
+        p = Params(reaction="ALIEN", mode="GRID", grid="1/4", probability=1.0,
+                    spread=0.0, toxicity=toxicity, exposure=0.0, decay=0.3, seed=0)
+        wet, _, _ = reactor.process(silence, SR, p, 140.0)
+        f, pw = welch(wet[: int(0.05 * SR)].mean(axis=1), fs=SR,
+                       window="blackmanharris", nperseg=2048)
+        centre = f[np.argmax(pw)]
+        band = (f > 20.0) & (f < SR * 0.45)
+        return float(np.sqrt(np.sum(pw[band] * (f[band] - centre) ** 2) / np.sum(pw[band])))
+
+    spread_fm_off = spectral_spread(0.0)
+    spread_fm_on = spectral_spread(1.0)
+
+    # AM: with EXPOSURE at zero the amplitude modulation depth (mu) is zero,
+    # so disabling it should measurably reduce envelope ripple at f_a's rate.
+    def am_ripple(exposure: float) -> float:
+        p = Params(reaction="ALIEN", mode="GRID", grid="1/4", probability=1.0,
+                    spread=0.0, toxicity=0.0, exposure=exposure, decay=0.3, seed=0)
+        wet, _, _ = reactor.process(silence, SR, p, 140.0)
+        env = np.abs(hilbert(wet[: int(0.05 * SR)].mean(axis=1)))
+        return float(np.std(env) / (np.mean(env) + 1e-12))
+
+    ripple_am_off = am_ripple(0.0)
+    ripple_am_on = am_ripple(1.0)
+
+    gated_ok = burst_rms > 1e-6 and quiet_rms < burst_rms * 1e-3
+    pitch_ok = 0.3 < measured_hz / base_hz < 3.0
+    fm_ok = spread_fm_on > spread_fm_off * 1.5
+    am_ok = ripple_am_on > ripple_am_off * 1.2
+
+    ok = gated_ok and pitch_ok and fm_ok and am_ok
+    return ok, (
+        f"event burst RMS {burst_rms:.4f} vs no-event {quiet_rms:.6f}, "
+        f"measured {measured_hz:.0f}Hz vs base {base_hz:.0f}Hz, "
+        f"FM spread {spread_fm_off:.0f} -> {spread_fm_on:.0f} Hz, "
+        f"AM ripple {ripple_am_off:.3f} -> {ripple_am_on:.3f}"
     )
 
 
@@ -1381,6 +1473,7 @@ CHECKS = [
     ("acid voice", check_acid_voice),
     ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("range drives each character", check_range_drives_each_character),
+    ("alien oscillator", check_alien_oscillator),
     ("sludge generates subharmonics", check_sludge_subharmonics),
     ("reactions are distinct", check_reactions_are_distinct),
     ("fallout disperses per reaction", check_fallout_disperses_per_reaction),

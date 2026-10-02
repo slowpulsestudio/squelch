@@ -525,6 +525,120 @@ def _sludge_engine(
     return (1.0 - mu_h) * s + mu_h * h[:, None]
 
 
+#: ALIEN's deterministic per-event pitch hash stream.
+ALIEN_PITCH_STREAM = 401
+
+#: Total pitch jump range each event can land on, in semitones either side of
+#: base_hz. Wide enough that consecutive events read as discrete jumps, not a
+#: wobble around one note.
+ALIEN_D_MAX_SEMITONES = 36.0
+
+#: How far TOXICITY can drive the FM modulation index, and how fast it
+#: collapses back toward the plain carrier within one event.
+ALIEN_BETA0_MAX = 6.0
+ALIEN_TAU_BETA_S = 0.03
+
+#: AM burst depth at full EXPOSURE, and the modulator's own rate range.
+ALIEN_MU_MAX = 1.5
+ALIEN_AM_HZ_LO = 30.0
+ALIEN_AM_HZ_HI = 200.0
+
+#: The short high-frequency accent riding above the carrier, and how fast it
+#: collapses: it is an accent, not a second voice.
+ALIEN_CHIRP_SEMITONES = 12.0
+ALIEN_TAU_Z_S = 0.01
+ALIEN_ATTACK_S = 0.003
+
+#: Input energy's share of an event's amplitude: an event fires from silence,
+#: but a loud input drives it harder, per maths.md's A_i = A_event + g_x E_x.
+ALIEN_INPUT_GAIN = 0.6
+
+
+def _alien_engine(
+    x: np.ndarray,
+    cutoff: np.ndarray,
+    feedback: np.ndarray,
+    drive: np.ndarray,
+    sr: int,
+    profile: ReactionProfile,
+    events: list[Event],
+    controls: Controls,
+    p: Params,
+    md,
+) -> np.ndarray:
+    """ALIEN: an actual event-gated source oscillator, not a filtered input.
+
+    Each scheduled event gets its own deterministic pitch (hashed, not derived
+    from the input), an exponential pitch sweep, FM with a decaying modulation
+    index, a separate AM burst, an attack/release envelope and a short
+    high-frequency chirp accent. With no events and a silent input this
+    produces nothing: the oscillator is event-gated, per maths.md and
+    dsp-testing.md Test 10, not a continuously running synth.
+    """
+    n, channels = x.shape
+    out = np.zeros((n, channels))
+    if not events:
+        return out
+
+    e_x = np.abs(x).max(axis=1)
+
+    sweep_semitones = 12.0 * profile.sweep_octaves * p.spread
+    decay_time = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
+    tau_f = max(decay_time * 0.5, 0.01)
+    tau_r = max(decay_time, 0.02)
+    beta0 = ALIEN_BETA0_MAX * p.toxicity
+    mu = ALIEN_MU_MAX * p.exposure
+    f_a = ALIEN_AM_HZ_LO + (ALIEN_AM_HZ_HI - ALIEN_AM_HZ_LO) * p.exposure
+
+    dur = min(int(sr * max(8.0 * tau_r, 0.05)), n)
+    if dur <= 0:
+        return out
+    t = np.arange(dur) / sr
+
+    for event in events:
+        start = max(int(event.start), 0)
+        if start >= n:
+            continue
+        length = min(dur, n - start)
+        tt = t[:length]
+
+        r_i = 2.0 * rng.urand(p.seed, ALIEN_PITCH_STREAM, event.index) - 1.0
+        d_i = ALIEN_D_MAX_SEMITONES * r_i
+        f0 = profile.base_hz * np.power(2.0, d_i / 12.0)
+        f_c = f0 * np.power(2.0, sweep_semitones * (1.0 - np.exp(-tt / tau_f)) / 12.0)
+        f_c = np.clip(f_c, 20.0, sr * 0.45)
+
+        beta = beta0 * np.exp(-tt / ALIEN_TAU_BETA_S)
+        theta_m = np.cumsum(2.0 * np.pi * f_c / sr)
+        m = np.sin(theta_m)
+        theta_c = np.cumsum(2.0 * np.pi * f_c / sr)
+        z_fm = np.sin(theta_c + beta * m)
+
+        m_a = 0.5 * (1.0 + np.sin(2.0 * np.pi * f_a * tt))
+        a = 1.0 + mu * m_a
+        z_am = a * z_fm
+
+        e_a = 1.0 - np.exp(-tt / ALIEN_ATTACK_S)
+        e_r = np.exp(-tt / tau_r)
+        env = e_a * e_r
+
+        f_z = np.clip(f_c * np.power(2.0, ALIEN_CHIRP_SEMITONES / 12.0), 20.0, sr * 0.45)
+        theta_z = np.cumsum(2.0 * np.pi * f_z / sr)
+        a_z = 0.6 if event.accent else 0.3
+        e_z = a_z * np.exp(-tt / ALIEN_TAU_Z_S)
+        z_z = e_z * np.sin(theta_z)
+
+        a_event = 1.3 if event.accent else 0.8
+        a_i = a_event + ALIEN_INPUT_GAIN * e_x[start]
+
+        burst = a_i * env * z_am + z_z
+        pan = 0.5 * (1.0 + event.pan)
+        out[start : start + length, 0] += burst * (1.0 - pan)
+        out[start : start + length, 1] += burst * pan
+
+    return out
+
+
 #: One engine per REACTION. Replacing an entry is how a reaction gets its own
 #: mechanism instead of CHEMICAL's ladder.
 ENGINES: dict[str, Callable] = {
@@ -532,7 +646,7 @@ ENGINES: dict[str, Callable] = {
     "RADIATION": _ladder_engine,
     "FISSION": _ladder_engine,
     "SLUDGE": _sludge_engine,
-    "ALIEN": _ladder_engine,
+    "ALIEN": _alien_engine,
 }
 
 

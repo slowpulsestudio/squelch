@@ -25,8 +25,6 @@ from .params import Params
 FISSION_BASE_HZ = 220.0
 FISSION_SWEEP_OCT = 3.2
 FISSION_SEPARATION_OCT = 2.4
-#: How far ALIEN's zaps travel.
-ALIEN_SHIFT_HZ = 1100.0
 
 #: The noise beds follow the incoming audio rather than sitting under it as a
 #: constant hiss, so contamination reads as rhythmic.
@@ -362,12 +360,6 @@ def _bubble(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -
     return wet
 
 
-def _shift(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """Non-terrestrial: single-sideband zaps whose reach is set by SPREAD."""
-    shifted = filters.frequency_shift(wet, c.env * ALIEN_SHIFT_HZ * p.spread, sr)
-    amount = 0.55 * p.toxicity * (1.0 - c.damping)
-    return (1.0 - amount) * wet + amount * shifted
-
 
 PROFILES = {
     "RADIATION": ReactionProfile(
@@ -539,6 +531,8 @@ PROFILES = {
         noise_full_level=0.1147,
         noise_unit_rms=0.045540,
         noise=_alien_whirr,
-        post=_shift,
+        # ALIEN's mechanism lives in reactor._alien_engine now, as an actual
+        # event-gated source oscillator, not a frequency-shifted filter voice.
+        post=_bubble,
     ),
 }
