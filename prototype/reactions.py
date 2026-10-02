@@ -21,10 +21,6 @@ from .params import Params
 
 # SPREAD drives each reaction's own signature movement, not only the filter
 # sweep, and every one of them reaches zero when SPREAD does.
-#: How far FISSION's two halves pull apart from each other.
-FISSION_BASE_HZ = 220.0
-FISSION_SWEEP_OCT = 3.2
-FISSION_SEPARATION_OCT = 2.4
 
 #: The noise beds follow the incoming audio rather than sitting under it as a
 #: constant hiss, so contamination reads as rhythmic.
@@ -335,26 +331,6 @@ def contaminate(
     return wet + bed * level[:, None]
 
 
-def _phaser(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
-    """Splitting: two allpass chains pulled apart in frequency by SPREAD.
-
-    SPREAD is how far the split components separate. At zero both channels sweep
-    together and the structure is still whole; opened up they diverge by
-    FISSION_SEPARATION_OCT and read as two unstable halves.
-    """
-    sweep = FISSION_BASE_HZ * np.power(2.0, FISSION_SWEEP_OCT * c.env)
-    separation = np.power(2.0, 0.5 * FISSION_SEPARATION_OCT * p.spread)
-    feedback = 0.72 * p.exposure * (1.0 - c.damping)
-
-    left = filters.varying_allpass_chain(
-        wet[:, :1], sweep / separation, sr, stages=6, feedback=feedback
-    )
-    right = filters.varying_allpass_chain(
-        wet[:, 1:], sweep * separation, sr, stages=6, feedback=feedback
-    )
-    return 0.5 * wet + 0.5 * np.concatenate([left, right], axis=1)
-
-
 def _bubble(wet: np.ndarray, dry: np.ndarray, c: Controls, p: Params, sr: int) -> np.ndarray:
     """CHEMICAL's character is its acid voice, which the reactor applies."""
     return wet
@@ -426,7 +402,8 @@ PROFILES = {
         noise_full_level=0.0902,
         noise_unit_rms=0.069393,
         noise=_fission_shimmer,
-        post=_phaser,
+        # Mechanism lives in reactor._fission_engine; post is a passthrough.
+        post=_bubble,
     ),
     "SLUDGE": ReactionProfile(
         name="SLUDGE",

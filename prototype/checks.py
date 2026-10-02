@@ -371,21 +371,10 @@ def check_range_drives_each_character() -> tuple[bool, str]:
     FISSION's separation of its two halves all answer to it.
     """
     from .params import Params
-    from .reactions import PROFILES
     from . import reactor
 
     n = SR * 2
     source = _tone(300.0, 2.0) * 0.4
-    c = _bed_controls(n)
-    results = {}
-
-    def difference(reaction: str, amount: float) -> float:
-        p = Params(reaction=reaction, spread=amount, toxicity=0.8, seed=0)
-        out = PROFILES[reaction].post(source, source, c, p, SR)
-        delta = out - source
-        return 20.0 * np.log10(
-            (np.sqrt(np.mean(delta**2)) + 1e-15) / (np.sqrt(np.mean(source**2)) + 1e-12)
-        )
 
     # ALIEN is now a source oscillator, not a filter on the input: SPREAD sets
     # how far each event's pitch sweeps upward within itself, not whether a
@@ -433,12 +422,13 @@ def check_range_drives_each_character() -> tuple[bool, str]:
         1.0: sub_peak_hz(0.9, 1.0) - sub_peak_hz(0.05, 1.0),
     }
 
-    # FISSION's halves must sit together at zero and apart when opened.
+    # FISSION's halves must sit together at zero and apart when opened. Through
+    # the real engine, not the dead post hook it no longer calls.
     separation = {}
     for amount in (0.0, 1.0):
         p = Params(reaction="FISSION", spread=amount, toxicity=0.8, exposure=0.7, seed=0)
-        out = PROFILES["FISSION"].post(source, source, c, p, SR)
-        left, right = out[:, 0], out[:, 1]
+        wet, _, _ = reactor.process(source, SR, p, 140.0)
+        left, right = wet[:, 0], wet[:, 1]
         separation[amount] = float(
             np.corrcoef(left, right)[0, 1]
         )
@@ -1547,6 +1537,142 @@ def check_radiation_stochastic_state() -> tuple[bool, str]:
     )
 
 
+def check_fission_coupling() -> tuple[bool, str]:
+    """dsp-testing.md Test 8: FISSION's two branches must audibly interact.
+
+    Disabling coupling, and separately disabling detuning, must each change
+    the output materially. A FISSION that sounds almost the same with either
+    turned off is one filter wearing a costume.
+    """
+    from . import reactor
+    from .params import Params
+    from .reactions import PROFILES
+
+    sr = SR
+    n = sr * 2
+    rng_np = np.random.default_rng(3)
+    x_mono = rng_np.standard_normal(n) * 0.2
+    f_base = PROFILES["FISSION"].base_hz
+    d = np.full(n, 6.0)
+    delay = np.full(n, 15.0)
+    r = 0.995
+
+    def spectral_distance(a: np.ndarray, b: np.ndarray) -> float:
+        _, pa = welch(a, fs=sr, window="blackmanharris", nperseg=8192)
+        _, pb = welch(b, fs=sr, window="blackmanharris", nperseg=8192)
+        return float(np.mean(np.abs(10 * np.log10(pa + 1e-15) - 10 * np.log10(pb + 1e-15))))
+
+    # Branch A/B/C: coupling disabled, normal, and high but stable, expressed
+    # as fractions of the branch pair's own stability headroom (see
+    # reactor._fission_branch_pair's docstring for why it's a fraction). A
+    # tone sustained at the branch's own frequency is far more sensitive to
+    # coupling than broadband noise: near-degenerate branches are a classic
+    # avoided-crossing system, where even a small k_c pulls a large share of
+    # the driven branch's energy into its silent partner and measurably
+    # drains the resonant level, well before the eigenfrequencies themselves
+    # move enough to show up in an averaged noise spectrum.
+    t = np.arange(n) / sr
+    tone = 0.2 * np.sin(2.0 * np.pi * f_base * t)
+    branch_a = reactor._fission_branch_pair(tone, d, delay, r, 0.0, f_base, sr)
+    branch_b = reactor._fission_branch_pair(tone, d, delay, r, 0.3, f_base, sr)
+    branch_c = reactor._fission_branch_pair(tone, d, delay, r, 0.9, f_base, sr)
+    settle = sr // 2
+    rms_a = float(np.sqrt(np.mean(branch_a[settle:] ** 2)))
+    rms_b = float(np.sqrt(np.mean(branch_b[settle:] ** 2)))
+    rms_c = float(np.sqrt(np.mean(branch_c[settle:] ** 2)))
+    ab_diff = 20.0 * np.log10((rms_b + 1e-15) / (rms_a + 1e-15))
+    bc_diff = 20.0 * np.log10((rms_c + 1e-15) / (rms_b + 1e-15))
+    coupling_ok = ab_diff < -1.0 and bc_diff < -1.0
+
+    # Detuning on vs off, through the real stereo engine (SPREAD drives d
+    # there), with everything else held fixed.
+    def stereo_render(spread: float) -> np.ndarray:
+        p = Params(reaction="FISSION", spread=spread, exposure=0.6,
+                    toxicity=0.5, decay=0.4, seed=1)
+        x = np.stack([x_mono, x_mono], axis=1)
+        wet, _, _ = reactor.process(x, sr, p, 140.0)
+        return wet
+
+    detuned = stereo_render(1.0)
+    coincident = stereo_render(0.0)
+    detuned_mono = detuned.mean(axis=1)
+    coincident_mono = coincident.mean(axis=1)
+
+    # d_L = -d_R, so the L-R difference signal IS the branch-splitting
+    # signature: it is exactly what the two mirrored branch pairs disagree
+    # about. When SPREAD -> 0 the branches coincide, d -> 0, and L-R
+    # collapses to whatever residual the mono sum's own panning left behind
+    # (near silence). A mono/sum-based spectral metric buries this under the
+    # broadband noise bed; the difference channel does not.
+    lr_detuned = detuned[:, 0] - detuned[:, 1]
+    lr_coincident = coincident[:, 0] - coincident[:, 1]
+    divergence_detuned = float(np.sqrt(np.mean(lr_detuned**2)))
+    divergence_coincident = float(np.sqrt(np.mean(lr_coincident**2)))
+
+    def notch_depth(mono: np.ndarray) -> float:
+        _, power = welch(mono, fs=sr, window="blackmanharris", nperseg=8192)
+        db = 10 * np.log10(power + 1e-15)
+        return float(db.max() - db.min())
+
+    detuned_notch = notch_depth(lr_detuned)
+    coincident_notch = notch_depth(lr_coincident)
+
+    # Notch movement: the detuned difference spectrum should keep changing
+    # window to window far more than the coincident one, which has nothing
+    # left to move.
+    half = n // 2
+    detuned_shift = spectral_distance(lr_detuned[:half], lr_detuned[half:])
+    coincident_shift = spectral_distance(lr_coincident[:half], lr_coincident[half:])
+    detune_ok = (
+        divergence_detuned > divergence_coincident * 5.0
+        and detuned_notch > coincident_notch
+        and detuned_shift > coincident_shift
+    )
+
+    # Stereo correlation and L/R phase difference: d_L = -d_R should pull the
+    # channels apart as branch relationships diverge, not stay a fixed pan.
+    corr_detuned = float(np.corrcoef(detuned[:, 0], detuned[:, 1])[0, 1])
+    corr_coincident = float(np.corrcoef(coincident[:, 0], coincident[:, 1])[0, 1])
+    phase_l = np.angle(hilbert(detuned[:, 0]))
+    phase_r = np.angle(hilbert(detuned[:, 1]))
+    phase_diff = float(np.mean(np.abs(np.angle(np.exp(1j * (phase_l - phase_r))))))
+    stereo_ok = corr_detuned < corr_coincident - 0.1
+
+    # Branch beating: the detuned difference channel should carry its own
+    # amplitude modulation over time (the branches drifting in and out of
+    # phase with each other as the AR(1) wander states move); the coincident
+    # difference channel is near-silent and has nothing to modulate.
+    def windowed_rms(sig: np.ndarray, win: int = 2205) -> np.ndarray:
+        nwin = len(sig) // win
+        return np.array([
+            np.sqrt(np.mean(sig[i * win:(i + 1) * win] ** 2)) for i in range(nwin)
+        ])
+
+    scale_detuned = float(np.sqrt(np.mean(detuned_mono**2))) + 1e-12
+    scale_coincident = float(np.sqrt(np.mean(coincident_mono**2))) + 1e-12
+    beat_detuned = float(windowed_rms(lr_detuned).std()) / scale_detuned
+    beat_coincident = float(windowed_rms(lr_coincident).std()) / scale_coincident
+    beating_ok = beat_detuned > beat_coincident * 3.0
+
+    # The explicit anti-"one filter wearing a costume" check: detuned and
+    # coincident renders must differ substantially, not sit a hair apart.
+    delta = detuned_mono - coincident_mono
+    output_diff_db = 20.0 * np.log10(
+        (np.sqrt(np.mean(delta**2)) + 1e-15) / (np.sqrt(np.mean(detuned_mono**2)) + 1e-12)
+    )
+    architecture_ok = output_diff_db > -20.0
+
+    ok = coupling_ok and detune_ok and stereo_ok and beating_ok and architecture_ok
+    return ok, (
+        f"coupling RMS drop A->B {ab_diff:.1f}dB, B->C {bc_diff:.1f}dB; "
+        f"L/R divergence detuned {divergence_detuned:.4f} vs coincident {divergence_coincident:.4f}; "
+        f"notch depth (L-R) detuned {detuned_notch:.1f} vs coincident {coincident_notch:.1f}dB; "
+        f"stereo corr {corr_detuned:.2f} vs {corr_coincident:.2f}, L/R phase diff {phase_diff:.2f}rad; "
+        f"beat ripple {beat_detuned:.3f} vs {beat_coincident:.3f}; "
+        f"output difference {output_diff_db:.1f}dB"
+    )
+
+
 def check_reactions_are_distinct() -> tuple[bool, str]:
     """Every reaction must be a different effect, not the same one retuned.
 
@@ -1628,6 +1754,7 @@ CHECKS = [
     ("alien oscillator", check_alien_oscillator),
     ("chemical register", check_chemical_register),
     ("radiation stochastic state", check_radiation_stochastic_state),
+    ("fission branch coupling", check_fission_coupling),
     ("sludge generates subharmonics", check_sludge_subharmonics),
     ("reactions are distinct", check_reactions_are_distinct),
     ("fallout disperses per reaction", check_fallout_disperses_per_reaction),

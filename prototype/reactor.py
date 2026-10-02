@@ -791,12 +791,154 @@ def _alien_engine(
     return out
 
 
+#: FISSION's slow detune/delay modulation correlation times, and how far
+#: SPREAD can carry the detuning and VOLATILITY-free wander.
+FISSION_TAU_M_S = 0.9
+FISSION_TAU_D_S = 1.3
+FISSION_DELTA_F_SEMITONES = 9.0
+FISSION_D0 = 0.35
+FISSION_DM = 0.65
+FISSION_D0_DELAY_S = 0.0025
+FISSION_DM_DELAY_S = 0.0035
+
+#: Cross-feedback coupling: a floor plus EXPOSURE's share, clamped below the
+#: stability bound for whatever damping the branches currently have. Given as
+#: fractions of that bound (see _fission_branch_pair), not absolute gains,
+#: since the bound itself is far smaller than a fixed gain range for branches
+#: this close in frequency.
+FISSION_KC_MIN_FRAC = 0.1
+FISSION_KC_NORM_FRAC = 0.85
+
+
+def _fission_branch_pair(
+    x_ch: np.ndarray,
+    d_arr: np.ndarray,
+    delay_arr: np.ndarray,
+    r: float,
+    coupling: float,
+    f_base: float,
+    sr: int,
+) -> np.ndarray:
+    """One channel's coupled pair: two second-order resonators detuned apart
+    by d_arr (semitones), cross-feeding each other, recombined with v2 read
+    back through a moving fractional delay (maths.md's FISSION branch pair).
+
+    A second-order resonator this close to self-oscillation (r -> 1, for the
+    long ring DECAY asks for) has a steady-state gain on the order of
+    1/(1-r): fed every sample by the full input, as RADIATION's quadrature
+    resonator was, it accumulates to an unbounded level. The excitation is
+    normalised by that same factor so ring time, not delivered level,
+    answers to DECAY and EXPOSURE.
+
+    The cross-feedback has a much tighter stability bound than that, though.
+    In sum/difference coordinates (s = v1+v2, d = v1-v2) the coupled pair
+    decouples into two ordinary second-order sections with characteristic
+    polynomial z^2 - (2r*c +/- k_c)*z + r^2 = 0, whose poles stay at radius r
+    only while they stay complex; once |2r*c + k_c| exceeds 2r one pole goes
+    real and its magnitude can exceed r (then 1). With both branches close in
+    frequency (c1 ~ c2 ~ cos(small omega) ~ 1), that headroom (~2r(1-c)) is
+    tiny, so `coupling` is a 0..1 fraction of it rather than an absolute gain
+    - an absolute k_c sized for audible coupling would simply saturate at
+    this ceiling regardless of EXPOSURE.
+    """
+    n = len(x_ch)
+    omega1 = 2.0 * np.pi * f_base * np.power(2.0, d_arr / 12.0) / sr
+    omega2 = 2.0 * np.pi * f_base * np.power(2.0, -d_arr / 12.0) / sr
+    c1, c2 = np.cos(omega1), np.cos(omega2)
+    r2 = r * r
+    norm = max(1.0 - r, 1e-4)
+    excitation = x_ch * norm
+
+    kc_limit = 0.8 * 2.0 * r * (1.0 - np.maximum(c1, c2))
+    kc_arr = np.clip(coupling, 0.0, 0.95) * kc_limit
+
+    v1 = np.zeros(n)
+    v2 = np.zeros(n)
+    v1_m1 = v1_m2 = 0.0
+    v2_m1 = v2_m2 = 0.0
+    for i in range(n):
+        kc_i = kc_arr[i]
+        u1 = excitation[i] - kc_i * v2_m1
+        u2 = excitation[i] - kc_i * v1_m1
+        new_v1 = 2.0 * r * c1[i] * v1_m1 - r2 * v1_m2 + u1
+        new_v2 = 2.0 * r * c2[i] * v2_m1 - r2 * v2_m2 + u2
+        v1[i] = new_v1
+        v2[i] = new_v2
+        v1_m2, v1_m1 = v1_m1, new_v1
+        v2_m2, v2_m1 = v2_m1, new_v2
+
+    # v2 read back through a moving fractional delay: this is the source of
+    # the moving notches (phaser/flanger character), not a static comb.
+    index = np.arange(n)
+    read = np.clip(index - delay_arr, 0.0, n - 1.0)
+    v2_delayed = np.interp(read, index, v2)
+
+    return 0.5 * v1 + 0.5 * v2_delayed
+
+
+def _fission_engine(
+    x: np.ndarray,
+    cutoff: np.ndarray,
+    feedback: np.ndarray,
+    drive: np.ndarray,
+    sr: int,
+    profile: ReactionProfile,
+    events: list[Event],
+    controls: Controls,
+    p: Params,
+    md: Meltdown,
+) -> np.ndarray:
+    """FISSION's engine: two coupled branch resonators, not one filter with a
+    detuned coefficient.
+
+    Each channel runs its own pair of second-order resonators detuned apart by
+    a slowly-wandering amount, cross-fed into each other, and recombined
+    through a moving fractional delay. Left and right mirror their detuning
+    and delay (d_L = d, d_R = -d; D_L = D0 + Dm*m_D, D_R = D0 - Dm*m_D) per
+    maths.md's stereo divergence, so the image moves because the branch
+    relationship itself diverges, not from a final pan stage.
+    """
+    n, channels = x.shape
+    rng_np = np.random.default_rng(2_000_003 * (p.seed + 1))
+
+    a_m = float(np.exp(-1.0 / max(FISSION_TAU_M_S * sr, 1.0)))
+    r_m = rng_np.uniform(-1.0, 1.0, n)
+    m = lfilter([1.0 - a_m], [1.0, -a_m], r_m)
+
+    a_d = float(np.exp(-1.0 / max(FISSION_TAU_D_S * sr, 1.0)))
+    r_d = rng_np.uniform(-1.0, 1.0, n)
+    m_d = lfilter([1.0 - a_d], [1.0, -a_d], r_d)
+
+    delta_f = FISSION_DELTA_F_SEMITONES * p.spread
+    d = delta_f * (FISSION_D0 + FISSION_DM * m)
+
+    delay_s_0 = FISSION_D0_DELAY_S
+    delay_s_m = FISSION_DM_DELAY_S * p.spread
+    delay_l = (delay_s_0 + delay_s_m * m_d) * sr
+    delay_r = (delay_s_0 - delay_s_m * m_d) * sr
+
+    decay_time = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
+    bandwidth = max(1.0 / (np.pi * max(decay_time, 0.005)), 5.0)
+    r = float(np.clip(np.exp(-np.pi * bandwidth / sr), 0.0, 0.995))
+
+    # EXPOSURE sets how much of the available stability headroom is used;
+    # _fission_branch_pair turns this into a per-sample k_c (see its
+    # docstring for why it has to be a fraction, not an absolute gain).
+    coupling = FISSION_KC_MIN_FRAC + FISSION_KC_NORM_FRAC * p.exposure
+
+    out = np.zeros((n, channels))
+    out[:, 0] = _fission_branch_pair(x[:, 0], d, delay_l, r, coupling, profile.base_hz, sr)
+    if channels > 1:
+        out[:, 1] = _fission_branch_pair(x[:, 1], -d, delay_r, r, coupling, profile.base_hz, sr)
+    return out
+
+
 #: One engine per REACTION. Replacing an entry is how a reaction gets its own
 #: mechanism instead of CHEMICAL's ladder.
 ENGINES: dict[str, Callable] = {
     "CHEMICAL": _chemical_engine,
     "RADIATION": _radiation_engine,
-    "FISSION": _ladder_engine,
+    "FISSION": _fission_engine,
     "SLUDGE": _sludge_engine,
     "ALIEN": _alien_engine,
 }
