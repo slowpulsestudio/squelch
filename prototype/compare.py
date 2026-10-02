@@ -364,6 +364,35 @@ def _scheduler_reference() -> np.ndarray:
     return np.array(rows).reshape(-1)
 
 
+def _envelopes_reference() -> np.ndarray:
+    """Source/Dsp/Envelopes.h against reactor.envelopes.
+
+    Three events including a slid one, so the portamento path is exercised
+    and not just the exponential fall. Flattened as cutoff, feedback, drive.
+    No settling window: the glide is seeded from its first value in both.
+    """
+    from .meltdown import Meltdown
+    from .scheduler import Event
+
+    n = 6000
+    p = Params(reaction="CHEMICAL", spread=0.7, decay=0.4, exposure=0.6,
+               toxicity=0.5, containment=0.2, half_life=0.5, seed=3)
+    profile = PROFILES["CHEMICAL"]
+
+    def event(start, index, accent, slide):
+        return Event(start=start, index=index, intensity=1.0, decay_scale=1.0,
+                     tone=0.5, pan=0.0, shape=0.5, depth=0.0, accent=accent,
+                     slide=slide)
+
+    events = [event(0, 0, False, False),
+              event(2000, 5, True, False),
+              event(4000, 10, False, True)]
+    cutoff, feedback, drive = reactor.envelopes(events, n, SR, p, profile,
+                                                Meltdown(p, n, SR))
+    rows = np.stack([cutoff, feedback, drive], axis=1)
+    return rows[::25].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -401,6 +430,7 @@ def expectations() -> dict:
         "stereo_spread": _stereo_spread_reference(),
         "pitch_wind": _pitch_wind_reference(),
         "scheduler": _scheduler_reference(),
+        "envelopes": _envelopes_reference(),
     }
 
 

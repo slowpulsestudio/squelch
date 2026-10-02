@@ -15,6 +15,7 @@
 
 #include "../Source/Dsp/Alien.h"
 #include "../Source/Dsp/Chemical.h"
+#include "../Source/Dsp/Envelopes.h"
 #include "../Source/Dsp/Filters.h"
 #include "../Source/Dsp/Fission.h"
 #include "../Source/Dsp/Radiation.h"
@@ -506,7 +507,57 @@ int main()
             values.push_back (e.accent ? 1.0 : 0.0);
             values.push_back (e.slide ? 1.0 : 0.0);
         }
-        printArray ("scheduler", values, true);
+        printArray ("scheduler", values);
+    }
+
+    // Envelopes: three events including a slid one, so the portamento path is
+    // exercised and not only the exponential fall.
+    {
+        dsp::Envelopes envelopes;
+        envelopes.prepare (sampleRate);
+
+        dsp::EnvelopeParams params;
+        params.spread = 0.7;
+        params.decay = 0.4;
+        params.exposure = 0.6;
+        params.toxicity = 0.5;
+        params.containment = 0.2;
+        params.halfLife = 0.5;
+        params.seed = 3;
+        envelopes.configure ({}, params);
+
+        struct Fire { int at; std::uint64_t index; bool accent, slide; std::int64_t toNext; };
+        const Fire fires[] { { 0, 0, false, false, 2000 },
+                             { 2000, 5, true, false, 2000 },
+                             { 4000, 10, false, true, 2000 } };
+
+        std::vector<double> values;
+        for (int i = 0; i < 6000; ++i)
+        {
+            for (const auto& f : fires)
+            {
+                if (f.at != i)
+                    continue;
+
+                dsp::ScheduledEvent e;
+                e.start = f.at;
+                e.index = f.index;
+                e.intensity = 1.0;
+                e.decayScale = 1.0;
+                e.accent = f.accent;
+                e.slide = f.slide;
+                envelopes.trigger (e, f.toNext);
+            }
+
+            const auto v = envelopes.process();
+            if (i % 25 == 0)
+            {
+                values.push_back (v.cutoffHz);
+                values.push_back (v.feedback);
+                values.push_back (v.drive);
+            }
+        }
+        printArray ("envelopes", values, true);
     }
 
     std::printf ("}\n");

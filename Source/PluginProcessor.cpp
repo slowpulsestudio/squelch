@@ -68,6 +68,7 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     radiation.prepare (sampleRate);
     fission.prepare (sampleRate);
     scheduler.prepare (sampleRate);
+    envelopes.prepare (sampleRate);
 
     // Worst case is one block of the shortest grid step, each fanning out to
     // the full sub-event count. Reserved once so processBlock never allocates.
@@ -124,6 +125,18 @@ void SquelchAudioProcessor::refreshReactionSettings()
     radiation.configure ({}, { volatility, spread, decay, exposure, seed });
     fission.configure ({}, { spread, decay, exposure, seed });
     chemical.setSeed (seed);
+
+    dsp::EnvelopeParams envelope;
+    envelope.spread = spread;
+    envelope.decay = decay;
+    envelope.exposure = exposure;
+    envelope.toxicity = toxicity;
+    envelope.containment = value (ids::containment);
+    envelope.halfLife = value (ids::halfLife);
+    envelope.ionizeAmount = apvts.getRawParameterValue (ids::ionize)->load() > 0.5f
+                          ? value (ids::ionizeAmount) : 0.0;
+    envelope.seed = seed;
+    envelopes.configure ({}, envelope);
 }
 
 double SquelchAudioProcessor::getTailLengthSeconds() const
@@ -196,6 +209,13 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 chemical.setEvent (e.index);
             else if (reaction == "RADIATION")
                 radiation.trigger (e.accent);
+
+            // Only a slid event uses the distance, and the scheduler places
+            // step k from k alone, so the next one is computable rather than
+            // needing audio lookahead. A step ahead is close enough: events
+            // inside a step are what MAX_SUB_EVENTS fans out.
+            const auto step = static_cast<std::int64_t> (scheduler.stepSeconds() * getSampleRate());
+            envelopes.trigger (e, std::max<std::int64_t> (step, 1));
         }
 
         const auto in = inputGain.getNextValue();
@@ -215,6 +235,8 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         dryDelay.setSample (1, dryDelayPos, dryR);
         dryDelayPos = (dryDelayPos + 1 == latency) ? 0 : (dryDelayPos + 1);
 
+        const auto env = envelopes.process();
+
         double wetL = delayedL, wetR = delayedR;
 
         if (reaction == "SLUDGE")
@@ -223,8 +245,8 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             alien.process (wetL, wetR);
         else if (reaction == "CHEMICAL")
         {
-            wetL = chemical.process (dryL, 700.0, 2.2, 1.4);
-            wetR = chemical.process (dryR, 700.0, 2.2, 1.4);
+            wetL = chemical.process (dryL, env.cutoffHz, env.feedback, env.drive);
+            wetR = chemical.process (dryR, env.cutoffHz, env.feedback, env.drive);
         }
         else if (reaction == "RADIATION")
             radiation.process (dryL, dryR, wetL, wetR);

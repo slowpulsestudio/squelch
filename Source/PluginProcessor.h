@@ -5,6 +5,7 @@
 #include "Parameters.h"
 #include "Dsp/Alien.h"
 #include "Dsp/Chemical.h"
+#include "Dsp/Envelopes.h"
 #include "Dsp/Fission.h"
 #include "Dsp/Radiation.h"
 #include "Dsp/Scheduler.h"
@@ -62,6 +63,7 @@ private:
     squelch::dsp::FissionEngine fission;
 
     squelch::dsp::Scheduler scheduler;
+    squelch::dsp::Envelopes envelopes;
 
     /// Events for the current block, collected once and then fired at their
     /// own sample positions. Reserved in prepareToPlay: push_back on the
