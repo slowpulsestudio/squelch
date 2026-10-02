@@ -4,6 +4,10 @@
 
 #include "Parameters.h"
 #include "Dsp/Alien.h"
+#include "Dsp/Chemical.h"
+#include "Dsp/Fission.h"
+#include "Dsp/Radiation.h"
+#include "Dsp/Scheduler.h"
 #include "Dsp/Sludge.h"
 
 class SquelchAudioProcessor : public juce::AudioProcessor
@@ -53,6 +57,26 @@ private:
 
     squelch::dsp::SludgeEngine sludge;
     squelch::dsp::AlienEngine alien;
+    squelch::dsp::ChemicalEngine chemical;
+    squelch::dsp::RadiationEngine radiation;
+    squelch::dsp::FissionEngine fission;
+
+    squelch::dsp::Scheduler scheduler;
+
+    /// Events for the current block, collected once and then fired at their
+    /// own sample positions. Reserved in prepareToPlay: push_back on the
+    /// audio thread must never allocate, and events past the reservation are
+    /// dropped rather than grow it.
+    std::vector<squelch::dsp::ScheduledEvent> pendingEvents;
+
+    /// Where the host is on its timeline. Taken from the playhead rather than
+    /// counted locally, or events detach from the timeline on a locate and
+    /// the same bar stops bouncing identically.
+    std::int64_t timelinePosition { 0 };
+
+    /// Host tempo, so the grid follows the session. 120 is JUCE's own fallback
+    /// for a host that reports none.
+    double hostBpm { 120.0 };
 
     /// SLUDGE runs its saturation through a causal oversampler, which lags by
     /// kOversamplerLatencySamples. The dry path is delayed to match so the mix

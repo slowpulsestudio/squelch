@@ -19,7 +19,7 @@ Measured, not estimated.
 | `prototype/checks.py` | 37/37 passing |
 | reaction distinctness | 0/10 pairs too alike; closest FISSION/CHEMICAL at −6.1 dB |
 | noise generation | fully causal: every stochastic value hashes (seed, stream, sample index), no stateful RNG left in reactor.py/reactions.py/rng.py |
-| C++ port | 24/24 harness primitives agree to machine precision; all five engines, the output stage bar _mid_wobble, and the GRID/FREE scheduler verified block-wise; RANDOM and INPUT modes not ported; only SLUDGE wired into processBlock |
+| C++ port | 24/24 primitives agree to machine precision; all five engines and the scheduler wired into processBlock with sample-accurate dispatch; dsp-testing.md Tests 2/3/4/5/15 pass; _mid_wobble, RANDOM/INPUT modes and the output stage chain not yet in the plugin |
 | git | ALIEN port committed, nothing pushed |
 
 Steps 1-6 below are done. Step 7 (the C++ port) is in progress.

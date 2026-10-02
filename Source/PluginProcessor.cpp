@@ -64,10 +64,21 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
     sludge.prepare (sampleRate);
     alien.prepare (sampleRate);
+    chemical.prepare (sampleRate);
+    radiation.prepare (sampleRate);
+    fission.prepare (sampleRate);
+    scheduler.prepare (sampleRate);
+
+    // Worst case is one block of the shortest grid step, each fanning out to
+    // the full sub-event count. Reserved once so processBlock never allocates.
+    const auto shortestStep = squelch::gridBeats[std::size (squelch::gridBeats) - 1] * 60.0 / 20.0;
+    const auto maxSteps = static_cast<int> (samplesPerBlock / (shortestStep * sampleRate)) + 4;
+    pendingEvents.reserve (static_cast<size_t> (maxSteps * squelch::dsp::kMaxSubEvents));
 
     dryDelay.setSize (2, squelch::dsp::kOversamplerLatencySamples);
     dryDelay.clear();
     dryDelayPos = 0;
+    timelinePosition = 0;
 
     refreshReactionSettings();
 
@@ -89,15 +100,30 @@ void SquelchAudioProcessor::refreshReactionSettings()
 
     currentReaction = static_cast<int> (apvts.getRawParameterValue (ids::reaction)->load());
 
-    dsp::SludgeProfile profile;
-    dsp::SludgeParams params;
-    params.decay = value (ids::decay);
-    params.halfLife = value (ids::halfLife);
-    params.spread = value (ids::spread);
-    params.reactivity = value (ids::reactivity);
-    params.exposure = value (ids::exposure);
-    params.toxicity = value (ids::toxicity);
-    sludge.configure (profile, params);
+    const auto spread = value (ids::spread);
+    const auto decay = value (ids::decay);
+    const auto exposure = value (ids::exposure);
+    const auto toxicity = value (ids::toxicity);
+    const auto reactivity = value (ids::reactivity);
+    const auto volatility = value (ids::volatility);
+    const auto seed = static_cast<std::uint64_t> (value (ids::seed));
+
+    dsp::ScheduleSettings schedule;
+    schedule.gridIndex = static_cast<int> (apvts.getRawParameterValue (ids::grid)->load());
+    schedule.bpm = hostBpm;
+    schedule.flux = value (ids::flux);
+    schedule.probability = value (ids::probability);
+    schedule.reactivity = reactivity;
+    schedule.volatility = volatility;
+    schedule.containment = value (ids::containment);
+    schedule.seed = seed;
+    scheduler.configure (schedule);
+
+    sludge.configure ({}, { decay, value (ids::halfLife), spread, reactivity, exposure, toxicity });
+    alien.configure ({}, { spread, decay, toxicity, exposure, seed });
+    radiation.configure ({}, { volatility, spread, decay, exposure, seed });
+    fission.configure ({}, { spread, decay, exposure, seed });
+    chemical.setSeed (seed);
 }
 
 double SquelchAudioProcessor::getTailLengthSeconds() const
@@ -125,19 +151,53 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     outputGain.setTargetValue (juce::Decibels::decibelsToGain (outputTrimDb.load()));
     wetMix.setTargetValue (mix.load());
 
-    refreshReactionSettings();
+    if (auto* playHead = getPlayHead())
+        if (const auto position = playHead->getPosition())
+        {
+            if (const auto samples = position->getTimeInSamples())
+                timelinePosition = *samples;
+            if (const auto bpm = position->getBpm())
+                hostBpm = *bpm;
+        }
 
-    // Only SLUDGE is wired. ALIEN is ported and verified but is event-gated,
-    // and the scheduler it needs is not ported yet, so it has nothing to
-    // trigger it; the others have no engine here at all. Those reactions pass
-    // the dry signal through rather than pretending to react.
-    const auto sludgeSelected = currentReaction == squelch::reactionNames.indexOf ("SLUDGE");
+    refreshReactionSettings();
 
     const auto channels = buffer.getNumChannels();
     const auto latency = squelch::dsp::kOversamplerLatencySamples;
+    const auto numSamples = buffer.getNumSamples();
 
-    for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+    pendingEvents.clear();
+    scheduler.forRange (timelinePosition, numSamples,
+                        [this] (const squelch::dsp::ScheduledEvent& e)
+                        {
+                            // Dropped rather than grown: allocating here would
+                            // be worse than losing an event at absurd density.
+                            if (pendingEvents.size() < pendingEvents.capacity())
+                                pendingEvents.push_back (e);
+                        });
+
+    const auto reaction = squelch::reactionNames[currentReaction];
+
+    for (int sample = 0; sample < numSamples; ++sample)
     {
+        const auto position = timelinePosition + sample;
+
+        // Each event fires at its own sample, not at the edge of whatever
+        // block it landed in. Firing at the block start makes the output
+        // depend on the host's buffer size.
+        for (const auto& e : pendingEvents)
+        {
+            if (e.start != position)
+                continue;
+
+            if (reaction == "ALIEN")
+                alien.trigger (e.index, e.accent, e.pan, 0.0);
+            else if (reaction == "CHEMICAL")
+                chemical.setEvent (e.index);
+            else if (reaction == "RADIATION")
+                radiation.trigger (e.accent);
+        }
+
         const auto in = inputGain.getNextValue();
         const auto out = outputGain.getNextValue();
         const auto wet = wetMix.getNextValue();
@@ -147,32 +207,39 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
         // SLUDGE's oversampler lags by `latency`, so the dry path is delayed
         // by the same amount or the mix comb-filters the two against each
-        // other. Reactions without an engine ride the same delay so switching
-        // reaction never re-syncs the host.
+        // other. Every reaction rides the same delay so switching reaction
+        // never re-syncs the host.
         const auto delayedL = dryDelay.getSample (0, dryDelayPos);
         const auto delayedR = dryDelay.getSample (1, dryDelayPos);
         dryDelay.setSample (0, dryDelayPos, dryL);
         dryDelay.setSample (1, dryDelayPos, dryR);
         dryDelayPos = (dryDelayPos + 1 == latency) ? 0 : (dryDelayPos + 1);
 
-        auto wetL = delayedL;
-        auto wetR = delayedR;
+        double wetL = delayedL, wetR = delayedR;
 
-        if (sludgeSelected)
+        if (reaction == "SLUDGE")
+            sludge.process (dryL, dryR, wetL, wetR);
+        else if (reaction == "ALIEN")
+            alien.process (wetL, wetR);
+        else if (reaction == "CHEMICAL")
         {
-            double sl = 0.0, sr = 0.0;
-            sludge.process (dryL, dryR, sl, sr);
-            wetL = static_cast<float> (sl);
-            wetR = static_cast<float> (sr);
+            wetL = chemical.process (dryL, 700.0, 2.2, 1.4);
+            wetR = chemical.process (dryR, 700.0, 2.2, 1.4);
         }
+        else if (reaction == "RADIATION")
+            radiation.process (dryL, dryR, wetL, wetR);
+        else if (reaction == "FISSION")
+            fission.process (dryL, dryR, wetL, wetR);
 
-        const auto mixedL = delayedL + (wetL - delayedL) * wet;
-        const auto mixedR = delayedR + (wetR - delayedR) * wet;
+        const auto mixedL = delayedL + (static_cast<float> (wetL) - delayedL) * wet;
+        const auto mixedR = delayedR + (static_cast<float> (wetR) - delayedR) * wet;
 
         buffer.setSample (0, sample, mixedL * out);
         if (channels > 1)
             buffer.setSample (1, sample, mixedR * out);
     }
+
+    timelinePosition += numSamples;
 }
 
 juce::AudioProcessorEditor* SquelchAudioProcessor::createEditor()
