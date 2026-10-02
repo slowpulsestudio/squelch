@@ -47,6 +47,44 @@ namespace
 
         return out;
     }
+
+    std::vector<double> sludgeRun (const squelch::dsp::SludgeProfile& profile,
+                                   const squelch::dsp::SludgeParams& params)
+    {
+        constexpr int n = 4000;
+        constexpr int settle = 1000;
+
+        squelch::dsp::SludgeEngine engine;
+        engine.prepare (sampleRate);
+        engine.configure (profile, params);
+
+        std::vector<double> values;
+
+        for (int i = 0; i < n; ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto x = 0.5 * std::sin (2.0 * M_PI * 110.0 * t)
+                         + 0.3 * std::sin (2.0 * M_PI * 850.0 * t);
+
+            // Matches prototype/compare.py's np.roll(x, 3): a circular shift,
+            // not a zero-padded delay, so the first three samples wrap round
+            // to the end of the test signal rather than reading zero.
+            const auto tPrev = ((i - 3 + n) % n) / sampleRate;
+            const auto xPrev = 0.5 * std::sin (2.0 * M_PI * 110.0 * tPrev)
+                             + 0.3 * std::sin (2.0 * M_PI * 850.0 * tPrev);
+
+            double outL = 0.0, outR = 0.0;
+            engine.process (x, 0.8 * xPrev, outL, outR);
+
+            if (i >= settle && (i - settle) % 40 == 0)
+            {
+                values.push_back (outL);
+                values.push_back (outR);
+            }
+        }
+
+        return values;
+    }
 }
 
 int main()
@@ -93,12 +131,11 @@ int main()
     // The oversampler is causal (ordinary delay-line state), where the Python
     // reference is acausal (scipy's zero-phase resample_poly). They produce
     // the same values, just kOversamplerLatencySamples apart -- see
-    // Oversampler.h's docstring. Skip latency, then a further settling
-    // region: the FIR's zero initial state takes longer than the bare
-    // latency to settle for low-frequency content, so comparing right at
-    // latency alone catches it still ringing from a cold start.
+    // Oversampler.h's docstring. Skip the latency, then the cold-start
+    // region, which is exactly the two 81-tap filters' combined memory at
+    // 4x: (81 + 81) / 4 = 41 base-rate samples, and not a sample more.
     {
-        constexpr int settle = 320;
+        constexpr int settle = 41;
         dsp::Oversampler oversampler;
         std::vector<double> values;
         for (int i = 0; i < 2500; ++i)
@@ -114,12 +151,18 @@ int main()
     }
 
     // SLUDGE's own one-pole stages all start at zero state with no
-    // lookahead, same as the oversampler's envelope followers, so they need
-    // no latency of their own. But the engine runs its saturation through
-    // Oversampler.h internally, same acausal-vs-causal story as that
-    // primitive on its own: skip its latency, then a settling region.
+    // lookahead, so they need no latency of their own. The settling window
+    // is far longer than the oversampler's 41 for a different reason: that
+    // cold-start region is finite, but it feeds the final smoothing
+    // one-pole, which is IIR and smears it into an exponentially decaying
+    // tail (1/g_c, about 16 samples here, machine precision by ~300).
+    // 1000 is margin -- g_c falls with f_effective, so the figure is
+    // parameter-dependent, not universal.
+    //
+    // Run at two operating points: almost every constant in configure() is a
+    // lo/hi interpolation, and one point cannot tell a correct one from an
+    // inverted one.
     {
-        constexpr int settle = 400;
         dsp::SludgeProfile profile;
         profile.baseHz = 100.0;
         profile.cutoffLoHz = 150.0;
@@ -127,47 +170,24 @@ int main()
         profile.decayLoS = 0.25;
         profile.decayHiS = 1.60;
 
-        dsp::SludgeParams params;
-        params.decay = 0.4;
-        params.halfLife = 0.6;
-        params.spread = 0.65;
-        params.reactivity = 0.5;
-        params.exposure = 0.7;
-        params.toxicity = 0.35;
+        dsp::SludgeParams a;
+        a.decay = 0.4;
+        a.halfLife = 0.6;
+        a.spread = 0.65;
+        a.reactivity = 0.5;
+        a.exposure = 0.7;
+        a.toxicity = 0.35;
 
-        dsp::SludgeEngine engine;
-        engine.prepare (sampleRate);
-        engine.configure (profile, params);
+        dsp::SludgeParams b;
+        b.decay = 0.85;
+        b.halfLife = 0.15;
+        b.spread = 0.3;
+        b.reactivity = 0.9;
+        b.exposure = 0.2;
+        b.toxicity = 0.75;
 
-        std::vector<double> values;
-        for (int i = 0; i < 4000; ++i)
-        {
-            const auto t = i / sampleRate;
-            const auto x = 0.5 * std::sin (2.0 * M_PI * 110.0 * t)
-                         + 0.3 * std::sin (2.0 * M_PI * 850.0 * t);
-
-            // Matches prototype/compare.py's np.roll(x, 3): a circular shift,
-            // not a zero-padded delay, so the first three samples wrap round
-            // to the end of the 4000-sample test signal rather than reading
-            // zero.
-            const auto idx = (i - 3 + 4000) % 4000;
-            const auto tPrev = idx / sampleRate;
-            const auto xPrev = 0.5 * std::sin (2.0 * M_PI * 110.0 * tPrev)
-                             + 0.3 * std::sin (2.0 * M_PI * 850.0 * tPrev);
-
-            const auto xL = x;
-            const auto xR = 0.8 * xPrev;
-
-            double outL = 0.0, outR = 0.0;
-            engine.process (xL, xR, outL, outR);
-
-            if (i >= settle && (i - settle) % 40 == 0)
-            {
-                values.push_back (outL);
-                values.push_back (outR);
-            }
-        }
-        printArray ("sludge_engine", values, true);
+        printArray ("sludge_engine", sludgeRun (profile, a));
+        printArray ("sludge_engine_b", sludgeRun (profile, b), true);
     }
 
     std::printf ("}\n");

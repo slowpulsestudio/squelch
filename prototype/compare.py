@@ -43,14 +43,17 @@ def _running_rms_reference() -> np.ndarray:
 def _oversampler_reference() -> np.ndarray:
     """Source/Dsp/Oversampler.h's causal pipeline matches scipy's acausal
     resample_poly round trip, but delayed by its measured latency (see that
-    header's docstring) rather than compensating the group delay out. Skip
-    latency, then a further settling region: starting from zero state, low
-    frequency content takes longer than the bare latency to stop ringing
-    from the cold start, so comparing too early would catch a real (if
-    transient) difference rather than a bug.
+    header's docstring) rather than compensating the group delay out.
+
+    Skip the latency, then the cold-start region. That region is exactly the
+    two 81-tap filters' combined memory, (81 + 81) / 4 = 41 samples at the
+    base rate, and not a sample more: the pipeline is FIR, memoryless curve,
+    FIR, so nothing in it can carry state from the start beyond that. Past it
+    the two agree to machine precision regardless of what the signal is
+    doing.
     """
     n = 2500
-    settle = 320
+    settle = 41
     latency = 20
     t = np.arange(n) / SR
     x = 0.6 * np.sin(2.0 * np.pi * 300.0 * t) + 0.5 * np.sin(2.0 * np.pi * 5000.0 * t)
@@ -59,26 +62,30 @@ def _oversampler_reference() -> np.ndarray:
     return ref[indices - latency]
 
 
-def _sludge_reference() -> np.ndarray:
+def _sludge_reference(p: Params) -> np.ndarray:
     """Source/Dsp/Sludge.h's SludgeEngine against reactor._sludge_engine.
 
     The engine's own one-pole stages all start at zero state with no lookahead,
-    same as _one_pole_hz, so they need no latency of their own. But the engine
-    calls saturation.oversampled internally, same acausal-vs-causal story as
-    Oversampler.h itself: skip Source/Dsp/Oversampler.h's latency, then a
-    settling region, same reasoning as _oversampler_reference.
+    same as _one_pole_hz, so they need no latency of their own. The settling
+    window is much longer than the oversampler's own 41 though, and for a
+    different reason: the oversampler's cold-start region is finite, but it
+    then feeds the final smoothing one-pole, which is IIR. That stage smears
+    the 41 samples into an exponentially decaying tail with a time constant of
+    1/g_c -- about 16 samples at these parameters, reaching machine precision
+    by prototype index ~300. 1000 is margin: g_c falls with f_effective, so a
+    darker parameter set decays slower, and the figure is not universal.
+
+    Run at two operating points, because almost every constant in configure()
+    is a lo/hi interpolation and a single point cannot tell a correct one from
+    an inverted one.
     """
     n = 4000
-    settle = 400
+    settle = 1000
     latency = 20
     t = np.arange(n) / SR
     x = 0.5 * np.sin(2.0 * np.pi * 110.0 * t) + 0.3 * np.sin(2.0 * np.pi * 850.0 * t)
     stereo = np.stack([x, 0.8 * np.roll(x, 3)], axis=1)
 
-    p = Params(
-        decay=0.4, half_life=0.6, spread=0.65, reactivity=0.5, exposure=0.7,
-        toxicity=0.35, seed=1,
-    )
     profile = PROFILES["SLUDGE"]
     zeros = np.zeros(n)
     out = reactor._sludge_engine(
@@ -86,6 +93,20 @@ def _sludge_reference() -> np.ndarray:
     )
     indices = np.arange(settle, n, 40)
     return out[indices - latency].reshape(-1)
+
+
+SLUDGE_PARAMS_A = Params(
+    decay=0.4, half_life=0.6, spread=0.65, reactivity=0.5, exposure=0.7,
+    toxicity=0.35, seed=1,
+)
+
+#: Deliberately on the other side of every lo/hi interpolation in SLUDGE's
+#: configure(), and clear of 0, 1 and 0.5 so no term collapses or goes
+#: symmetric and hides an inversion.
+SLUDGE_PARAMS_B = Params(
+    decay=0.85, half_life=0.15, spread=0.3, reactivity=0.9, exposure=0.2,
+    toxicity=0.75, seed=1,
+)
 
 
 def expectations() -> dict:
@@ -111,7 +132,8 @@ def expectations() -> dict:
         "high_shelf": filters.high_shelf(stereo, 15000.0, 1.0, SR)[:, 0],
         "running_rms": _running_rms_reference(),
         "oversampler_soft_clip": _oversampler_reference(),
-        "sludge_engine": _sludge_reference(),
+        "sludge_engine": _sludge_reference(SLUDGE_PARAMS_A),
+        "sludge_engine_b": _sludge_reference(SLUDGE_PARAMS_B),
     }
 
 

@@ -28,6 +28,16 @@
     this port delays `h` by the same amount before the final mix, and the
     whole engine's output is `kOversamplerLatencySamples` behind its input --
     report that via `setLatencySamples`, same as the oversampler itself.
+
+    One difference from the prototype is inherent rather than a porting bug.
+    The offline reference re-pads between its upsample and downsample stages,
+    where a continuous causal stream cannot, so the two disagree over the
+    oversampler's first 41 samples. That region then feeds the final smoothing
+    one-pole, which is IIR, so it leaves an exponentially decaying tail rather
+    than ending cleanly: measured at 1.5e-4 peak (-76 dB) at stream start,
+    e-folding every 1/g_c samples and at machine precision within a few
+    hundred. Bounded, inaudible, and only from a cold start, but real -- and
+    it is why the comparison skips a settling window.
 */
 namespace squelch::dsp
 {
