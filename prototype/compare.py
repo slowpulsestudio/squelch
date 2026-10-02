@@ -345,6 +345,25 @@ def _pitch_wind_reference() -> np.ndarray:
     return ref[settle::20]
 
 
+def _scheduler_reference() -> np.ndarray:
+    """Source/Dsp/Scheduler.h against scheduler.schedule, field by field.
+
+    Flattened as start, index, pan, decay_scale, accent, slide per event, so
+    a wrong hash stream or a miscounted fan-out shows up as a mismatch rather
+    than just a different event count.
+    """
+    from .scheduler import schedule
+
+    n = SR * 4
+    silence = np.zeros((n, 2))
+    p = Params(mode="GRID", grid="1/8", flux=0.4, probability=0.8,
+               reactivity=0.5, volatility=0.6, containment=0.2, seed=12)
+    events = schedule(silence, SR, p, 140.0, sub_event_bias=1.3)
+    rows = [[float(e.start), float(e.index), e.pan, e.decay_scale,
+             float(e.accent), float(e.slide)] for e in events]
+    return np.array(rows).reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -381,6 +400,7 @@ def expectations() -> dict:
         "drive": _drive_reference(),
         "stereo_spread": _stereo_spread_reference(),
         "pitch_wind": _pitch_wind_reference(),
+        "scheduler": _scheduler_reference(),
     }
 
 

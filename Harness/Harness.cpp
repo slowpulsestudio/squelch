@@ -9,6 +9,7 @@
 */
 
 #include <cstdio>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@
 #include "../Source/Dsp/OutputStage.h"
 #include "../Source/Dsp/Rng.h"
 #include "../Source/Dsp/Saturation.h"
+#include "../Source/Dsp/Scheduler.h"
 #include "../Source/Dsp/Sludge.h"
 
 namespace
@@ -463,7 +465,48 @@ int main()
             if (i >= settle && (i - settle) % 20 == 0)
                 values.push_back (y);
         }
-        printArray ("pitch_wind", values, true);
+        printArray ("pitch_wind", values);
+    }
+
+    // The scheduler, walked in blocks rather than over the whole render, so
+    // the block-wise path is what gets compared and not a one-shot render.
+    {
+        dsp::ScheduleSettings settings;
+        settings.gridIndex = 5;          // "1/8"
+        settings.bpm = 140.0;
+        settings.flux = 0.4;
+        settings.probability = 0.8;
+        settings.reactivity = 0.5;
+        settings.volatility = 0.6;
+        settings.containment = 0.2;
+        settings.subEventBias = 1.3;
+        settings.seed = 12;
+
+        dsp::Scheduler scheduler;
+        scheduler.prepare (sampleRate);
+        scheduler.configure (settings);
+
+        std::vector<dsp::ScheduledEvent> events;
+        constexpr int block = 512;
+        const auto total = static_cast<std::int64_t> (sampleRate) * 4;
+        for (std::int64_t at = 0; at < total; at += block)
+            scheduler.forRange (at, static_cast<int> (std::min<std::int64_t> (block, total - at)),
+                                [&events] (const dsp::ScheduledEvent& e) { events.push_back (e); });
+
+        std::sort (events.begin(), events.end(),
+                   [] (const auto& a, const auto& b) { return a.start < b.start; });
+
+        std::vector<double> values;
+        for (const auto& e : events)
+        {
+            values.push_back (double (e.start));
+            values.push_back (double (e.index));
+            values.push_back (e.pan);
+            values.push_back (e.decayScale);
+            values.push_back (e.accent ? 1.0 : 0.0);
+            values.push_back (e.slide ? 1.0 : 0.0);
+        }
+        printArray ("scheduler", values, true);
     }
 
     std::printf ("}\n");
