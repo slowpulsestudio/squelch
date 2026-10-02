@@ -354,7 +354,45 @@ int main()
                 values.push_back (r);
             }
         }
-        printArray ("peak_limiter", values, true);
+        printArray ("peak_limiter", values);
+    }
+
+    // Collimator: two static filters, so an impulse pins both.
+    {
+        dsp::Collimator collimator;
+        collimator.prepare (sampleRate);
+        collimator.set (0.7);
+
+        std::vector<double> values;
+        for (int i = 0; i < 64; ++i)
+            values.push_back (collimator.process (i == 0 ? 1.0 : 0.0));
+        printArray ("collimate", values);
+    }
+
+    // UnityMatch: follower and gain smoother both start from a defined state,
+    // so there is nothing to settle and sample 0 must agree. The level step
+    // partway through exercises the release side as well as the attack.
+    {
+        dsp::UnityMatch match;
+        match.prepare (sampleRate);
+
+        std::vector<double> values;
+        for (int i = 0; i < 8000; ++i)
+        {
+            const auto t = i / sampleRate;
+            auto tone = 0.5 * std::sin (2.0 * M_PI * 200.0 * t);
+            if (i >= 4000)
+                tone *= 0.2;
+
+            double l = 0.0, r = 0.0;
+            match.process (tone, 0.7 * tone, l, r);
+            if (i % 40 == 0)
+            {
+                values.push_back (l);
+                values.push_back (r);
+            }
+        }
+        printArray ("unity_match", values, true);
     }
 
     std::printf ("}\n");

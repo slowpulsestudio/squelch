@@ -29,6 +29,104 @@ namespace squelch::dsp
     inline constexpr double kLimiterCeiling = 0.97;
     inline constexpr double kLimiterReleaseS = 0.050;
 
+    inline constexpr double kCollimatorCentreHz = 650.0;
+
+    inline constexpr double kPeakTarget = 0.89;
+    inline constexpr double kPeakTrackS = 1.2;
+    inline constexpr double kPeakAttackS = 0.6;
+    inline constexpr double kLevelMatchRangeDb = 36.0;
+    inline constexpr double kLevelMatchGateDb = -60.0;
+    inline constexpr double kGainSmoothS = 0.05;
+
+    /** Closes a high-pass and a low-pass in on kCollimatorCentreHz.
+
+        Coefficients only move when COLLIMATOR does, so they are rebuilt in
+        `set()` rather than per sample.
+    */
+    class Collimator
+    {
+    public:
+        void prepare (double sampleRate) noexcept
+        {
+            sr = sampleRate;
+            hp.reset();
+            lp.reset();
+            set (0.0);
+        }
+
+        void set (double collimator) noexcept
+        {
+            amount = collimator;
+            if (amount <= 0.0)
+                return;
+
+            constexpr auto hpOpen = 20.0;
+            constexpr auto lpOpen = 18000.0;
+            const auto hpHz = hpOpen * std::pow (kCollimatorCentreHz * 0.62 / hpOpen, amount);
+            const auto lpHz = lpOpen * std::pow (kCollimatorCentreHz * 2.2 / lpOpen, amount);
+            const auto q = 0.707 + 0.5 * amount;
+
+            hp.setCoefficients (highpass (hpHz, q, sr));
+            lp.setCoefficients (lowpass (lpHz, q, sr));
+        }
+
+        double process (double x) noexcept
+        {
+            return amount <= 0.0 ? x : lp.process (hp.process (x));
+        }
+
+    private:
+        double sr { 44100.0 }, amount { 0.0 };
+        Biquad hp, lp;
+    };
+
+    /** Aims the peaks just under the ceiling, in both directions.
+
+        Slow enough to be a level and not an envelope. It lifts quiet material
+        as well as holding loud material down: a reaction that rings less is
+        not meant to be quieter, it is meant to be a different sound at the
+        same level.
+
+        The gate and hold in the prototype's `matching_gain` are a no-op here
+        because the target is the constant kPeakTarget, which is always above
+        the gate, so only the clamp and the smoothing carry over.
+    */
+    class UnityMatch
+    {
+    public:
+        void prepare (double sampleRate) noexcept
+        {
+            sr = sampleRate;
+            attack = std::exp (-1.0 / std::max (kPeakAttackS * sr, 1.0));
+            release = std::exp (-1.0 / std::max (kPeakTrackS * sr, 1.0));
+            smooth = std::exp (-1.0 / std::max (kGainSmoothS * sr, 1.0));
+            ceiling = std::pow (10.0, kLevelMatchRangeDb / 20.0);
+            held = 0.0;
+            // Unity, not the first computed gain: at sample zero the trackers
+            // have seen one sample each and their ratio is noise.
+            gain = 1.0;
+        }
+
+        void process (double xL, double xR, double& outL, double& outR) noexcept
+        {
+            const auto magnitude = std::max (std::abs (xL), std::abs (xR));
+            const auto coeff = magnitude > held ? attack : release;
+            held = magnitude + (held - magnitude) * coeff;
+
+            const auto wanted = std::clamp (kPeakTarget / std::max (held, 1e-12),
+                                            1.0 / ceiling, ceiling);
+            gain = (1.0 - smooth) * wanted + smooth * gain;
+
+            outL = xL * gain;
+            outR = xR * gain;
+        }
+
+    private:
+        double sr { 44100.0 };
+        double attack { 0.0 }, release { 0.0 }, smooth { 0.0 }, ceiling { 1.0 };
+        double held { 0.0 }, gain { 1.0 };
+    };
+
     inline int lookaheadSamples (double sr) noexcept
     {
         return std::max (static_cast<int> (kLimiterLookaheadS * sr), 1);

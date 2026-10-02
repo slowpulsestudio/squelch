@@ -250,6 +250,38 @@ def _limiter_reference() -> np.ndarray:
     return ref[indices - w].reshape(-1)
 
 
+def _collimate_reference() -> np.ndarray:
+    """Source/Dsp/OutputStage.h's Collimator against output_stage.collimate.
+
+    Two static filters with fixed coefficients, so an impulse pins both and
+    nothing settles.
+    """
+    from . import output_stage
+
+    impulse = np.zeros((64, 2))
+    impulse[0] = 1.0
+    p = Params(collimator=0.7)
+    return output_stage.collimate(impulse, SR, p)[:, 0]
+
+
+def _unity_match_reference() -> np.ndarray:
+    """Source/Dsp/OutputStage.h's UnityMatch against output_stage.unity_match.
+
+    Both the peak follower and the gain smoother start from a defined state
+    (zero and unity), so there is no settling window: sample 0 must agree.
+    The reference argument is unused by unity_match, which aims at a fixed
+    peak target rather than at the input's level.
+    """
+    from . import output_stage
+
+    n = 8000
+    t = np.arange(n) / SR
+    tone = 0.5 * np.sin(2.0 * np.pi * 200.0 * t)
+    tone[4000:] *= 0.2
+    y = np.stack([tone, 0.7 * tone], axis=1)
+    return output_stage.unity_match(y, y, SR)[::40].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -281,6 +313,8 @@ def expectations() -> dict:
         "fission_engine": _fission_reference(),
         "voice": _voice_reference(),
         "peak_limiter": _limiter_reference(),
+        "collimate": _collimate_reference(),
+        "unity_match": _unity_match_reference(),
     }
 
 
