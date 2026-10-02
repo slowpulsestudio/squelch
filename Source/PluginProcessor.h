@@ -6,6 +6,7 @@
 #include "Dsp/Alien.h"
 #include "Dsp/Chemical.h"
 #include "Dsp/Envelopes.h"
+#include "Dsp/OutputStage.h"
 #include "Dsp/Fission.h"
 #include "Dsp/Radiation.h"
 #include "Dsp/Scheduler.h"
@@ -54,6 +55,9 @@ private:
     /// Reads the APVTS once per block, off the audio thread's hot loop.
     void refreshReactionSettings();
 
+    /// Latency ahead of the dry/wet mix, which the dry path has to match.
+    int preMixLatency() const;
+
     juce::SmoothedValue<float> inputGain, outputGain, wetMix;
 
     squelch::dsp::SludgeEngine sludge;
@@ -64,6 +68,18 @@ private:
 
     squelch::dsp::Scheduler scheduler;
     squelch::dsp::Envelopes envelopes;
+
+    squelch::dsp::Drive driveStage;
+    squelch::dsp::Collimator collimatorL, collimatorR;
+    squelch::dsp::StereoSpread stereoSpread;
+    squelch::dsp::Voice voiceL, voiceR;
+    squelch::dsp::UnityMatch unityMatch;
+    squelch::dsp::PeakLimiter limiter;
+
+    /// Only SLUDGE carries its own oversampler lag. The others are delayed by
+    /// the same amount so the reported latency does not move with REACTION.
+    juce::AudioBuffer<float> engineAlign;
+    int engineAlignPos { 0 };
 
     /// Events for the current block, collected once and then fired at their
     /// own sample positions. Reserved in prepareToPlay: push_back on the

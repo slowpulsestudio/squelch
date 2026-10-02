@@ -70,24 +70,44 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     scheduler.prepare (sampleRate);
     envelopes.prepare (sampleRate);
 
+    driveStage.prepare (sampleRate);
+    collimatorL.prepare (sampleRate);
+    collimatorR.prepare (sampleRate);
+    stereoSpread.prepare (sampleRate);
+    voiceL.prepare (sampleRate);
+    voiceR.prepare (sampleRate);
+    unityMatch.prepare (sampleRate);
+    limiter.prepare (sampleRate);
+
     // Worst case is one block of the shortest grid step, each fanning out to
     // the full sub-event count. Reserved once so processBlock never allocates.
     const auto shortestStep = squelch::gridBeats[std::size (squelch::gridBeats) - 1] * 60.0 / 20.0;
     const auto maxSteps = static_cast<int> (samplesPerBlock / (shortestStep * sampleRate)) + 4;
     pendingEvents.reserve (static_cast<size_t> (maxSteps * squelch::dsp::kMaxSubEvents));
 
-    dryDelay.setSize (2, squelch::dsp::kOversamplerLatencySamples);
+    dryDelay.setSize (2, preMixLatency());
     dryDelay.clear();
     dryDelayPos = 0;
+
+    engineAlign.setSize (2, squelch::dsp::kOversamplerLatencySamples);
+    engineAlign.clear();
+    engineAlignPos = 0;
     timelinePosition = 0;
 
     refreshReactionSettings();
 
-    // SLUDGE's causal oversampler is the only latency the plugin currently
-    // has. The previous figure here was the output stage's limiter lookahead,
-    // which is not ported yet and so was latency the host was told about but
-    // never actually given.
-    setLatencySamples (squelch::dsp::kOversamplerLatencySamples);
+    // Everything before the mix (the engine's own oversampler plus drive's)
+    // plus the limiter, which delays the mixed signal after it. Reported as
+    // one figure that does not move with REACTION, or the host re-syncs every
+    // time the reaction is switched.
+    setLatencySamples (preMixLatency() + squelch::dsp::PeakLimiter::latencySamples (sampleRate));
+}
+
+int SquelchAudioProcessor::preMixLatency() const
+{
+    // SLUDGE's oversampler and the drive stage's, which every reaction passes
+    // through. Non-SLUDGE engines are padded to match.
+    return 2 * squelch::dsp::kOversamplerLatencySamples;
 }
 
 void SquelchAudioProcessor::refreshReactionSettings()
@@ -137,6 +157,18 @@ void SquelchAudioProcessor::refreshReactionSettings()
                           ? value (ids::ionizeAmount) : 0.0;
     envelope.seed = seed;
     envelopes.configure ({}, envelope);
+
+    // Each reaction's own appetite for DRIVE and for stereo dispersal, in the
+    // order of reactionNames. FISSION scatters across the field because
+    // splitting is what it does; the rest stay more centred.
+    static constexpr double driveWeights[] { 0.90, 0.70, 1.30, 1.00, 0.80 };
+    static constexpr double stereoWeights[] { 0.30, 1.00, 0.20, 0.35, 0.50 };
+    const auto index = juce::jlimit (0, 4, currentReaction);
+
+    driveStage.set (value (ids::drive), driveWeights[index]);
+    collimatorL.set (value (ids::collimator));
+    collimatorR.set (value (ids::collimator));
+    stereoSpread.set (value (ids::fallout) * stereoWeights[index]);
 }
 
 double SquelchAudioProcessor::getTailLengthSeconds() const
@@ -176,7 +208,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     refreshReactionSettings();
 
     const auto channels = buffer.getNumChannels();
-    const auto latency = squelch::dsp::kOversamplerLatencySamples;
+    const auto latency = preMixLatency();
     const auto numSamples = buffer.getNumSamples();
 
     pendingEvents.clear();
@@ -237,7 +269,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
         const auto env = envelopes.process();
 
-        double wetL = delayedL, wetR = delayedR;
+        double wetL = 0.0, wetR = 0.0;
 
         if (reaction == "SLUDGE")
             sludge.process (dryL, dryR, wetL, wetR);
@@ -253,12 +285,42 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         else if (reaction == "FISSION")
             fission.process (dryL, dryR, wetL, wetR);
 
+        // Only SLUDGE lags on its own, so the rest are padded to match and the
+        // reported latency stays put when REACTION changes.
+        if (reaction != "SLUDGE")
+        {
+            const auto heldL = engineAlign.getSample (0, engineAlignPos);
+            const auto heldR = engineAlign.getSample (1, engineAlignPos);
+            engineAlign.setSample (0, engineAlignPos, static_cast<float> (wetL));
+            engineAlign.setSample (1, engineAlignPos, static_cast<float> (wetR));
+            engineAlignPos = (engineAlignPos + 1 == engineAlign.getNumSamples()) ? 0 : (engineAlignPos + 1);
+            wetL = heldL;
+            wetR = heldR;
+        }
+
+        // The output chain. Placement and AFTERGLOW are absent: pan_gain comes
+        // from build_controls and the glow needs a reverb, neither of which is
+        // ported, so they are left out rather than approximated.
+        driveStage.process (wetL, wetR, wetL, wetR);
+        wetL = collimatorL.process (wetL);
+        wetR = collimatorR.process (wetR);
+        stereoSpread.process (wetL, wetR, wetL, wetR);
+        wetL = voiceL.process (wetL);
+        wetR = voiceR.process (wetR);
+        unityMatch.process (wetL, wetR, wetL, wetR);
+
         const auto mixedL = delayedL + (static_cast<float> (wetL) - delayedL) * wet;
         const auto mixedR = delayedR + (static_cast<float> (wetR) - delayedR) * wet;
 
-        buffer.setSample (0, sample, mixedL * out);
+        // Peak safety runs after the blend, not on the wet path alone: the
+        // reaction decorrelates phase against the dry, so the mix can peak
+        // higher than either part did on its own.
+        double safeL = 0.0, safeR = 0.0;
+        limiter.process (mixedL, mixedR, safeL, safeR);
+
+        buffer.setSample (0, sample, static_cast<float> (safeL) * out);
         if (channels > 1)
-            buffer.setSample (1, sample, mixedR * out);
+            buffer.setSample (1, sample, static_cast<float> (safeR) * out);
     }
 
     timelinePosition += numSamples;
