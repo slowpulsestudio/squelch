@@ -15,6 +15,7 @@
 #include "../Source/Dsp/Alien.h"
 #include "../Source/Dsp/Chemical.h"
 #include "../Source/Dsp/Filters.h"
+#include "../Source/Dsp/Radiation.h"
 #include "../Source/Dsp/Oversampler.h"
 #include "../Source/Dsp/Rng.h"
 #include "../Source/Dsp/Saturation.h"
@@ -246,7 +247,39 @@ int main()
                 values.push_back (y);
             }
         }
-        printArray ("chemical_engine", values, true);
+        printArray ("chemical_engine", values);
+    }
+
+    // RADIATION: one event, so the percussive pulse rides alongside the
+    // resonator and the per-sample hashed AR(1) states.
+    {
+        dsp::RadiationProfile profile;
+        dsp::RadiationParams params;
+        params.volatility = 0.7;
+        params.spread = 0.6;
+        params.decay = 0.45;
+        params.exposure = 0.3;
+        params.seed = 4;
+
+        dsp::RadiationEngine engine;
+        engine.prepare (sampleRate);
+        engine.configure (profile, params);
+        engine.trigger (false);
+
+        std::vector<double> values;
+        for (int i = 0; i < 4000; ++i)
+        {
+            const auto t = i / sampleRate;
+            double l = 0.0, r = 0.0;
+            engine.process (0.3 * std::sin (2.0 * M_PI * 180.0 * t),
+                            0.25 * std::sin (2.0 * M_PI * 240.0 * t), l, r);
+            if (i % 20 == 0)
+            {
+                values.push_back (l);
+                values.push_back (r);
+            }
+        }
+        printArray ("radiation_engine", values, true);
     }
 
     std::printf ("}\n");

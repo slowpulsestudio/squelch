@@ -19,7 +19,7 @@ Measured, not estimated.
 | `prototype/checks.py` | 37/37 passing |
 | reaction distinctness | 0/10 pairs too alike; closest FISSION/CHEMICAL at −6.1 dB |
 | noise generation | fully causal: every stochastic value hashes (seed, stream, sample index), no stateful RNG left in reactor.py/reactions.py/rng.py |
-| C++ port | 13/13 harness primitives agree to machine precision; SLUDGE (two operating points) and ALIEN ported and verified; CHEMICAL/RADIATION/FISSION and the output stage not yet ported |
+| C++ port | 15/15 harness primitives agree to machine precision; SLUDGE, ALIEN, CHEMICAL and RADIATION ported and verified; FISSION and the output stage not yet ported; only SLUDGE wired into processBlock |
 | git | ALIEN port committed, nothing pushed |
 
 Steps 1-6 below are done. Step 7 (the C++ port) is in progress.

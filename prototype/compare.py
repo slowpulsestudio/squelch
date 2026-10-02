@@ -161,6 +161,29 @@ def _chemical_reference() -> np.ndarray:
     return out[::20].reshape(-1)
 
 
+def _radiation_reference() -> np.ndarray:
+    """Source/Dsp/Radiation.h against reactor._radiation_engine.
+
+    One event, so the percussive pulse is exercised alongside the resonator
+    and the hashed AR(1) states. No oversampler, so sample 0 must agree.
+    """
+    from .scheduler import Event
+
+    n = 4000
+    t = np.arange(n) / SR
+    x = np.stack([0.3 * np.sin(2.0 * np.pi * 180.0 * t),
+                  0.25 * np.sin(2.0 * np.pi * 240.0 * t)], axis=1)
+    p = Params(reaction="RADIATION", volatility=0.7, spread=0.6, decay=0.45,
+               exposure=0.3, seed=4)
+    profile = PROFILES["RADIATION"]
+    event = Event(start=0, index=1, intensity=1.0, decay_scale=1.0, tone=0.5,
+                  pan=0.0, shape=0.5, depth=0.0, accent=False, slide=False)
+    zeros = np.zeros(n)
+    out = reactor._radiation_engine(x, zeros, zeros, zeros, SR, profile,
+                                    [event], None, p, None)
+    return out[::20].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -188,6 +211,7 @@ def expectations() -> dict:
         "sludge_engine_b": _sludge_reference(SLUDGE_PARAMS_B),
         "alien_engine": _alien_reference(),
         "chemical_engine": _chemical_reference(),
+        "radiation_engine": _radiation_reference(),
     }
 
 
