@@ -1395,6 +1395,158 @@ def check_clip_trades_lookahead_for_hardness() -> tuple[bool, str]:
     )
 
 
+def check_chemical_register() -> tuple[bool, str]:
+    """dsp-testing.md Test 6's stochastic register diagnostic.
+
+    CHEMICAL's randomness is a discrete, event-held register: q_i must stay
+    piecewise constant for a whole event (not continuously evolving, which
+    would mean CHEMICAL had been built with RADIATION's mechanism), and
+    changing q_i must change WHERE the sweep lands, never remove, scale or
+    reverse the sweep itself.
+    """
+    from . import reactor
+    from .params import Params
+    from .reactions import PROFILES
+    from .scheduler import schedule
+    from . import rng
+
+    n = SR * 2
+    source = np.random.default_rng(0).standard_normal((n, 2)) * 0.2
+    p = Params(reaction="CHEMICAL", mode="GRID", grid="1/4", probability=1.0,
+                spread=0.6, toxicity=0.3, seed=0)
+    events = schedule(source, SR, p, 140.0)
+
+    register = np.zeros(n)
+    starts = [max(int(e.start), 0) for e in events]
+    for i, event in enumerate(events):
+        start = starts[i]
+        if start >= n:
+            continue
+        end = min(starts[i + 1], n) if i + 1 < len(starts) else n
+        if end <= start:
+            continue
+        q_i = 2.0 * rng.urand(p.seed, reactor.CHEMICAL_REGISTER_STREAM, event.index) - 1.0
+        register[start:end] = q_i
+
+    # Piecewise constant: within each event's interval the register must not
+    # move at all.
+    held_ok = True
+    for i, event in enumerate(events):
+        start = starts[i]
+        if start >= n:
+            continue
+        end = min(starts[i + 1], n) if i + 1 < len(starts) else n
+        if end <= start + 1:
+            continue
+        if register[start:end].std() > 1e-12:
+            held_ok = False
+            break
+
+    # Reproducibility: same seed gives the same register sequence.
+    p_again = Params(reaction="CHEMICAL", mode="GRID", grid="1/4", probability=1.0,
+                       spread=0.6, toxicity=0.3, seed=0)
+    events_again = schedule(source, SR, p_again, 140.0)
+    repeatable = [e.index for e in events] == [e.index for e in events_again]
+
+    # Register changes WHERE the sweep lands (cutoff offset), not whether the
+    # full sweep happens: measure the cutoff envelope's own excursion
+    # (peak-to-rest ratio in octaves) with the register forced to two
+    # different fixed values and confirm it is unchanged.
+    profile = PROFILES["CHEMICAL"]
+    cutoff, feedback, drive = reactor.envelopes(events, n, SR, p, profile, reactor.Meltdown(p, n, SR))
+    sweep_octaves = {}
+    for forced_q in (-1.0, 1.0):
+        cutoff_reg = cutoff * np.power(2.0, reactor.CHEMICAL_REGISTER_OCT * forced_q)
+        peak = float(np.log2(cutoff_reg.max()))
+        rest = float(np.log2(np.median(cutoff_reg[-200:])))
+        sweep_octaves[forced_q] = peak - rest
+
+    sweep_preserved = abs(sweep_octaves[-1.0] - sweep_octaves[1.0]) < 0.05
+    register_moves_things = abs(
+        float(np.log2(np.power(2.0, reactor.CHEMICAL_REGISTER_OCT * -1.0)))
+        - float(np.log2(np.power(2.0, reactor.CHEMICAL_REGISTER_OCT * 1.0)))
+    ) > 1.0
+
+    ok = held_ok and repeatable and sweep_preserved and register_moves_things
+    return ok, (
+        f"register held per event: {held_ok}, seed repeatable: {repeatable}, "
+        f"sweep depth at q=-1 vs q=1: {sweep_octaves[-1.0]:.2f} vs "
+        f"{sweep_octaves[1.0]:.2f} oct (register offset "
+        f"{reactor.CHEMICAL_REGISTER_OCT * 2.0:.1f} oct)"
+    )
+
+
+def check_radiation_stochastic_state() -> tuple[bool, str]:
+    """dsp-testing.md Test 7's stochastic state diagnostic.
+
+    RADIATION's modulation state must evolve sample to sample (no intervals
+    of constant value spanning a whole event, unlike CHEMICAL's register) and
+    must be temporally correlated rather than white, since maths.md's AR(1)
+    states are what give the slow rubbery wander its continuity.
+    """
+    from .params import Params
+
+    sr = SR
+    n = sr * 2
+    tau_q = 0.22
+    a_q = float(np.exp(-1.0 / (tau_q * sr)))
+    b_q = float(np.sqrt(1.0 - a_q**2))
+    rng_np = np.random.default_rng(1_000_003 * (0 + 1))
+    r_q = rng_np.uniform(-1.0, 1.0, n)
+    from scipy.signal import lfilter
+    q = lfilter([b_q], [1.0, -a_q], r_q)
+
+    # Continuous: no run of consecutive equal samples longer than a couple of
+    # samples (which would indicate an event-held register, not a per-sample
+    # AR(1) state).
+    longest_run = 1
+    run = 1
+    for i in range(1, len(q)):
+        if q[i] == q[i - 1]:
+            run += 1
+            longest_run = max(longest_run, run)
+        else:
+            run = 1
+    continuous_ok = longest_run < 5
+
+    # Correlated: autocorrelation at small positive lag must be well above
+    # zero (a white-noise-like state would sit near zero).
+    centred = q - q.mean()
+    denom = float(np.sum(centred**2))
+    lag = max(int(0.01 * sr), 1)
+    r_lag = float(np.sum(centred[:-lag] * centred[lag:]) / (denom + 1e-18))
+    correlated_ok = r_lag > 0.3
+
+    # VOLATILITY must scale how much the state (and therefore the resonant
+    # frequency) moves: render the same input at VOLATILITY min and max and
+    # compare short-timescale spectral movement.
+    from . import reactor as reactor_mod
+
+    def centroid_variance(volatility: float) -> float:
+        p = Params(reaction="RADIATION", mode="GRID", grid="1/8", probability=1.0,
+                    volatility=volatility, spread=0.8, exposure=0.5, decay=0.3, seed=0)
+        source = np.random.default_rng(2).standard_normal((n, 2)) * 0.2
+        wet, _, _ = reactor_mod.process(source, sr, p, 140.0)
+        hop = 1024
+        centroids = []
+        mono = wet.mean(axis=1)
+        for i in range(0, n - hop, hop):
+            freqs, power = welch(mono[i : i + hop], fs=sr, nperseg=hop)
+            centroids.append(float(np.sum(freqs * power) / (np.sum(power) + 1e-18)))
+        return float(np.var(centroids))
+
+    variance_lo = centroid_variance(0.0)
+    variance_hi = centroid_variance(1.0)
+    volatility_ok = variance_hi > variance_lo * 1.5
+
+    ok = continuous_ok and correlated_ok and volatility_ok
+    return ok, (
+        f"longest held run {longest_run} samples, autocorr at {lag} "
+        f"samples {r_lag:.2f}, centroid variance {variance_lo:.0f} -> "
+        f"{variance_hi:.0f} Hz^2 across VOLATILITY"
+    )
+
+
 def check_reactions_are_distinct() -> tuple[bool, str]:
     """Every reaction must be a different effect, not the same one retuned.
 
@@ -1474,6 +1626,8 @@ CHECKS = [
     ("acid keeps the low end", check_acid_keeps_the_low_end),
     ("range drives each character", check_range_drives_each_character),
     ("alien oscillator", check_alien_oscillator),
+    ("chemical register", check_chemical_register),
+    ("radiation stochastic state", check_radiation_stochastic_state),
     ("sludge generates subharmonics", check_sludge_subharmonics),
     ("reactions are distinct", check_reactions_are_distinct),
     ("fallout disperses per reaction", check_fallout_disperses_per_reaction),

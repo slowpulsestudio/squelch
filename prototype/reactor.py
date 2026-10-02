@@ -436,6 +436,51 @@ def _ladder_engine(
     return filters.ladder(x, cutoff, feedback, drive, sr, tap=profile.tap)
 
 
+#: CHEMICAL's per-event stochastic register hash stream.
+CHEMICAL_REGISTER_STREAM = 501
+
+#: Register spread in octaves. Internal to CHEMICAL, not VOLATILITY and not a
+#: plugin control (maths.md: "R_q is an internal CHEMICAL parameter").
+CHEMICAL_REGISTER_OCT = 1.3
+
+
+def _chemical_engine(
+    x: np.ndarray,
+    cutoff: np.ndarray,
+    feedback: np.ndarray,
+    drive: np.ndarray,
+    sr: int,
+    profile: ReactionProfile,
+    events: list[Event],
+    controls: Controls,
+    p: Params,
+    md: Meltdown,
+) -> np.ndarray:
+    """CHEMICAL's engine: the ladder, plus an event-held stochastic register.
+
+    Each event draws a deterministic q_i, held constant for the whole event,
+    that offsets the cutoff in log-frequency: f_c -> f_c * 2**(R_q * q_i).
+    Per maths.md this must be an offset, never a multiplier on the sweep's own
+    depth, or the register ends up controlling whether the sweep happens
+    instead of where it lands.
+    """
+    n = x.shape[0]
+    register = np.zeros(n)
+    starts = [max(int(e.start), 0) for e in events]
+    for i, event in enumerate(events):
+        start = starts[i]
+        if start >= n:
+            continue
+        end = min(starts[i + 1], n) if i + 1 < len(starts) else n
+        if end <= start:
+            continue
+        q_i = 2.0 * rng.urand(p.seed, CHEMICAL_REGISTER_STREAM, event.index) - 1.0
+        register[start:end] = q_i
+
+    cutoff_registered = cutoff * np.power(2.0, CHEMICAL_REGISTER_OCT * register)
+    return filters.ladder(x, cutoff_registered, feedback, drive, sr, tap=profile.tap)
+
+
 def _one_pole_hz(x: np.ndarray, f_hz: float, sr: int) -> np.ndarray:
     """Constant-coefficient one-pole lowpass, maths.md's g = 1 - e^(-2*pi*f/fs)."""
     g = 1.0 - np.exp(-2.0 * np.pi * f_hz / sr)
@@ -523,6 +568,113 @@ def _sludge_engine(
 
     mu_h = 0.3 + 0.5 * p.reactivity
     return (1.0 - mu_h) * s + mu_h * h[:, None]
+
+
+#: RADIATION's two correlated stochastic states: a slow rubbery wander and a
+#: faster microscopic one, each an AR(1) process driven by deterministic
+#: per-sample hashed noise. tau_q/tau_m are internal to RADIATION, distinct
+#: from the shared DECAY control.
+RADIATION_TAU_Q_S = 0.22
+RADIATION_TAU_M_S = 0.018
+RADIATION_DELTA_F_SEMITONES = 30.0
+RADIATION_BETA_M = 0.4
+
+#: Stochastic excitation: a short percussive pulse per event, plus a
+#: continuous low-level rounded tick source (maths.md's p[n] and g[n]).
+RADIATION_TAU_P_S = 0.012
+RADIATION_EPS_P = 0.8
+RADIATION_TAU_G_S = 0.008
+RADIATION_EPS_G = 0.015
+
+
+def _radiation_engine(
+    x: np.ndarray,
+    cutoff: np.ndarray,
+    feedback: np.ndarray,
+    drive: np.ndarray,
+    sr: int,
+    profile: ReactionProfile,
+    events: list[Event],
+    controls: Controls,
+    p: Params,
+    md: Meltdown,
+) -> np.ndarray:
+    """RADIATION's engine: a quadrature resonator driven by continuous,
+    correlated stochastic state, not CHEMICAL's event-held register and not
+    independent per-sample randomness.
+
+    Per maths.md the resonator uses the coupled quadrature form (rotation
+    matrix, not a direct-form recurrence) because frequency is modulated
+    rapidly and continuously: a direct form would pump amplitude as its
+    coefficients move. There is no saturation inside this loop — the
+    resonator is linear and stable by r[n] < 1, unlike CHEMICAL's ladder,
+    which depends on in-loop tanh to self-limit.
+    """
+    n, channels = x.shape
+    rng_np = np.random.default_rng(1_000_003 * (p.seed + 1))
+
+    volatility = p.volatility
+    a_q = float(np.exp(-1.0 / max(RADIATION_TAU_Q_S * sr, 1.0)))
+    b_q = float(np.sqrt(1.0 - a_q**2)) * volatility
+    a_m = float(np.exp(-1.0 / max(RADIATION_TAU_M_S * sr, 1.0)))
+    b_m = float(np.sqrt(1.0 - a_m**2)) * volatility
+
+    r_q = rng_np.uniform(-1.0, 1.0, n)
+    r_m = rng_np.uniform(-1.0, 1.0, n)
+    q = lfilter([b_q], [1.0, -a_q], r_q)
+    m = lfilter([b_m], [1.0, -a_m], r_m)
+    q_b, m_b = np.tanh(q), np.tanh(m)
+
+    delta_f = RADIATION_DELTA_F_SEMITONES * p.spread
+    f_r = profile.base_hz * np.power(2.0, delta_f * (q_b + RADIATION_BETA_M * m_b) / 12.0)
+    f_r = np.clip(f_r, 20.0, sr * 0.45)
+    omega = 2.0 * np.pi * f_r / sr
+    c_arr, s_arr = np.cos(omega), np.sin(omega)
+
+    # Resonator persistence: DECAY sets the ring time, EXPOSURE tightens the
+    # bandwidth (sharper resonance), same roles those controls play elsewhere.
+    decay_time = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
+    bandwidth = 1.0 / (np.pi * max(decay_time, 0.005)) * (1.0 - 0.7 * p.exposure)
+    bandwidth = max(bandwidth, 5.0)
+    r_damp = float(np.clip(np.exp(-np.pi * bandwidth / sr), 0.0, 0.999))
+
+    # Event-local percussive pulse.
+    pulse = np.zeros(n)
+    tau_p = RADIATION_TAU_P_S
+    pulse_len = min(int(sr * max(8.0 * tau_p, 0.01)), n)
+    tt_p = np.arange(pulse_len) / sr
+    for event in events:
+        start = max(int(event.start), 0)
+        if start >= n:
+            continue
+        length = min(pulse_len, n - start)
+        amp = 1.3 if event.accent else 1.0
+        pulse[start : start + length] += amp * np.exp(-tt_p[:length] / tau_p)
+
+    # Continuous low-level rounded tick source.
+    a_g = float(np.exp(-1.0 / max(RADIATION_TAU_G_S * sr, 1.0)))
+    tick = lfilter([1.0 - a_g], [1.0, -a_g], rng_np.uniform(-1.0, 1.0, n))
+
+    excitation = RADIATION_EPS_P * pulse + RADIATION_EPS_G * tick
+    e = x + excitation[:, None]
+
+    # A narrow-bandwidth resonator rings for a long time, which also means it
+    # integrates a steady excitation up to a huge steady-state amplitude
+    # (sum 1/(1-r_damp)): normalise the excitation by that same factor so
+    # resonance changes the ring, not the delivered level.
+    e = e * max(1.0 - r_damp, 1e-4)
+
+    out = np.zeros((n, channels))
+    v_re = np.zeros(channels)
+    v_im = np.zeros(channels)
+    for i in range(n):
+        ci, si = c_arr[i], s_arr[i]
+        new_re = r_damp * (ci * v_re - si * v_im) + e[i]
+        new_im = r_damp * (si * v_re + ci * v_im)
+        v_re, v_im = new_re, new_im
+        out[i] = v_re
+
+    return out
 
 
 #: ALIEN's deterministic per-event pitch hash stream.
@@ -642,8 +794,8 @@ def _alien_engine(
 #: One engine per REACTION. Replacing an entry is how a reaction gets its own
 #: mechanism instead of CHEMICAL's ladder.
 ENGINES: dict[str, Callable] = {
-    "CHEMICAL": _ladder_engine,
-    "RADIATION": _ladder_engine,
+    "CHEMICAL": _chemical_engine,
+    "RADIATION": _radiation_engine,
     "FISSION": _ladder_engine,
     "SLUDGE": _sludge_engine,
     "ALIEN": _alien_engine,
