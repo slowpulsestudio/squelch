@@ -18,6 +18,7 @@
 #include "../Source/Dsp/Fission.h"
 #include "../Source/Dsp/Radiation.h"
 #include "../Source/Dsp/Oversampler.h"
+#include "../Source/Dsp/OutputStage.h"
 #include "../Source/Dsp/Rng.h"
 #include "../Source/Dsp/Saturation.h"
 #include "../Source/Dsp/Sludge.h"
@@ -313,7 +314,47 @@ int main()
                 values.push_back (r);
             }
         }
-        printArray ("fission_engine", values, true);
+        printArray ("fission_engine", values);
+    }
+
+    // The house voicing is four fixed biquads, so an impulse pins all of them.
+    {
+        dsp::Voice voice;
+        voice.prepare (sampleRate);
+
+        std::vector<double> values;
+        for (int i = 0; i < 64; ++i)
+            values.push_back (voice.process (i == 0 ? 1.0 : 0.0));
+        printArray ("voice", values);
+    }
+
+    // The prototype's gain envelope leads the sample it scales by 2w while
+    // delaying the audio by only w, so the causal port delays by 2w and sits
+    // one window behind it. Settling is 3w: the prototype uses mode='nearest'
+    // for its first w samples, and the ring takes 2w to fill.
+    {
+        const auto w = dsp::lookaheadSamples (sampleRate);
+        const auto settle = 3 * w;
+        dsp::PeakLimiter limiter;
+        limiter.prepare (sampleRate);
+
+        std::vector<double> values;
+        for (int i = 0; i < 4000; ++i)
+        {
+            const auto t = i / sampleRate;
+            auto tone = 0.3 * std::sin (2.0 * M_PI * 220.0 * t);
+            if (i >= 1500 && i < 1510)
+                tone += 3.0;
+
+            double l = 0.0, r = 0.0;
+            limiter.process (tone, 0.8 * tone, l, r);
+            if (i >= settle && (i - settle) % 20 == 0)
+            {
+                values.push_back (l);
+                values.push_back (r);
+            }
+        }
+        printArray ("peak_limiter", values, true);
     }
 
     std::printf ("}\n");

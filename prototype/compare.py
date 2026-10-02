@@ -210,6 +210,46 @@ def _fission_reference() -> np.ndarray:
     return out[settle::20].reshape(-1)
 
 
+def _voice_reference() -> np.ndarray:
+    """Source/Dsp/OutputStage.h's Voice against output_stage.voice.
+
+    Four cascaded biquads with fixed coefficients, so an impulse response
+    pins every one of them at once and nothing settles.
+    """
+    from . import output_stage
+
+    impulse = np.zeros((64, 2))
+    impulse[0] = 1.0
+    return output_stage.voice(impulse, SR)[:, 0]
+
+
+def _limiter_reference() -> np.ndarray:
+    """Source/Dsp/OutputStage.h's PeakLimiter against output_stage.peak_limit.
+
+    The prototype centres its rolling max on the current input while delaying
+    the audio by only one window, so the gain envelope leads the sample it
+    scales by 2w. Measured: a spike at 1500 starts ducking the output that
+    carries input 1060. A causal port must therefore delay by 2w, which puts
+    its output one window behind the prototype's -- hence the offset below.
+
+    Settling is 3w: the prototype's rolling max uses mode='nearest' for its
+    first w samples where a zero-initialised ring reads zeros, and the ring
+    itself takes 2w to fill.
+    """
+    from . import output_stage
+
+    n = 4000
+    w = output_stage.lookahead_samples(SR)
+    settle = 3 * w
+    t = np.arange(n) / SR
+    tone = 0.3 * np.sin(2.0 * np.pi * 220.0 * t)
+    tone[1500:1510] += 3.0
+    x = np.stack([tone, 0.8 * tone], axis=1)
+    ref = output_stage.peak_limit(x, SR)
+    indices = np.arange(settle, n, 20)
+    return ref[indices - w].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -239,6 +279,8 @@ def expectations() -> dict:
         "chemical_engine": _chemical_reference(),
         "radiation_engine": _radiation_reference(),
         "fission_engine": _fission_reference(),
+        "voice": _voice_reference(),
+        "peak_limiter": _limiter_reference(),
     }
 
 
