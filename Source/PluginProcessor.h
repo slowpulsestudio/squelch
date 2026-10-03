@@ -7,6 +7,7 @@
 #include "Dsp/Chemical.h"
 #include "Dsp/Envelopes.h"
 #include "Dsp/OutputStage.h"
+#include "Dsp/Placement.h"
 #include "Dsp/Fission.h"
 #include "Dsp/Radiation.h"
 #include "Dsp/Scheduler.h"
@@ -68,6 +69,7 @@ private:
 
     squelch::dsp::Scheduler scheduler;
     squelch::dsp::Envelopes envelopes;
+    squelch::dsp::Placement placement;
 
     squelch::dsp::Drive driveStage;
     squelch::dsp::Collimator collimatorL, collimatorR;

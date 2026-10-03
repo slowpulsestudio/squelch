@@ -393,6 +393,35 @@ def _envelopes_reference() -> np.ndarray:
     return rows[::25].reshape(-1)
 
 
+def _placement_reference() -> np.ndarray:
+    """Source/Dsp/Placement.h against build_controls' env, pan_gain and send.
+
+    Three overlapping events, because the placement rule is a LOUDEST-wins
+    pick rather than an average and a single event would not exercise it.
+    Control rate, so one value per BLOCK samples.
+    """
+    from . import filters
+    from .meltdown import Meltdown
+    from .scheduler import Event
+
+    n = SR * 2
+    p = Params(reaction="RADIATION", volatility=0.6, decay=0.4, half_life=0.4,
+               afterglow=0.5, seed=5)
+    profile = PROFILES["RADIATION"]
+
+    def event(start, index, pan, shape, depth):
+        return Event(start=start, index=index, intensity=1.0, decay_scale=1.0,
+                     tone=0.5, pan=pan, shape=shape, depth=depth,
+                     accent=False, slide=False)
+
+    events = [event(0, 0, -0.8, 0.3, 0.2),
+              event(3000, 1, 0.7, 0.6, 0.8),
+              event(9000, 2, 0.1, 0.5, 0.5)]
+    c = reactor.build_controls(events, n, SR, p, profile, Meltdown(p, n, SR))
+    rows = np.stack([c.env, c.pan_gain[:, 0], c.pan_gain[:, 1], c.send], axis=1)
+    return rows[::40].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -431,6 +460,7 @@ def expectations() -> dict:
         "pitch_wind": _pitch_wind_reference(),
         "scheduler": _scheduler_reference(),
         "envelopes": _envelopes_reference(),
+        "placement": _placement_reference(),
     }
 
 

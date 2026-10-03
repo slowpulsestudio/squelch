@@ -20,6 +20,7 @@
 #include "../Source/Dsp/Fission.h"
 #include "../Source/Dsp/Radiation.h"
 #include "../Source/Dsp/Oversampler.h"
+#include "../Source/Dsp/Placement.h"
 #include "../Source/Dsp/OutputStage.h"
 #include "../Source/Dsp/Rng.h"
 #include "../Source/Dsp/Saturation.h"
@@ -557,7 +558,50 @@ int main()
                 values.push_back (v.drive);
             }
         }
-        printArray ("envelopes", values, true);
+        printArray ("envelopes", values);
+    }
+
+    // Placement: three overlapping events, because the rule is loudest-wins
+    // rather than an average and one event would not exercise it.
+    {
+        dsp::Placement placement;
+        placement.prepare (sampleRate);
+        placement.configure (0.6, 0.0, 0.025, 0.3, 0.4, 1.0, 0.4);
+
+        struct Fire { int at; std::uint64_t index; double pan, shape, depth; };
+        const Fire fires[] { { 0, 0, -0.8, 0.3, 0.2 },
+                            { 3000, 1, 0.7, 0.6, 0.8 },
+                            { 9000, 2, 0.1, 0.5, 0.5 } };
+
+        std::vector<double> values;
+        for (int i = 0; i < 88200; ++i)
+        {
+            for (const auto& f : fires)
+            {
+                if (f.at != i)
+                    continue;
+
+                dsp::ScheduledEvent e;
+                e.start = f.at;
+                e.index = f.index;
+                e.pan = f.pan;
+                e.shape = f.shape;
+                e.depth = f.depth;
+                e.decayScale = 1.0;
+                placement.trigger (e);
+            }
+
+            const auto v = placement.process();
+            // Every 40 CONTROL steps, which is 40 * kControlBlock samples.
+            if (i % (40 * dsp::kControlBlock) == 0)
+            {
+                values.push_back (v.env);
+                values.push_back (v.panL);
+                values.push_back (v.panR);
+                values.push_back (v.send);
+            }
+        }
+        printArray ("placement", values, true);
     }
 
     std::printf ("}\n");

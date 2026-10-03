@@ -69,6 +69,7 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     fission.prepare (sampleRate);
     scheduler.prepare (sampleRate);
     envelopes.prepare (sampleRate);
+    placement.prepare (sampleRate);
 
     driveStage.prepare (sampleRate);
     collimatorL.prepare (sampleRate);
@@ -165,10 +166,15 @@ void SquelchAudioProcessor::refreshReactionSettings()
     static constexpr double stereoWeights[] { 0.30, 1.00, 0.20, 0.35, 0.50 };
     const auto index = juce::jlimit (0, 4, currentReaction);
 
-    driveStage.set (value (ids::drive), driveWeights[index]);
-    collimatorL.set (value (ids::collimator));
+    driveStage.set (value (ids::drive), driveWeights[index]);    collimatorL.set (value (ids::collimator));
     collimatorR.set (value (ids::collimator));
     stereoSpread.set (value (ids::fallout) * stereoWeights[index]);
+
+    static constexpr double persistence[] { 0.60, 0.60, 1.00, 0.85, 0.50 };
+    static constexpr double decayLo[] { 0.025, 0.08, 0.25, 0.05, 0.04 };
+    static constexpr double decayHi[] { 0.3, 0.6, 1.60, 0.45, 0.5 };
+    placement.configure (volatility, envelope.ionizeAmount, decayLo[index],
+                         decayHi[index], decay, persistence[index], value (ids::halfLife));
 }
 
 double SquelchAudioProcessor::getTailLengthSeconds() const
@@ -248,6 +254,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             // inside a step are what MAX_SUB_EVENTS fans out.
             const auto step = static_cast<std::int64_t> (scheduler.stepSeconds() * getSampleRate());
             envelopes.trigger (e, std::max<std::int64_t> (step, 1));
+            placement.trigger (e);
         }
 
         const auto in = inputGain.getNextValue();
@@ -304,6 +311,15 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         driveStage.process (wetL, wetR, wetL, wetR);
         wetL = collimatorL.process (wetL);
         wetR = collimatorR.process (wetR);
+
+        // Placement runs AFTER the saturation, not before it. A hard-panned
+        // event has one loud channel and one quiet one, and tanh compresses
+        // the loud one harder, so driving a placed signal squeezes most of
+        // the placement back out: 7.5 dB of balance swing down to 3.6.
+        const auto place = placement.process();
+        wetL *= place.panL;
+        wetR *= place.panR;
+
         stereoSpread.process (wetL, wetR, wetL, wetR);
         wetL = voiceL.process (wetL);
         wetR = voiceR.process (wetR);
