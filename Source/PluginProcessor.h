@@ -9,6 +9,7 @@
 #include "Dsp/OutputStage.h"
 #include "Dsp/Placement.h"
 #include "Dsp/Fission.h"
+#include "Dsp/MidWobble.h"
 #include "Dsp/Radiation.h"
 #include "Dsp/Reverb.h"
 #include "Dsp/Scheduler.h"
@@ -75,6 +76,7 @@ private:
     squelch::dsp::Drive driveStage;
     squelch::dsp::Collimator collimatorL, collimatorR;
     squelch::dsp::StereoSpread stereoSpread;
+    squelch::dsp::MidWobble midWobble;
     squelch::dsp::Voice voiceL, voiceR;
     squelch::dsp::UnityMatch unityMatch;
     squelch::dsp::Reverb afterglow;

@@ -75,6 +75,7 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     collimatorL.prepare (sampleRate);
     collimatorR.prepare (sampleRate);
     stereoSpread.prepare (sampleRate);
+    midWobble.prepare (sampleRate);
     voiceL.prepare (sampleRate);
     voiceR.prepare (sampleRate);
     unityMatch.prepare (sampleRate);
@@ -174,6 +175,11 @@ void SquelchAudioProcessor::refreshReactionSettings()
     afterglowAmount = value (ids::afterglow);
     afterglow.set (afterglowAmount, 0.45);
 
+    // FISSION scatters across the field; the rest scatter in pitch instead,
+    // so they stay centred and physical.
+    static constexpr double wobbleWeights[] { 1.00, 0.25, 0.90, 0.55, 1.00 };
+    midWobble.set (value (ids::fallout) * wobbleWeights[index]);
+
     static constexpr double persistence[] { 0.60, 0.60, 1.00, 0.85, 0.50 };
     static constexpr double decayLo[] { 0.025, 0.08, 0.25, 0.05, 0.04 };
     static constexpr double decayHi[] { 0.3, 0.6, 1.60, 0.45, 0.5 };
@@ -259,6 +265,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             const auto step = static_cast<std::int64_t> (scheduler.stepSeconds() * getSampleRate());
             envelopes.trigger (e, std::max<std::int64_t> (step, 1));
             placement.trigger (e);
+            midWobble.trigger();
         }
 
         const auto in = inputGain.getNextValue();
@@ -335,6 +342,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
 
         stereoSpread.process (wetL, wetR, wetL, wetR);
+        midWobble.process (wetL, wetR, wetL, wetR);
         wetL = voiceL.process (wetL);
         wetR = voiceR.process (wetR);
         unityMatch.process (wetL, wetR, wetL, wetR);
