@@ -357,6 +357,139 @@ namespace
                     + ", late/early " + std::to_string (growth).substr (0, 6));
         }
     }
+    //==============================================================================
+    // The four scheduler modes. GRID and FREE are covered numerically by the
+    // comparison harness; RANDOM and INPUT are not, because neither can be
+    // computed from the step index alone -- RANDOM accumulates its own step
+    // lengths and INPUT reads the audio. This asserts what they are for: that
+    // they fire at all, that they are reproducible, and that each lays events
+    // out differently from the grid.
+    //==============================================================================
+    std::vector<std::int64_t> eventsOf (dsp::Mode mode, double flux, const Stereo& in, int blockSize)
+    {
+        dsp::ScheduleSettings settings;
+        settings.gridIndex = 8;
+        settings.bpm = 140.0;
+        settings.flux = flux;
+        settings.probability = 1.0;
+        settings.mode = mode;
+        settings.seed = 7;
+
+        dsp::Scheduler scheduler;
+        scheduler.prepare (44100.0);
+        scheduler.configure (settings);
+
+        std::vector<std::int64_t> starts;
+        const auto n = static_cast<int> (in.l.size());
+
+        for (int at = 0; at < n; at += blockSize)
+        {
+            const auto length = std::min (blockSize, n - at);
+            scheduler.forRange (at, length, [&starts] (const dsp::ScheduledEvent& e)
+            {
+                starts.push_back (e.start);
+            });
+
+            for (int i = 0; i < length; ++i)
+                scheduler.detectOnsets (std::abs (in.l[static_cast<size_t> (at + i)]),
+                                        at + i,
+                                        [&starts] (const dsp::ScheduledEvent& e)
+                                        {
+                                            starts.push_back (e.start);
+                                        });
+        }
+
+        std::sort (starts.begin(), starts.end());
+        return starts;
+    }
+
+    /// Eight bars of 1/16 pulses, so INPUT has onsets to find.
+    Stereo makeTransients()
+    {
+        const auto sr = 44100.0;
+        auto s = makeSignal ("silence", sr, 4.0);
+        const auto period = static_cast<size_t> (sr * 60.0 / 140.0 / 4.0);
+
+        for (size_t at = 0; at < s.l.size(); at += period)
+            for (size_t i = 0; i < 200 && at + i < s.l.size(); ++i)
+            {
+                const auto v = std::exp (-double (i) / 40.0)
+                             * std::sin (2.0 * M_PI * 220.0 * double (i) / sr);
+                s.l[at + i] = v;
+                s.r[at + i] = v;
+            }
+
+        return s;
+    }
+
+    void testSchedulerModes()
+    {
+        const auto in = makeTransients();
+
+        const auto grid = eventsOf (dsp::Mode::grid, 0.0, in, 256);
+        const auto random = eventsOf (dsp::Mode::random, 0.6, in, 256);
+        const auto input = eventsOf (dsp::Mode::input, 0.0, in, 256);
+
+        report ("Scheduler RANDOM fires", ! random.empty(),
+                std::to_string (random.size()) + " events");
+        report ("Scheduler INPUT fires", ! input.empty(),
+                std::to_string (input.size()) + " events");
+
+        // Reproducible: same settings, same events, regardless of block size.
+        report ("Scheduler RANDOM is reproducible",
+                random == eventsOf (dsp::Mode::random, 0.6, in, 256), "");
+        report ("Scheduler INPUT is block-size invariant",
+                input == eventsOf (dsp::Mode::input, 0.0, in, 64), "");
+
+        // A mode that lands on the grid anyway is not a mode. Compare the
+        // spacing between consecutive events rather than the count, which
+        // probability alone could change.
+        const auto spread = [] (const std::vector<std::int64_t>& v)
+        {
+            if (v.size() < 3) return 0.0;
+            auto mean = 0.0;
+            for (size_t i = 1; i < v.size(); ++i)
+                mean += double (v[i] - v[i - 1]);
+            mean /= double (v.size() - 1);
+
+            auto variance = 0.0;
+            for (size_t i = 1; i < v.size(); ++i)
+            {
+                const auto d = double (v[i] - v[i - 1]) - mean;
+                variance += d * d;
+            }
+            return std::sqrt (variance / double (v.size() - 1)) / std::max (mean, 1e-9);
+        };
+
+        const auto gridSpread = spread (grid);
+        const auto randomSpread = spread (random);
+        report ("Scheduler RANDOM is not the grid", randomSpread > gridSpread + 0.1,
+                "spacing spread " + std::to_string (randomSpread).substr (0, 5)
+                + " vs grid " + std::to_string (gridSpread).substr (0, 5));
+
+        // INPUT should track the transients it was given, within the detector's
+        // hop. One onset per pulse, not a stream of them.
+        const auto period = 44100.0 * 60.0 / 140.0 / 4.0;
+        const auto expected = static_cast<size_t> (in.l.size() / period);
+        const auto perPulse = double (input.size()) / double (std::max<size_t> (expected, 1));
+        report ("Scheduler INPUT tracks the transients", perPulse > 0.5 && perPulse < 3.0,
+                std::to_string (input.size()) + " events for "
+                + std::to_string (expected) + " pulses");
+
+        // And it is reading the audio rather than running free: nothing
+        // arrives in INPUT mode when nothing arrives at the input. This is
+        // what separates a detector from a timer.
+        const auto onSilence = eventsOf (dsp::Mode::input, 0.0, makeSignal ("silence", 44100.0, 4.0), 256);
+        report ("Scheduler INPUT is silent on silence", onSilence.empty(),
+                std::to_string (onSilence.size()) + " events");
+
+        // A steady tone has one onset at its start and no more; a detector
+        // that fires on level rather than on change would run all the way
+        // through it.
+        const auto onTone = eventsOf (dsp::Mode::input, 0.0, makeSignal ("sine440", 44100.0, 4.0), 256);
+        report ("Scheduler INPUT does not fire on a steady tone", onTone.size() <= 3,
+                std::to_string (onTone.size()) + " events");
+    }
 }
 
 int main()
@@ -372,6 +505,8 @@ int main()
     test5();
     std::printf ("\n");
     test15();
+    std::printf ("\n");
+    testSchedulerModes();
 
     std::printf ("\nSQUELCH DSP VALIDATION: %s\n", failures == 0 ? "PASS" : "FAIL");
     if (warnings > 0)

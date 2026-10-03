@@ -134,6 +134,8 @@ void SquelchAudioProcessor::refreshReactionSettings()
 
     dsp::ScheduleSettings schedule;
     schedule.gridIndex = static_cast<int> (apvts.getRawParameterValue (ids::grid)->load());
+    schedule.mode = static_cast<dsp::Mode> (juce::jlimit (0, 3,
+                        static_cast<int> (apvts.getRawParameterValue (ids::mode)->load())));
     schedule.bpm = hostBpm;
     schedule.flux = value (ids::flux);
     schedule.probability = value (ids::probability);
@@ -239,6 +241,25 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     const auto reaction = squelch::reactionNames[currentReaction];
 
+    const auto fire = [this, reaction] (const squelch::dsp::ScheduledEvent& e)
+    {
+        if (reaction == "ALIEN")
+            alien.trigger (e.index, e.accent, e.pan, 0.0);
+        else if (reaction == "CHEMICAL")
+            chemical.setEvent (e.index);
+        else if (reaction == "RADIATION")
+            radiation.trigger (e.accent);
+
+        // Only a slid event uses the distance, and the scheduler places
+        // step k from k alone, so the next one is computable rather than
+        // needing audio lookahead. A step ahead is close enough: events
+        // inside a step are what MAX_SUB_EVENTS fans out.
+        const auto step = static_cast<std::int64_t> (scheduler.stepSeconds() * getSampleRate());
+        envelopes.trigger (e, std::max<std::int64_t> (step, 1));
+        placement.trigger (e);
+        midWobble.trigger();
+    };
+
     for (int sample = 0; sample < numSamples; ++sample)
     {
         const auto position = timelinePosition + sample;
@@ -247,26 +268,8 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         // block it landed in. Firing at the block start makes the output
         // depend on the host's buffer size.
         for (const auto& e : pendingEvents)
-        {
-            if (e.start != position)
-                continue;
-
-            if (reaction == "ALIEN")
-                alien.trigger (e.index, e.accent, e.pan, 0.0);
-            else if (reaction == "CHEMICAL")
-                chemical.setEvent (e.index);
-            else if (reaction == "RADIATION")
-                radiation.trigger (e.accent);
-
-            // Only a slid event uses the distance, and the scheduler places
-            // step k from k alone, so the next one is computable rather than
-            // needing audio lookahead. A step ahead is close enough: events
-            // inside a step are what MAX_SUB_EVENTS fans out.
-            const auto step = static_cast<std::int64_t> (scheduler.stepSeconds() * getSampleRate());
-            envelopes.trigger (e, std::max<std::int64_t> (step, 1));
-            placement.trigger (e);
-            midWobble.trigger();
-        }
+            if (e.start == position)
+                fire (e);
 
         const auto in = inputGain.getNextValue();
         const auto out = outputGain.getNextValue();
@@ -274,6 +277,10 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
         const auto dryL = buffer.getSample (0, sample) * in;
         const auto dryR = channels > 1 ? buffer.getSample (1, sample) * in : dryL;
+
+        // INPUT mode takes its events from onsets in the audio rather than
+        // from the grid, so it fires inside the sample loop.
+        scheduler.detectOnsets (std::max (std::abs (dryL), std::abs (dryR)), position, fire);
 
         // SLUDGE's oversampler lags by `latency`, so the dry path is delayed
         // by the same amount or the mix comb-filters the two against each

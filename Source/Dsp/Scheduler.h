@@ -52,6 +52,8 @@ namespace squelch::dsp
         bool slide { false };
     };
 
+    enum class Mode { grid, random, free, input };
+
     struct ScheduleSettings
     {
         int gridIndex { 8 };
@@ -62,16 +64,40 @@ namespace squelch::dsp
         double volatility { 0.0 };
         double containment { 0.0 };
         double subEventBias { 1.0 };
-        bool freeMode { false };
+        Mode mode { Mode::grid };
         std::uint64_t seed { 0 };
     };
 
     class Scheduler
     {
     public:
-        void prepare (double sampleRate) noexcept { sr = sampleRate; }
+        void prepare (double sampleRate) noexcept
+        {
+            sr = sampleRate;
+            randomCursor = 0.0;
+            randomStep = 0;
+            randomReady = false;
+            onsetEnvelope = 0.0;
+            onsetPrevious = 0.0;
+            onsetPeak = 1e-9;
+            onsetHold = 0.0;
+            onsetAt = 0.0;
+            framesSinceOnset = 1 << 20;
+            onsetIndex = 0;
+            hopCounter = 0;
+            queued = 0;
+        }
 
-        void configure (const ScheduleSettings& s) noexcept { settings = s; }
+        void configure (const ScheduleSettings& s) noexcept
+        {
+            // RANDOM accumulates its own step lengths, so a change of tempo
+            // or FLUX restarts the walk rather than retro-fitting it.
+            if (s.bpm != settings.bpm || s.flux != settings.flux
+                || s.gridIndex != settings.gridIndex || s.seed != settings.seed)
+                randomReady = false;
+
+            settings = s;
+        }
 
         double stepSeconds() const noexcept
         {
@@ -83,13 +109,25 @@ namespace squelch::dsp
             `emit` is called once per event and must not allocate. Steps are
             scanned with a margin either side because FLUX swing and jitter
             can move a step up to 0.8 of a step late or 0.3 early.
+
+            INPUT mode is not scanned this way: its events come from onsets in
+            the audio, so they arrive through `detectOnsets` instead.
         */
         template <typename Emit>
         void forRange (std::int64_t from, int length, Emit&& emit) const
         {
+            if (settings.mode == Mode::input)
+                return;
+
             const auto step = stepSeconds();
             if (step <= 0.0 || length <= 0)
                 return;
+
+            if (settings.mode == Mode::random)
+            {
+                advanceRandom (from, length, emit);
+                return;
+            }
 
             const auto stepSamples = step * sr;
             const auto first = static_cast<std::int64_t> (std::floor (from / stepSamples)) - 2;
@@ -99,19 +137,130 @@ namespace squelch::dsp
                 stepEvents (static_cast<std::uint64_t> (k), from, from + length, emit);
         }
 
+        /** INPUT mode: onsets from a half-wave-rectified flux envelope.
+
+            Call once per sample with the input's magnitude. The prototype
+            normalises flux by the whole render's maximum, which a stream does
+            not have, so this tracks a decaying running peak instead -- the
+            one place where INPUT cannot be bit-identical to the offline
+            version, and it is a normalisation choice rather than a mechanism.
+        */
+        template <typename Emit>
+        void detectOnsets (double magnitude, std::int64_t position, Emit&& emit)
+        {
+            if (settings.mode != Mode::input)
+                return;
+
+            // An onset's sub-events are spread across the step that follows
+            // it, so they are queued when it is detected and released at
+            // their own sample rather than all firing on the transient.
+            for (int i = 0; i < queued; )
+            {
+                if (queue[static_cast<size_t> (i)].start <= position)
+                {
+                    emit (queue[static_cast<size_t> (i)]);
+                    queue[static_cast<size_t> (i)] = queue[static_cast<size_t> (--queued)];
+                }
+                else
+                {
+                    ++i;
+                }
+            }
+
+            frameMax = std::max (frameMax, magnitude);
+            if (++hopCounter < kOnsetHop)
+                return;
+
+            hopCounter = 0;
+            const auto envelope = frameMax;
+            frameMax = 0.0;
+
+            auto flux = envelope - onsetPrevious;
+            onsetPrevious = envelope;
+            if (flux < 0.0)
+                flux = 0.0;
+
+            onsetPeak = std::max (onsetPeak * kOnsetPeakDecay, flux);
+            const auto normalised = flux / std::max (onsetPeak, 1e-9);
+
+            const auto minimumGap = static_cast<int> (0.045 * sr / kOnsetHop);
+            ++framesSinceOnset;
+
+            const auto rising = normalised >= kOnsetThreshold && framesSinceOnset >= minimumGap;
+
+            if (! rising)
+                return;
+
+            framesSinceOnset = 0;
+            onsetAt = double (position) / sr;
+
+            const auto window = static_cast<std::int64_t> (stepSeconds() * sr) + 1;
+            stepEvents (onsetIndex, position, position + window,
+                        [this] (const ScheduledEvent& e)
+                        {
+                            if (queued < int (kQueueSize))
+                                queue[static_cast<size_t> (queued++)] = e;
+                        });
+            ++onsetIndex;
+        }
+
     private:
+        static constexpr int kOnsetHop = 256;
+        static constexpr double kOnsetThreshold = 0.12;
+        static constexpr double kOnsetPeakDecay = 0.9995;
+
+        /** RANDOM's step lengths accumulate, so step k cannot be computed
+            from k alone the way GRID's can. The walk is carried forward
+            instead, which means it is correct for linear playback and
+            restarts on a transport jump rather than silently desyncing.
+        */
+        template <typename Emit>
+        void advanceRandom (std::int64_t from, int length, Emit&& emit) const
+        {
+            const auto step = stepSeconds();
+
+            if (! randomReady || randomCursor * sr > double (from) + length)
+            {
+                randomCursor = 0.0;
+                randomStep = 0;
+                randomReady = true;
+            }
+
+            while (randomCursor * sr < double (from) + length)
+            {
+                const auto at = static_cast<std::int64_t> (randomCursor * sr);
+                if (at >= from)
+                    stepEvents (randomStep, from, from + length, emit);
+
+                const auto spread = 0.25 + 1.75 * rng::urand ({ settings.seed, 102, randomStep });
+                randomCursor += step * (1.0 - settings.flux + settings.flux * spread * 2.0);
+                ++randomStep;
+
+                if (randomStep > (1u << 24))
+                    break;
+            }
+        }
+
         /// Where step k sits, in seconds. Derived from k alone.
         double timeOfStep (std::uint64_t k) const noexcept
         {
             const auto step = stepSeconds();
 
-            if (settings.freeMode)
+            if (settings.mode == Mode::free)
             {
                 const auto freeStep = step * kFreeRateRatio;
                 const auto jitter = 0.3 * settings.flux * freeStep
                                   * rng::ubipolar ({ settings.seed, 103, k });
                 return double (k) * freeStep + jitter;
             }
+
+            if (settings.mode == Mode::random)
+                return randomCursor;
+
+            // INPUT's events are anchored to the onset that produced them,
+            // not to a position on the grid.
+            if (settings.mode == Mode::input)
+                return onsetAt;
 
             const auto swing = (k % 2) ? 0.5 * settings.flux * step : 0.0;
             const auto jitter = 0.3 * settings.flux * step
@@ -120,7 +269,8 @@ namespace squelch::dsp
         }
 
         template <typename Emit>
-        void stepEvents (std::uint64_t k, std::int64_t from, std::int64_t to, Emit&& emit) const
+        void stepEvents (std::uint64_t k, std::int64_t from, std::int64_t to, Emit&& emit,
+                         double spreadScale = 0.9) const
         {
             const auto density = 1.0 - kDensitySuppression * settings.containment;
             const auto probability = settings.probability * density;
@@ -139,7 +289,7 @@ namespace squelch::dsp
 
             for (int s = 0; s < count; ++s)
             {
-                auto offset = (double (s) / count) * step * 0.9;
+                auto offset = (double (s) / count) * step * spreadScale;
                 offset += step * kTimingJitter * settings.volatility
                         * rng::ubipolar ({ settings.seed, 7, k, std::uint64_t (s) });
 
@@ -165,5 +315,19 @@ namespace squelch::dsp
 
         double sr { 44100.0 };
         ScheduleSettings settings;
+
+        // RANDOM carries its walk forward; INPUT carries its onset detector.
+        mutable double randomCursor { 0.0 };
+        mutable std::uint64_t randomStep { 0 };
+        mutable bool randomReady { false };
+
+        double frameMax { 0.0 }, onsetEnvelope { 0.0 }, onsetPrevious { 0.0 };
+        double onsetPeak { 1e-9 }, onsetHold { 0.0 }, onsetAt { 0.0 };
+        int framesSinceOnset { 1 << 20 }, hopCounter { 0 };
+        std::uint64_t onsetIndex { 0 };
+
+        static constexpr std::size_t kQueueSize = 16;
+        std::array<ScheduledEvent, kQueueSize> queue {};
+        int queued { 0 };
     };
 }
