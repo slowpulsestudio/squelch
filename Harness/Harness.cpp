@@ -19,6 +19,7 @@
 #include "../Source/Dsp/Filters.h"
 #include "../Source/Dsp/Fission.h"
 #include "../Source/Dsp/Radiation.h"
+#include "../Source/Dsp/Reverb.h"
 #include "../Source/Dsp/Oversampler.h"
 #include "../Source/Dsp/Placement.h"
 #include "../Source/Dsp/OutputStage.h"
@@ -601,7 +602,27 @@ int main()
                 values.push_back (v.send);
             }
         }
-        printArray ("placement", values, true);
+        printArray ("placement", values);
+    }
+
+    // Reverb: an impulse excites every comb and allpass at once.
+    {
+        dsp::Reverb reverb;
+        reverb.prepare (sampleRate);
+        reverb.set (0.6, 0.35);
+
+        std::vector<double> values;
+        for (int i = 0; i < 20000; ++i)
+        {
+            double l = 0.0, r = 0.0;
+            reverb.process (i == 0 ? 1.0 : 0.0, i == 0 ? 0.7 : 0.0, l, r);
+            if (i % 50 == 0)
+            {
+                values.push_back (l);
+                values.push_back (r);
+            }
+        }
+        printArray ("reverb", values, true);
     }
 
     std::printf ("}\n");

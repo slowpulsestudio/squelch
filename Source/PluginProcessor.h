@@ -10,6 +10,7 @@
 #include "Dsp/Placement.h"
 #include "Dsp/Fission.h"
 #include "Dsp/Radiation.h"
+#include "Dsp/Reverb.h"
 #include "Dsp/Scheduler.h"
 #include "Dsp/Sludge.h"
 
@@ -76,6 +77,8 @@ private:
     squelch::dsp::StereoSpread stereoSpread;
     squelch::dsp::Voice voiceL, voiceR;
     squelch::dsp::UnityMatch unityMatch;
+    squelch::dsp::Reverb afterglow;
+    double afterglowAmount { 0.0 };
     squelch::dsp::PeakLimiter limiter;
 
     /// Only SLUDGE carries its own oversampler lag. The others are delayed by

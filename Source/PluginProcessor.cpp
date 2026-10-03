@@ -78,6 +78,7 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     voiceL.prepare (sampleRate);
     voiceR.prepare (sampleRate);
     unityMatch.prepare (sampleRate);
+    afterglow.prepare (sampleRate);
     limiter.prepare (sampleRate);
 
     // Worst case is one block of the shortest grid step, each fanning out to
@@ -169,6 +170,9 @@ void SquelchAudioProcessor::refreshReactionSettings()
     driveStage.set (value (ids::drive), driveWeights[index]);    collimatorL.set (value (ids::collimator));
     collimatorR.set (value (ids::collimator));
     stereoSpread.set (value (ids::fallout) * stereoWeights[index]);
+
+    afterglowAmount = value (ids::afterglow);
+    afterglow.set (afterglowAmount, 0.45);
 
     static constexpr double persistence[] { 0.60, 0.60, 1.00, 0.85, 0.50 };
     static constexpr double decayLo[] { 0.025, 0.08, 0.25, 0.05, 0.04 };
@@ -319,6 +323,16 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const auto place = placement.process();
         wetL *= place.panL;
         wetR *= place.panR;
+
+        if (afterglowAmount > 0.0)
+        {
+            // Each event's own send decides how far back it sits, so some
+            // arrive close and dry while others wash back.
+            double glowL = 0.0, glowR = 0.0;
+            afterglow.process (wetL * place.send, wetR * place.send, glowL, glowR);
+            wetL += glowL * (0.9 * afterglowAmount);
+            wetR += glowR * (0.9 * afterglowAmount);
+        }
 
         stereoSpread.process (wetL, wetR, wetL, wetR);
         wetL = voiceL.process (wetL);

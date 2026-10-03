@@ -422,6 +422,21 @@ def _placement_reference() -> np.ndarray:
     return rows[::40].reshape(-1)
 
 
+def _reverb_reference() -> np.ndarray:
+    """Source/Dsp/Reverb.h against reverb.reverb.
+
+    An impulse, so every comb and allpass is excited at once and nothing is
+    hidden behind the others. All the delay lines start empty in both.
+    """
+    from .reverb import reverb
+
+    n = 20000
+    x = np.zeros((n, 2))
+    x[0, 0] = 1.0
+    x[0, 1] = 0.7
+    return reverb(x, SR, decay=0.6, damping=0.35)[::50].reshape(-1)
+
+
 def expectations() -> dict:
     """What the C++ should have produced."""
     from .filters import _rbj_highpass, _rbj_lowpass, _rbj_notch
@@ -461,6 +476,7 @@ def expectations() -> dict:
         "scheduler": _scheduler_reference(),
         "envelopes": _envelopes_reference(),
         "placement": _placement_reference(),
+        "reverb": _reverb_reference(),
     }
 
 
