@@ -154,24 +154,97 @@ the voice.
 
 ### What is currently implemented
 
-Not a specification — a record of where the code stands. Every reaction runs
-the one ladder, and these are the only two values per reaction that no control
-can reach. Everything else about the filter is a knob range.
+Not a specification — a record of where the code stands.
 
-| reaction | f_base | tap |
+Five reactions, five different architectures. This is a change from an earlier
+build in which all five ran the same ladder and differed only in base frequency
+and filter tap; on identical settings nine of the ten pairs then sat between
+−6.3 and −11.3 dB apart and RADIATION/CHEMICAL at −20.1 dB were the same sound.
+Everything landing within 5 dB of everything else is the signature of one
+algorithm with the dials moved, and it was.
+
+| reaction | mechanism | the thing that makes it itself |
 |---|---|---|
-| RADIATION | 220 Hz | 24 dB lowpass |
-| FISSION | 320 Hz | 3-pole negative, hollow |
-| SLUDGE | 100 Hz | lowpass with a 2-pole lift |
-| CHEMICAL | 180 Hz | 24 dB lowpass |
-| ALIEN | 400 Hz | shallow, bright |
+| CHEMICAL | ladder with in-loop saturation, 180 Hz | an event-held register: one random value per event, constant until the next |
+| RADIATION | quadrature resonator, 220 Hz | a continuous correlated state: evolves every sample, R[1] = 0.999 |
+| FISSION | two coupled branches with opposed detuning, 320 Hz | branches that interfere with each other, not a pan |
+| SLUDGE | oversampled asymmetric saturation, 100 Hz | subharmonics generated at f_h/2 and f_h/4 from its own reactor |
+| ALIEN | event-gated self-FM oscillator, 400 Hz | an actual source: output from silence, silence with nothing scheduled |
 
-Each also carries its own accent pattern and noise bed texture.
+CHEMICAL and RADIATION are the pair worth watching, because they are the same
+shape of idea — a resonator driven by a random number — and the whole
+difference between them is the shape of that number in time. The suite reads
+both states directly rather than arguing from spectra: CHEMICAL's register is
+constant for 0.999 of samples, RADIATION's state for 0.000.
 
-Measured on identical settings, nine of the ten reaction pairs sit between
-−6.3 and −11.3 dB apart, and RADIATION/CHEMICAL at −20.1 dB are the same sound.
-Genuinely different processes would scatter; everything landing within 5 dB of
-everything else is the signature of one algorithm with the dials moved.
+The whole signal path runs in `processBlock`: scheduler, engine, envelopes,
+placement, AFTERGLOW, drive, collimation, pan, stereo spread, mid wobble,
+voicing, unity match, mix, limiter. The scheduler has all four modes.
+
+
+## Validation
+
+Three layers, each answering a question the others cannot.
+
+```sh
+./.venv/bin/python -m prototype.checks                            # 39 behavioural checks
+./build/SquelchHarness | ./.venv/bin/python -m prototype.compare  # 27 numerical primitives
+./build/SquelchValidate                                           # dsp-testing.md, Tests 2-20
+./scripts/test1.sh                                                # dsp-testing.md, Test 1
+```
+
+The **prototype** in `prototype/` is the contract. It is NumPy, it is readable,
+and it is what the C++ has to agree with.
+
+The **comparison harness** proves the port computes the same numbers, to 1e-9
+relative, on 27 primitives from the oversampler up to the limiter. It cannot
+see a coefficient hardcoded in samples, a state that does not survive a block
+boundary, or output that is not reproducible, because it only ever runs one
+configuration.
+
+The **validation suite** is what looks for those. It covers `dsp-testing.md`
+Tests 2 through 20 — finite output, determinism, block-size and sample-rate
+invariance, each reaction's defining mechanism, five-reaction differentiation,
+control sensitivity, monotonicity, reset, silence, spectral holes, golden
+renders — and writes `test-results/summary.json`, `summary.md` and WAVs.
+`scripts/test1.sh` runs pluginval at strictness 10 across five sample rates and
+seven block sizes.
+
+### What it currently says
+
+99 passed, 0 failed, 10 warnings.
+
+A warning is a measurement that is real, repeatable, and not what the
+specification asks for. All ten match the prototype exactly, so none of them is
+a port fault, and all ten are decisions about how SQUELCH should sound rather
+than mistakes in translating it. They are counted and printed and never hidden
+behind the overall verdict.
+
+- **Three controls are inert because a limit became the operating point.**
+  RADIATION's DECAY and EXPOSURE and FISSION's DECAY produce bit-identical
+  output, −300 dB apart, across their whole travel. `decay_time` is a
+  resonator's 1/e time constant, so the bandwidth realising it runs 12.7 Hz
+  down to 1.06 Hz for RADIATION and 4.0 Hz down to 0.53 Hz for FISSION — and
+  both are floored at 5 Hz, which is above FISSION's entire range, and then
+  ceilinged at r = 0.99 and 0.995. A floor of 0.2 Hz and a ceiling of 0.99995
+  bracket the formula instead of replacing it and bring all three alive, but
+  the tails then run to seconds and the output stage's level match wanders
+  7.7 dB chasing them. The cap is load-bearing: it is hiding a level-matching
+  weakness downstream, and which of the two to fix is a sound decision.
+- **SLUDGE's DECAY is inert because its two followers are the wrong way
+  round.** It reaches the output only through the snap `q − r`, and a snap is a
+  fast tracker minus a slow one. Here `q` runs at 5 Hz and `r`, the one DECAY
+  sets, at 40 down to 12 Hz — so `r` just follows `q` and the difference sits
+  at the noise floor.
+- **FISSION's comb does not move.** Both modulators are AR(1) states normalised
+  by DC gain, `(1−a)·noise + a·m`, which at a 1.3 s time constant gives a
+  steady-state deviation of 0.0017 rather than the ±1 the term is written as if
+  it spans. The delay modulation is a quarter of a sample. Energy
+  normalisation, `sqrt(1−a²)`, is what these want.
+- **SLUDGE's TOXICITY moves towards symmetry.** The asymmetry is real and
+  present throughout, but opening the control raises the odd orders faster than
+  the even ones, so even/odd falls from 4.5 to 0.1. **HALF-LIFE** moves the
+  post-input tail by 0.005 dB across its full range.
 
 
 ## Constraints learned the hard way
@@ -200,6 +273,25 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
 - A knob range is not a character. DECAY, EXPOSURE, TOXICITY and SPREAD sweep
   per-reaction ranges, so anything expressed through them is reachable from
   another reaction and cannot be what distinguishes one.
+- A limit that applies at every setting is not a limit, it is the value. Three
+  controls were clamped flat and the clamp had been *tightened* at some point
+  to fix exactly that problem, which only moved which value they were pinned
+  to. Check what fraction of a control's travel a safety limit is in force
+  over before trusting that it is one.
+- A control that acts only on what another control creates cannot be measured
+  from a baseline that creates none. SLUDGE's DECAY reaches the output through
+  a term REACTIVITY scales, so at REACTIVITY = 0 it is inert by construction
+  and a sweep from the default proves nothing.
+- Measure the mechanism, not a number near it. Dividing output by input leaves
+  the whole filter response, which for a lowpass peaks at DC whether it
+  resonates or not; dividing by the same filter with its feedback off is what
+  answers the question. A long analysis window averages a moving comb into a
+  smear and reports it as shallower, not deeper. A tolerance as wide as a
+  parameter's own range cannot fail.
+- A test that cannot fail is worse than no test, because it reads as evidence.
+  Before trusting a threshold, check what reference it is implicitly using —
+  an earlier differentiation test scored a reaction against *itself* as more
+  different than two genuinely distinct ones, and passed both.
 
 
 
