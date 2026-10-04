@@ -88,6 +88,10 @@ SLUDGE_F_Q_HZ = 5.0
 SLUDGE_F_R_LO_HZ = 45.0
 SLUDGE_F_R_HI_HZ = 12.0
 
+#: Body level below which there is nothing to snap about, so the fraction is
+#: not a ratio of two numbers that are both noise.
+SLUDGE_SNAP_FLOOR = 1e-3
+
 #: HALF-LIFE's long reactor memory, in seconds.
 SLUDGE_TAU_M_LO_S = 0.3
 SLUDGE_TAU_M_HI_S = 5.0
@@ -514,8 +518,29 @@ def _sludge_engine(
     f_r = SLUDGE_F_R_LO_HZ + (SLUDGE_F_R_HI_HZ - SLUDGE_F_R_LO_HZ) * (
         decay_time / profile.decay_hi_s
     )
-    r = _one_pole_hz(q, f_r, sr)
-    s_snap = q - r
+    # Off e, not off q. maths.md writes r as a filter of q and in the same
+    # breath says r "moves first and q follows", which a cascade cannot do:
+    # q is r's input, so r can only ever lag it. Filtering a 5 Hz-limited
+    # signal at 12-45 Hz changed almost nothing, q - r sat at the noise floor,
+    # and DECAY -- which reaches the output through this term alone -- measured
+    # as inert at -79 dB with REACTIVITY wide open.
+    #
+    # In parallel off the envelope the narrative is the behaviour: on a
+    # transient the fast state moves first, the slow one lags, q - r swings
+    # negative and settles back as q catches up. That is the "temporary
+    # reverse movement" the viscous snapback section asks for, and it is why
+    # f_r > f_q is the right constraint once the states are siblings rather
+    # than a chain.
+    r = _one_pole_hz(e, f_r, sr)
+    # As a fraction of the body, not as a raw difference. delta_snap is an
+    # exponent in octaves, so s_snap has to be O(1) for it to mean anything,
+    # and maths.md writes q - r as if the envelope were normalised. It is not:
+    # e is max|x|, which on real material sits around 0.15, so the raw
+    # difference is O(0.05) and the whole 0.4-octave range of REACTIVITY moves
+    # the cutoff by 2%. Dividing by the body makes it a relative deviation --
+    # a transient that doubles the envelope reads the same whatever the input
+    # gain is -- and takes DECAY's span from 1.0-1.9% to 6.0-10.7%.
+    s_snap = np.clip((q - r) / np.maximum(q, SLUDGE_SNAP_FLOOR), -1.0, 1.0)
 
     tau_m = SLUDGE_TAU_M_LO_S + (SLUDGE_TAU_M_HI_S - SLUDGE_TAU_M_LO_S) * p.half_life
     a_m = float(np.exp(-1.0 / max(tau_m * sr, 1.0)))

@@ -229,6 +229,7 @@ namespace
 
     int failures = 0;
     int warnings = 0;
+    int skipped = 0;
 
     /// Every line, kept so Test 18 can write the same results to disk that
     /// Test 20 reads out. A failure recorded here cannot be hidden behind an
@@ -257,6 +258,19 @@ namespace
         ++warnings;
         results.push_back ({ test, "WARN", detail });
         std::printf ("[WARN] %-28s %s\n", test.c_str(), detail.c_str());
+    }
+
+    /** For an assertion that does not apply to the thing under it, as opposed
+        to one that applies and is not met. Counted apart from both, because
+        folding it into the passes would inflate them with a test that never
+        ran and folding it into the warnings would report a working control as
+        suspect.
+    */
+    void notApplicable (const std::string& test, const std::string& detail)
+    {
+        ++skipped;
+        results.push_back ({ test, "N/A", detail });
+        std::printf ("[ N/A] %-28s %s\n", test.c_str(), detail.c_str());
     }
 
     double maxAbs (const Stereo& s)
@@ -1701,7 +1715,7 @@ namespace
             return double (level.size()) / 20.0;
         };
 
-        for (const char* reaction : { "RADIATION", "FISSION", "SLUDGE", "ALIEN" })
+        for (const char* reaction : { "RADIATION", "FISSION", "ALIEN" })
         {
             auto gated = makeSignal ("noise", sr, 4.0);
             for (size_t i = size_t (sr); i < gated.l.size(); ++i)
@@ -1714,7 +1728,6 @@ namespace
                 const std::string name { reaction };
                 if (name == "RADIATION")    r.radiation.decay = decay;
                 else if (name == "FISSION") r.fission.decay = decay;
-                else if (name == "SLUDGE")  r.sludge.decay = decay;
                 else                        r.alien.decay = decay;
 
                 tails.push_back (fallSeconds (renderWith (reaction, gated, sr, 256, r), 40.0));
@@ -1726,15 +1739,33 @@ namespace
 
             // "Not consistently", so a non-monotonic middle is allowed and
             // only a control that runs backwards end to end is rejected.
-            if (tails.back() == tails.front())
-                warn (std::string ("Test 13 ") + reaction + " DECAY lengthens",
-                      "time to fall 40 dB does not move: " + detail
-                      + "-- see the Test 12 warning for this control");
-            else
-                report (std::string ("Test 13 ") + reaction + " DECAY lengthens",
-                        tails.back() >= tails.front(),
-                        "time to fall 40 dB: " + detail);
+            report (std::string ("Test 13 ") + reaction + " DECAY lengthens",
+                    tails.back() >= tails.front(),
+                    "time to fall 40 dB: " + detail);
         }
+
+        // SLUDGE has no tail to measure. It is a filter on the input, and its
+        // own reactor oscillator keeps running underneath at half amplitude
+        // whatever the input does, so the render never falls 40 dB and the
+        // figure above read 4.00 s at every setting regardless.
+        //
+        // Its DECAY sets the snap's upper corner, 40 Hz down to 12 Hz, which
+        // narrows the band between the two followers so the snap gets both
+        // shallower and slower. Measured on the followers themselves that is
+        // clean and monotonic -- depth 0.367 to 0.209, 20 ms self-similarity
+        // 0.52 to 0.69 -- but it does not survive into the audio in any form
+        // this suite can read. The cutoff moves 6 to 10.7% inside a reaction
+        // that is also generating subharmonics, saturating asymmetrically and
+        // sweeping the same cutoff from its memory state; spectral centroid
+        // trajectories and band-envelope autocorrelation were both tried and
+        // neither orders the three settings.
+        //
+        // So the direction is not asserted. That the control does something
+        // is Test 12's job and it passes there. Claiming a direction this
+        // cannot see would be the test agreeing with itself.
+        notApplicable ("Test 13 SLUDGE DECAY lengthens",
+                       "no tail: SLUDGE is a filter and its reactor floor never decays. "
+                       "The snap it does control is not recoverable from the output");
 
         // EXPOSURE must not consistently reduce the mechanism it controls.
         // For FISSION that mechanism is the branch coupling, measured as the
@@ -1950,13 +1981,15 @@ namespace
         // Recorded from the build that introduced this test. `--golden`
         // reprints them, so updating a reference is an explicit act with a
         // diff rather than something a test does to itself on the way past.
-        // Regenerated when DECAY was unpinned: RADIATION and FISSION both
-        // changed, which is what a golden render is for. SLUDGE, ALIEN and
-        // CHEMICAL carry the same hashes as before, which is the other half
-        // of what it is for.
+        // Regenerated when DECAY was unpinned and again when SLUDGE's snap
+        // was repaired. SLUDGE's hash moved while its RMS, peak and centroid
+        // held to 0.000 dB, which is the tolerance fallback doing exactly what
+        // it is for: the snap is scaled by REACTIVITY and this render sits at
+        // its default, so the mechanism changed and the delivered sound at
+        // these settings did not.
         static const Golden expected[]
         {
-            { "SLUDGE", 17395081125360146375ull, 0.37446175893272499, 0.76230055483264159, 3124.0562488878541 },
+            { "SLUDGE", 10411846259040508935ull, 0.37445541456944187, 0.762261100550225, 3123.81687478704 },
             { "ALIEN", 17311358974143198345ull, 0.79954724574488933, 3.316452932901178, 6470.0094929941306 },
             { "CHEMICAL", 2381812392278790764ull, 0.028736765020524146, 0.13045223541616632, 2032.6573066838034 },
             { "RADIATION", 3548395089477890039ull, 0.74647225518906724, 2.9618476409426102, 1165.1372183544515 },
@@ -2035,8 +2068,10 @@ namespace
             { "SLUDGE",    "generated subharmonics, asymmetric nonlinear content, long memory",
               "Test 9: energy at f_h/2 and f_h/4 from an input containing neither, "
               "59 dB of f_h/2 over f_h proving the 4pi phase domain, even orders "
-              "present throughout, and a body that persists past the input. TOXICITY "
-              "and HALF-LIFE directions -- see the Test 9 warnings" },
+              "present throughout, and a body that persists past the input. The snap "
+              "is a real transient term again -- see the Test 13 N/A for what is "
+              "still not measurable about it. TOXICITY and HALF-LIFE directions -- "
+              "see the Test 9 warnings" },
             { "ALIEN",     "an actual oscillator, FM/AM and reaction-specific timing",
               "Test 10: silent with nothing scheduled and 3.3 peak with events, pitch "
               "within 0 cents of the register for every event index, FM sidebands "
@@ -2113,6 +2148,7 @@ namespace
             json << "  \"passed\": " << passes << ",\n";
             json << "  \"failed\": " << failures << ",\n";
             json << "  \"warnings\": " << warnings << ",\n";
+            json << "  \"notApplicable\": " << skipped << ",\n";
             json << "  \"sampleRate\": " << kGoldenSampleRate << ",\n";
             json << "  \"blockSize\": " << kGoldenBlockSize << ",\n";
             json << "  \"seed\": " << Rig {}.seed << ",\n";
@@ -2139,7 +2175,8 @@ namespace
             std::ofstream md ("test-results/summary.md");
             md << "# SQUELCH DSP validation\n\n";
             md << "**" << verdict << "** — " << passes << " passed, " << failures
-               << " failed, " << warnings << " warnings.\n\n";
+               << " failed, " << warnings << " warnings, " << skipped
+               << " not applicable.\n\n";
             md << "Rendered at " << kGoldenSampleRate << " Hz in blocks of " << kGoldenBlockSize
                << ", seed " << Rig {}.seed << ", build `" << buildId << "`.\n\n";
 
@@ -2241,6 +2278,8 @@ int main (int argc, char** argv)
     std::printf ("\nSQUELCH DSP VALIDATION: %s\n", failures == 0 ? "PASS" : "FAIL");
     if (warnings > 0)
         std::printf ("%d warning(s)\n", warnings);
+    if (skipped > 0)
+        std::printf ("%d assertion(s) not applicable\n", skipped);
 
     test20();
     test18 (buildId);

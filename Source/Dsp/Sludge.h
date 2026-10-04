@@ -112,8 +112,13 @@ namespace squelch::dsp
             const auto e = std::max (std::abs (xL), std::abs (xR));
 
             const auto q = qFilter.process (e, gQ);
-            const auto r = rFilter.process (q, gR);
-            const auto sSnap = q - r;
+            // Off e, not off q: r is q's sibling, not its child. As a cascade
+            // r could only lag q, so q - r sat at the noise floor and DECAY,
+            // which reaches the output through this term alone, did nothing.
+            const auto r = rFilter.process (e, gR);
+            // A fraction of the body, not a raw difference: deltaSnap is an
+            // exponent in octaves, so this has to be O(1) to mean anything.
+            const auto sSnap = std::clamp ((q - r) / std::max (q, kSnapFloor), -1.0, 1.0);
 
             const auto m = mFilter.process (q, gM);
             const auto mB = std::tanh (m);
@@ -169,6 +174,7 @@ namespace squelch::dsp
         static constexpr double kFQHz = 5.0;
         static constexpr double kFRLoHz = 45.0;
         static constexpr double kFRHiHz = 12.0;
+        static constexpr double kSnapFloor = 1e-3;
         static constexpr double kTauMLoS = 0.3;
         static constexpr double kTauMHiS = 5.0;
         static constexpr double kGamma = 0.6;

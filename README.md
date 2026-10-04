@@ -216,20 +216,14 @@ picture and identical in a table.
 
 ### What it currently says
 
-99 passed, 0 failed, 5 warnings.
+99 passed, 0 failed, 3 warnings, 1 assertion not applicable.
 
 A warning is a measurement that is real, repeatable, and not what the
-specification asks for. All five match the prototype exactly, so none of them
-is a port fault, and all five are decisions about how SQUELCH should sound
+specification asks for. All three match the prototype exactly, so none of them
+is a port fault, and all three are decisions about how SQUELCH should sound
 rather than mistakes in translating it. They are counted and printed and never
 hidden behind the overall verdict.
 
-- **SLUDGE's DECAY is inert because its two followers are the wrong way
-  round.** It reaches the output only through the snap `q − r`, and a snap is a
-  fast tracker minus a slow one. Here `q` runs at 5 Hz and `r`, the one DECAY
-  sets, at 40 down to 12 Hz — so `r` just follows `q` and the difference sits
-  at the noise floor. −79 dB with REACTIVITY, which scales the term, held wide
-  open.
 - **FISSION's comb does not move.** Both modulators are AR(1) states normalised
   by DC gain, `(1−a)·noise + a·m`, which at a 1.3 s time constant gives a
   steady-state deviation of 0.0017 rather than the ±1 the term is written as if
@@ -237,12 +231,17 @@ hidden behind the overall verdict.
   normalisation, `sqrt(1−a²)`, is what these want.
 - **SLUDGE's TOXICITY moves towards symmetry.** The asymmetry is real and
   present throughout, but opening the control raises the odd orders faster than
-  the even ones, so even/odd falls from 4.5 to 0.1. **HALF-LIFE** moves the
+  the even ones, so even/odd falls from 4.3 to 0.1. **HALF-LIFE** moves the
   post-input tail by 0.005 dB across its full range.
+
+The not-applicable one is Test 13's "higher DECAY should not shorten the tail",
+asked of SLUDGE, which has no tail: it is a filter on the input and its own
+reactor oscillator never decays. Counted apart from the passes, because an
+assertion that never ran is not a pass.
 
 ### What was fixed
 
-RADIATION's DECAY and EXPOSURE and FISSION's DECAY used to produce
+**RADIATION's DECAY and EXPOSURE, and FISSION's DECAY**, used to produce
 bit-identical output, −300 dB apart, across their whole travel. `decay_time` is
 a t60 — which is what a profile written as 0.025 to 0.3 seconds reads as — but
 the bandwidth realising it was computed as `1/(pi*tau)`, the 1/e form, which
@@ -269,6 +268,28 @@ above it was fixed:
    0.00 dB — and AFTERGLOW looked inert at 0.2 dB while actually stretching the
    render's decay from 0.70 s to 3.80 s. Both now ask for what the chain
    controls rather than what it normalises away.
+
+**SLUDGE's DECAY** was dead for an unrelated reason, and in two stages.
+[maths.md](maths.md) writes the snap state `r` as a filter of `q` and in the
+same breath says `r` "moves first and `q` follows" — which a cascade cannot do,
+since `q` is `r`'s input and `r` can only lag it. Filtering a 5 Hz-limited
+signal at 12–45 Hz changed almost nothing and `q − r` sat at the noise floor.
+In parallel off the envelope, the narrative becomes the behaviour: the fast
+state moves first, the slow one lags, and the difference swings and settles —
+the "temporary reverse movement" the spec asks for. Then the depth: `Δ_snap` is
+an exponent in octaves, so `s_snap` has to be O(1), but `e` is `max|x|` and sits
+around 0.15 on real material, so the raw difference moved the cutoff 2%. As a
+fraction of the body it is scale-invariant and DECAY spans 6% to 10.7%.
+
+The control went from −79 dB to −59 dB of effect and now passes Test 12. Its
+*direction* is still not assertable from the audio: the snap is a small cutoff
+wobble inside a reaction that is simultaneously generating subharmonics,
+saturating asymmetrically and sweeping the same cutoff from its memory state.
+Measured on the followers themselves it is clean and monotonic — depth 0.367 to
+0.209, 20 ms self-similarity 0.52 to 0.69 — but spectral centroid trajectories
+and band-envelope autocorrelation were both tried on the output and neither
+orders the three settings. Claiming a direction the suite cannot see would be
+the test agreeing with itself.
 
 
 ## Constraints learned the hard way
@@ -325,6 +346,17 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
   stage downstream of RADIATION had been set against a resonator that a clamp
   held at one value, so the first time the control actually moved, four
   separate stages turned out to be depending on the bug.
+- When a specification's equations and its prose disagree, the prose is
+  usually describing the intent and the equations the mistake. maths.md wrote
+  SLUDGE's snap as a cascade and then described the two states as racing each
+  other, which only a parallel pair can do.
+- A term written as a bare difference of envelopes is only O(1) if the
+  envelope is normalised. `max|x|` sits near 0.15 on real material, so an
+  exponent in octaves applied to `q − r` moved the filter 2%. Take the
+  fraction, not the difference.
+- "Not applicable" is a third outcome and worth having. Folding it into the
+  passes inflates them with assertions that never ran; folding it into the
+  warnings reports a working control as suspect.
 
 
 
