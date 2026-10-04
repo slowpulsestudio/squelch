@@ -96,10 +96,31 @@ SLUDGE_SNAP_FLOOR = 1e-3
 SLUDGE_TAU_M_LO_S = 0.3
 SLUDGE_TAU_M_HI_S = 5.0
 
-#: Asymmetry of SLUDGE's saturator. Fixed: TOXICITY drives the drive amount,
-#: not the asymmetry itself, which is what gives it even-order content CHEMICAL's
-#: symmetric tanh cannot produce.
-SLUDGE_GAMMA = 0.6
+#: The envelope level M is measured against before tanh. maths.md writes
+#: M_b = tanh(M) as if M were normalised, and it is not: q is a lowpassed
+#: max|x| and sits around 0.17 on real material, so tanh never left its linear
+#: region and the whole molasses movement was 0.2 of the 1.17 octaves SPREAD
+#: makes available. Typical programme material sits near this, so the memory
+#: runs at its designed depth there and saturates gracefully above it.
+SLUDGE_MEMORY_REF = 0.25
+
+#: Asymmetry of SLUDGE's saturator, swept by TOXICITY. The asymmetry is what
+#: produces even-order content that CHEMICAL's symmetric tanh cannot, so the
+#: control for it has to reach the asymmetry and not only the drive.
+#:
+#: It used to be fixed at 0.6 with TOXICITY driving delta alone, and that put
+#: the control backwards. Raising delta pushes both halves of the curve toward
+#: their own limits, so the even orders saturate while the odd ones keep
+#: climbing: even/odd fell from 4.3 to 0.1 across the range, which is to say
+#: opening TOXICITY moved the sound TOWARDS symmetry. Sweeping gamma with it
+#: instead gives 1.13 to 1.55, with the even orders themselves up seventeen
+#: times and the odd ones still rising, so it gets dirtier as well as more
+#: asymmetric.
+#:
+#: 0.9 rather than 1.0 at the bottom so there is measurable even-order content
+#: at every setting, which is what Test 9 asks of the stage.
+SLUDGE_GAMMA_LO = 0.9
+SLUDGE_GAMMA_HI = 0.1
 
 #: Subharmonic mix weights for the /2 and /4 components. Fixed so the
 #: generator is always present rather than being a knob some setting zeroes.
@@ -545,7 +566,7 @@ def _sludge_engine(
     tau_m = SLUDGE_TAU_M_LO_S + (SLUDGE_TAU_M_HI_S - SLUDGE_TAU_M_LO_S) * p.half_life
     a_m = float(np.exp(-1.0 / max(tau_m * sr, 1.0)))
     m = lfilter([1.0 - a_m], [1.0, -a_m], q)
-    m_b = np.tanh(m)
+    m_b = np.tanh(m / SLUDGE_MEMORY_REF)
 
     # Slow cutoff movement: the molasses lurch, bounded to this reaction's own
     # cutoff territory so SPREAD at zero collapses it to the resting centre.
@@ -573,10 +594,11 @@ def _sludge_engine(
     h = a_h * (SLUDGE_W1 * h1 + SLUDGE_W2 * h2)
 
     delta = 1.0 + 3.0 * p.toxicity
+    gamma = SLUDGE_GAMMA_LO + (SLUDGE_GAMMA_HI - SLUDGE_GAMMA_LO) * p.toxicity
     z = x + beta_m * m[:, None] + beta_h * h[:, None]
 
     def curve(u: np.ndarray) -> np.ndarray:
-        return np.where(u >= 0.0, np.tanh(delta * u), SLUDGE_GAMMA * np.tanh(delta * u))
+        return np.where(u >= 0.0, np.tanh(delta * u), gamma * np.tanh(delta * u))
 
     sat = saturation.oversampled(z, curve)
 
@@ -990,13 +1012,23 @@ def _fission_engine(
     n, channels = x.shape
     # Hash (seed, stream id, sample index) rather than drawing from a
     # stateful generator — see _radiation_engine for why.
+    #
+    # Energy-normalised, sqrt(1-a^2), not DC-normalised. The DC form (1-a) is
+    # right for a filter that has to pass a constant through unchanged, and
+    # wrong for one whose output IS the signal: at a 0.9 s time constant it
+    # makes (1-a) = 2.5e-5 while the steady-state deviation is only 0.0020, so
+    # both of these spanned a thousandth of the +/-1 the terms below are
+    # written as if they cover. FISSION's comb sat still because its delay
+    # modulation was a quarter of a sample.
     a_m = float(np.exp(-1.0 / max(FISSION_TAU_M_S * sr, 1.0)))
+    b_m = float(np.sqrt(1.0 - a_m**2))
     r_m = rng.ubipolar_array(n, p.seed, 701)
-    m = lfilter([1.0 - a_m], [1.0, -a_m], r_m)
+    m = lfilter([b_m], [1.0, -a_m], r_m)
 
     a_d = float(np.exp(-1.0 / max(FISSION_TAU_D_S * sr, 1.0)))
+    b_d = float(np.sqrt(1.0 - a_d**2))
     r_d = rng.ubipolar_array(n, p.seed, 702)
-    m_d = lfilter([1.0 - a_d], [1.0, -a_d], r_d)
+    m_d = lfilter([b_d], [1.0, -a_d], r_d)
 
     delta_f = FISSION_DELTA_F_SEMITONES * p.spread
     d = delta_f * (FISSION_D0 + FISSION_DM * m)

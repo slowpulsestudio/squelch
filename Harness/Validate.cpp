@@ -209,6 +209,7 @@ namespace
                 if (rig.stateTrace != nullptr)
                     (*rig.stateTrace)[k] = reaction == "CHEMICAL" ? chemical.registerValue()
                                          : reaction == "RADIATION" ? radiation.stateValue()
+                                         : reaction == "SLUDGE" ? sludge.memoryValue()
                                          : 0.0;
 
                 out.l[k] = yl;
@@ -1150,42 +1151,39 @@ namespace
 
         // HALF-LIFE. The body state must persist after the input stops, which
         // a plain envelope follower with no memory cannot do.
-        const auto persistenceAt = [&] (double halfLife)
+        //
+        // Read off the state itself, the way Tests 6 and 7 read CHEMICAL's
+        // register and RADIATION's stochastic state. It cannot be recovered
+        // from the audio: once the input stops SLUDGE has nothing to filter
+        // and its output is the reactor oscillator alone, so the spectrum
+        // collapses to 60 Hz within 50 ms at every setting. Asking what the
+        // tail's RMS did was worse still -- the memory drives the cutoff and
+        // never touches the level, so that read 0.005 dB across the range.
+        const auto heldAfterInput = [&] (double halfLife)
         {
+            std::vector<double> trace;
             Rig r;
             r.sludge.halfLife = halfLife;
             r.events = false;
+            r.stateTrace = &trace;
+
             auto gated = makeSignal ("noise", sr, 3.0);
             for (size_t i = size_t (sr); i < gated.l.size(); ++i)
                 gated.l[i] = gated.r[i] = 0.0;
 
-            const auto y = renderWith ("SLUDGE", gated, sr, 256, r);
-            auto energy = 0.0;
-            for (size_t i = size_t (sr * 1.2); i < size_t (sr * 2.5); ++i)
-                energy += y.l[i] * y.l[i];
-            return std::sqrt (energy / (sr * 1.3));
+            renderWith ("SLUDGE", gated, sr, 256, r);
+
+            const auto atGate = trace[size_t (sr) - 1];
+            const auto halfSecondOn = trace[size_t (sr * 1.5)];
+            return halfSecondOn / std::max (atGate, 1e-12);
         };
 
-        const auto brief = persistenceAt (0.0);
-        const auto full = persistenceAt (1.0);
-        const auto persistenceChange = std::abs (db (full, brief));
+        const auto brief = heldAfterInput (0.0);
+        const auto full = heldAfterInput (1.0);
 
-        // There IS material after the input stops, which is the part that
-        // separates a memory from an envelope follower.
-        report ("Test 9 the body persists past the input", brief > 1e-4,
-                "tail " + std::to_string (brief).substr (0, 8));
-
-        // Across its whole travel HALF-LIFE moves that tail by 0.005 dB,
-        // which no listener can hear. Same provenance as the TOXICITY
-        // finding: it matches the prototype exactly, so it is a mapping to
-        // settle rather than a port fault.
-        if (persistenceChange < 1.0)
-            warn ("Test 9 HALF-LIFE sensitivity",
-                  "whole travel moves the tail "
-                  + std::to_string (persistenceChange).substr (0, 6) + " dB");
-        else
-            report ("Test 9 HALF-LIFE changes persistence", true,
-                    std::to_string (persistenceChange).substr (0, 5) + " dB");
+        report ("Test 9 the body persists past the input", full > brief && brief > 0.0,
+                "memory held half a second on: " + std::to_string (brief * 100.0).substr (0, 4)
+                + "% at HALF-LIFE 0, " + std::to_string (full * 100.0).substr (0, 4) + "% at 1");
 
         // SNAPBACK. A short transient should move the body and then recoil
         // past where it settles, rather than returning monotonically.
@@ -1981,19 +1979,17 @@ namespace
         // Recorded from the build that introduced this test. `--golden`
         // reprints them, so updating a reference is an explicit act with a
         // diff rather than something a test does to itself on the way past.
-        // Regenerated when DECAY was unpinned and again when SLUDGE's snap
-        // was repaired. SLUDGE's hash moved while its RMS, peak and centroid
-        // held to 0.000 dB, which is the tolerance fallback doing exactly what
-        // it is for: the snap is scaled by REACTIVITY and this render sits at
-        // its default, so the mechanism changed and the delivered sound at
-        // these settings did not.
+        // Regenerated when DECAY was unpinned, and again for SLUDGE's snap,
+        // its TOXICITY and memory mappings, and FISSION's modulators. ALIEN
+        // and CHEMICAL have carried the same hashes throughout, which is the
+        // other half of what a golden render is for.
         static const Golden expected[]
         {
-            { "SLUDGE", 10411846259040508935ull, 0.37445541456944187, 0.762261100550225, 3123.81687478704 },
+            { "SLUDGE", 13903656596092989291ull, 0.37683868829557676, 0.77422241257652868, 3167.5549077030405 },
             { "ALIEN", 17311358974143198345ull, 0.79954724574488933, 3.316452932901178, 6470.0094929941306 },
             { "CHEMICAL", 2381812392278790764ull, 0.028736765020524146, 0.13045223541616632, 2032.6573066838034 },
             { "RADIATION", 3548395089477890039ull, 0.74647225518906724, 2.9618476409426102, 1165.1372183544515 },
-            { "FISSION", 7577024889664841672ull, 0.037920924239735282, 0.17648991159936595, 486.05209607496664 },
+            { "FISSION", 2643651153330161322ull, 0.03164085893981914, 0.15328470010723924, 874.89198370426413 },
         };
 
         for (size_t i = 0; i < reactions.size(); ++i)
@@ -2061,17 +2057,18 @@ namespace
               "and R[16] = 0.998, and the resonant peak's wander goes 0.025 -> 0.665 "
               "across VOLATILITY" },
             { "FISSION",   "interacting branches, cancellation and cross-feedback",
-              "Test 8: 6.5 dB of comb ripple in a 93 ms window, coupling floor to "
-              "ceiling changes the output by more than the output itself, and opposed "
-              "detuning decorrelates a mono input that no final pan could. The comb "
-              "does not move -- see the Test 8 warning" },
+              "Test 8: a comb that is still 3.3 dB deep in a 93 ms window and no "
+              "longer the same comb one frame later, 0.978 -> 0.810 against "
+              "coincident branches; coupling floor to ceiling changes the output by "
+              "more than the output itself; and opposed detuning takes a mono input "
+              "from 1.000 to 0.182 correlated, which no final pan could do" },
             { "SLUDGE",    "generated subharmonics, asymmetric nonlinear content, long memory",
               "Test 9: energy at f_h/2 and f_h/4 from an input containing neither, "
-              "59 dB of f_h/2 over f_h proving the 4pi phase domain, even orders "
-              "present throughout, and a body that persists past the input. The snap "
-              "is a real transient term again -- see the Test 13 N/A for what is "
-              "still not measurable about it. TOXICITY and HALF-LIFE directions -- "
-              "see the Test 9 warnings" },
+              "59 dB of f_h/2 over f_h proving the 4pi phase domain, an even/odd "
+              "balance that rises with TOXICITY rather than washing out, and a body "
+              "state still 94% intact half a second after the input stops against "
+              "21% at the other end of HALF-LIFE. See the Test 13 N/A for the one "
+              "thing about its snap that is still not measurable" },
             { "ALIEN",     "an actual oscillator, FM/AM and reaction-specific timing",
               "Test 10: silent with nothing scheduled and 3.3 peak with events, pitch "
               "within 0 cents of the register for every event index, FM sidebands "

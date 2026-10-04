@@ -104,6 +104,10 @@ namespace squelch::dsp
             exposureTerm = 0.5 + 1.0 * p.exposure;
             deltaH = 0.5 * p.spread;
             delta = 1.0 + 3.0 * p.toxicity;
+            // TOXICITY sweeps the asymmetry too, not just the drive. Drive
+            // alone saturates the even orders while the odd ones keep
+            // climbing, which ran the control backwards.
+            gamma = kGammaLo + (kGammaHi - kGammaLo) * p.toxicity;
             muH = 0.3 + 0.5 * p.reactivity;
         }
 
@@ -121,7 +125,10 @@ namespace squelch::dsp
             const auto sSnap = std::clamp ((q - r) / std::max (q, kSnapFloor), -1.0, 1.0);
 
             const auto m = mFilter.process (q, gM);
-            const auto mB = std::tanh (m);
+            memory = m;
+            // Against a reference level, because tanh needs an O(1) argument:
+            // q is a lowpassed max|x| and never left the linear region.
+            const auto mB = std::tanh (m / kMemoryRef);
 
             const auto fC = std::pow (2.0, fBaseOct + deltaF * mB);
             const auto fEffective = std::clamp (fC * std::pow (2.0, deltaSnap * sSnap),
@@ -144,7 +151,7 @@ namespace squelch::dsp
             const auto curve = [this] (double u) noexcept
             {
                 const auto t = std::tanh (delta * u);
-                return u >= 0.0 ? t : kGamma * t;
+                return u >= 0.0 ? t : gamma * t;
             };
 
             const auto satL = oversamplerL.process (zL, curve);
@@ -170,14 +177,21 @@ namespace squelch::dsp
             outR = (1.0 - muH) * sR + muH * hDelayed;
         }
 
+        /// The long memory itself. Test 9 asks for the persistence of the body
+        /// state after the input stops, and once there is no input the output
+        /// is the reactor oscillator alone, so the state cannot be read back
+        /// out of the audio.
+        double memoryValue() const noexcept { return memory; }
+
     private:
         static constexpr double kFQHz = 5.0;
         static constexpr double kFRLoHz = 45.0;
         static constexpr double kFRHiHz = 12.0;
         static constexpr double kSnapFloor = 1e-3;
-        static constexpr double kTauMLoS = 0.3;
-        static constexpr double kTauMHiS = 5.0;
-        static constexpr double kGamma = 0.6;
+        static constexpr double kMemoryRef = 0.25;
+        static constexpr double kTauMLoS = 0.3;        static constexpr double kTauMHiS = 5.0;
+        static constexpr double kGammaLo = 0.9;
+        static constexpr double kGammaHi = 0.1;
         static constexpr double kW1 = 0.65;
         static constexpr double kW2 = 0.45;
 
@@ -188,12 +202,12 @@ namespace squelch::dsp
         double gQ { 0.0 }, gR { 0.0 }, gM { 0.0 };
         double fBaseOct { 0.0 }, deltaF { 0.0 }, deltaSnap { 0.0 };
         double betaM { 0.0 }, betaH { 0.0 }, exposureTerm { 0.0 };
-        double deltaH { 0.0 }, delta { 1.0 }, muH { 0.0 };
+        double deltaH { 0.0 }, delta { 1.0 }, gamma { 0.9 }, muH { 0.0 };
 
         // Per-sample state.
         ZeroStateOnePole qFilter, rFilter, mFilter, smoothL, smoothR;
         Oversampler oversamplerL, oversamplerR;
-        double theta { 0.0 };
+        double theta { 0.0 }, memory { 0.0 };
 
         /// A fixed-length delay line, used to keep a causally-computed
         /// signal or coefficient in step with the oversampler's lagged path.

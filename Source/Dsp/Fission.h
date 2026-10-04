@@ -141,6 +141,10 @@ namespace squelch::dsp
 
             aM = std::exp (-1.0 / std::max (kFissionTauMS * sr, 1.0));
             aD = std::exp (-1.0 / std::max (kFissionTauDS * sr, 1.0));
+            // Energy-normalised, not DC-normalised: (1-a) is for a filter that
+            // must pass a constant unchanged, and these states ARE the signal.
+            bM = std::sqrt (1.0 - aM * aM);
+            bD = std::sqrt (1.0 - aD * aD);
 
             deltaF = kFissionDeltaFSemitones * p.spread;
             delayBase = kFissionD0DelayS * sr;
@@ -159,8 +163,8 @@ namespace squelch::dsp
 
         void process (double xL, double xR, double& outL, double& outR) noexcept
         {
-            m = (1.0 - aM) * rng::ubipolar ({ seed, kFissionStreamM, index }) + aM * m;
-            mD = (1.0 - aD) * rng::ubipolar ({ seed, kFissionStreamD, index }) + aD * mD;
+            m = bM * rng::ubipolar ({ seed, kFissionStreamM, index }) + aM * m;
+            mD = bD * rng::ubipolar ({ seed, kFissionStreamD, index }) + aD * mD;
             ++index;
 
             const auto d = deltaF * (kFissionD0 + kFissionDm * m);
@@ -175,7 +179,7 @@ namespace squelch::dsp
         double sr { 44100.0 };
         std::uint64_t seed { 0 }, index { 0 };
         double baseHz { 320.0 }, deltaF { 0.0 };
-        double aM { 0.0 }, aD { 0.0 }, m { 0.0 }, mD { 0.0 };
+        double aM { 0.0 }, aD { 0.0 }, bM { 0.0 }, bD { 0.0 }, m { 0.0 }, mD { 0.0 };
         double delayBase { 0.0 }, delayMod { 0.0 }, r { 0.0 }, coupling { 0.0 };
 
         detail::BranchPair left, right;
