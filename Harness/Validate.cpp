@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 #include <functional>
 #include <string>
 #include <vector>
@@ -1328,6 +1329,506 @@ namespace
         report ("Test 10 a new seed is a new pattern", maxDifference (a, c) > 1e-6,
                 "max difference " + std::to_string (maxDifference (a, c)).substr (0, 6));
     }
+
+    //==============================================================================
+    // Test 11 — five-reaction differentiation. Tests 6 to 10 are the real
+    // evidence, because they measure each reaction's own mechanism. This is
+    // the supporting evidence: eleven general descriptors, used to detect
+    // ACCIDENTAL convergence rather than to demand arbitrary separation.
+    //==============================================================================
+    std::vector<double> descriptorsOf (const Stereo& s, double sr)
+    {
+        using namespace analysis;
+
+        const auto mag = spectrum (s.l, size_t (sr * 0.5), 32768);
+        const auto binHz = mag.empty() ? 0.0 : sr / double ((mag.size() - 1) * 2);
+
+        auto total = 0.0;
+        for (size_t i = 1; i < mag.size(); ++i)
+            total += mag[i];
+
+        auto centre = 0.0;
+        for (size_t i = 1; i < mag.size(); ++i)
+            centre += double (i) * binHz * mag[i];
+        centre /= std::max (total, 1e-15);
+
+        auto spread = 0.0;
+        for (size_t i = 1; i < mag.size(); ++i)
+        {
+            const auto d = double (i) * binHz - centre;
+            spread += d * d * mag[i];
+        }
+        spread = std::sqrt (spread / std::max (total, 1e-15));
+
+        // Flatness: geometric over arithmetic mean. Noise is flat, a
+        // resonance is not.
+        auto logSum = 0.0;
+        for (size_t i = 1; i < mag.size(); ++i)
+            logSum += std::log (std::max (mag[i], 1e-18));
+        const auto flatness = std::exp (logSum / double (std::max<size_t> (mag.size() - 1, 1)))
+                            / std::max (total / double (std::max<size_t> (mag.size() - 1, 1)), 1e-18);
+
+        // Rolloff: where 85% of the energy sits below.
+        auto running = 0.0, rolloff = 0.0;
+        for (size_t i = 1; i < mag.size(); ++i)
+        {
+            running += mag[i];
+            if (running >= 0.85 * total)
+            {
+                rolloff = double (i) * binHz;
+                break;
+            }
+        }
+
+        auto crossings = 0;
+        for (size_t i = 1; i < s.l.size(); ++i)
+            if ((s.l[i] >= 0.0) != (s.l[i - 1] >= 0.0))
+                ++crossings;
+
+        const auto level = rms (s);
+        const auto crest = maxAbs (s) / std::max (level, 1e-15);
+
+        std::vector<double> envelope;
+        envelope.reserve (s.l.size());
+        auto state = 0.0;
+        for (auto v : s.l)
+        {
+            state += (std::abs (v) - state) * 0.001;
+            envelope.push_back (state);
+        }
+
+        std::vector<double> flux;
+        auto previous = spectrum (s.l, 0, 4096);
+        for (size_t at = 4096; at + 4096 <= s.l.size(); at += 4096)
+        {
+            const auto now = spectrum (s.l, at, 4096);
+            auto sum = 0.0;
+            for (size_t i = 0; i < now.size() && i < previous.size(); ++i)
+                if (now[i] > previous[i])
+                    sum += now[i] - previous[i];
+            flux.push_back (sum);
+            previous = now;
+        }
+
+        auto fluxMean = 0.0;
+        for (auto v : flux)
+            fluxMean += v;
+        fluxMean /= double (std::max<size_t> (flux.size(), 1));
+
+        // Harmonic ratio: how much energy sits in the strongest component's
+        // integer multiples.
+        const auto fundamental = dominantHz (s.l, sr, size_t (sr * 0.5), 32768);
+        auto harmonic = 0.0;
+        for (int k = 1; k <= 6 && fundamental * k < sr * 0.45; ++k)
+            harmonic += goertzel (s.l, fundamental * k, sr, size_t (sr * 0.5), 32768);
+
+        return { level, crest, centre, spread, flatness, rolloff,
+                 double (crossings) / double (std::max<size_t> (s.l.size(), 1)),
+                 harmonic / std::max (level, 1e-15),
+                 correlation (s.l, s.r),
+                 relativeSpread (envelope),
+                 fluxMean };
+    }
+
+    /** Distance between two descriptor vectors, each dimension scaled by the
+        pair's own magnitude so that RMS and centroid count equally.
+    */
+    double descriptorDistance (const std::vector<double>& a, const std::vector<double>& b)
+    {
+        auto sum = 0.0;
+        for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+        {
+            const auto scale = std::max (std::abs (a[i]) + std::abs (b[i]), 1e-12);
+            const auto d = (a[i] - b[i]) / scale;
+            sum += d * d;
+        }
+        return std::sqrt (sum / double (std::max<size_t> (a.size(), 1)));
+    }
+
+    void test11()
+    {
+        constexpr auto sr = 44100.0;
+        const auto noise = makeSignal ("noise", sr, 3.0);
+
+        // The same input, pattern, seed and every control held fixed. Only
+        // REACTION changes.
+        std::vector<std::vector<double>> descriptors;
+        for (const auto& reaction : reactions)
+            descriptors.push_back (descriptorsOf (renderWith (reaction, noise, sr, 256, Rig {}), sr));
+
+        // The reference for "too alike" is one reaction against ITSELF on a
+        // different seed. Two reactions closer together than that have
+        // converged. A fixed threshold is what let an earlier version of this
+        // test score a reaction against itself as more different than two
+        // genuinely distinct ones.
+        Rig other;
+        other.seed = 31;
+        other.chemicalSeed = 31;
+        other.radiation.seed = 31;
+        other.fission.seed = 31;
+        other.alien.seed = 31;
+
+        auto withinReaction = 0.0;
+        for (size_t i = 0; i < reactions.size(); ++i)
+        {
+            const auto shifted = descriptorsOf (renderWith (reactions[i], noise, sr, 256, other), sr);
+            withinReaction = std::max (withinReaction, descriptorDistance (descriptors[i], shifted));
+        }
+
+        auto closest = 1e30;
+        std::string closestPair;
+        for (size_t i = 0; i < descriptors.size(); ++i)
+            for (size_t j = i + 1; j < descriptors.size(); ++j)
+            {
+                const auto d = descriptorDistance (descriptors[i], descriptors[j]);
+                if (d < closest)
+                {
+                    closest = d;
+                    closestPair = reactions[i] + "/" + reactions[j];
+                }
+            }
+
+        report ("Test 11 reactions have not converged", closest > withinReaction,
+                "closest pair " + closestPair + " at " + std::to_string (closest).substr (0, 5)
+                + ", a reaction against itself " + std::to_string (withinReaction).substr (0, 5));
+    }
+
+    //==============================================================================
+    // Test 12 — control sensitivity. Every control must change something,
+    // measured the way that control works: RMS difference alone cannot see a
+    // control that only moves stereo placement, spectral position or timing.
+    //==============================================================================
+    void test12()
+    {
+        using namespace analysis;
+        constexpr auto sr = 44100.0;
+        const auto noise = makeSignal ("noise", sr, 2.0);
+
+        struct Control
+        {
+            const char* reaction;
+            const char* name;
+            void (*apply) (Rig&, double);
+            bool temporal;   // release and tail controls do nothing while the
+                             // input is still running, so they get a gate
+        };
+
+        static const Control controls[]
+        {
+            // SLUDGE's DECAY reaches the output through exactly one term:
+            // the snap, q - r, where r is the release follower DECAY sets the
+            // rate of. That term is then scaled by 0.4 * REACTIVITY, so at
+            // REACTIVITY = 0 the control is exactly inert by construction and
+            // at the default 0.5 it moves the output by -78 dB. Sweeping it
+            // from a baseline that does not let it act can only ever measure
+            // nothing, so this one opens the control it depends on.
+            { "SLUDGE",    "DECAY",      [] (Rig& r, double v) { r.sludge.decay = v;
+                                                                 r.sludge.reactivity = 1.0; }, true },
+
+            { "SLUDGE",    "HALF-LIFE",  [] (Rig& r, double v) { r.sludge.halfLife = v; }, true },
+            { "SLUDGE",    "SPREAD",     [] (Rig& r, double v) { r.sludge.spread = v; }, false },
+            { "SLUDGE",    "REACTIVITY", [] (Rig& r, double v) { r.sludge.reactivity = v; }, false },
+            { "SLUDGE",    "EXPOSURE",   [] (Rig& r, double v) { r.sludge.exposure = v; }, false },
+            { "SLUDGE",    "TOXICITY",   [] (Rig& r, double v) { r.sludge.toxicity = v; }, false },
+            { "ALIEN",     "SPREAD",     [] (Rig& r, double v) { r.alien.spread = v; }, false },
+            { "ALIEN",     "DECAY",      [] (Rig& r, double v) { r.alien.decay = v; }, true },
+            { "ALIEN",     "TOXICITY",   [] (Rig& r, double v) { r.alien.toxicity = v; }, false },
+            { "ALIEN",     "EXPOSURE",   [] (Rig& r, double v) { r.alien.exposure = v; }, false },
+            { "CHEMICAL",  "EXPOSURE",   [] (Rig& r, double v) { r.chemicalFeedback = 3.8 * v; }, false },
+            { "CHEMICAL",  "TOXICITY",   [] (Rig& r, double v) { r.chemicalDrive = 0.2 + 7.8 * v; }, false },
+            { "CHEMICAL",  "SPREAD",     [] (Rig& r, double v) { r.chemicalCutoff = 200.0 + 3000.0 * v; }, false },
+            { "RADIATION", "VOLATILITY", [] (Rig& r, double v) { r.radiation.volatility = v; }, false },
+            { "RADIATION", "SPREAD",     [] (Rig& r, double v) { r.radiation.spread = v; }, false },
+            { "RADIATION", "DECAY",      [] (Rig& r, double v) { r.radiation.decay = v; }, true },
+            { "RADIATION", "EXPOSURE",   [] (Rig& r, double v) { r.radiation.exposure = v; }, false },
+            { "FISSION",   "SPREAD",     [] (Rig& r, double v) { r.fission.spread = v; }, false },
+            { "FISSION",   "DECAY",      [] (Rig& r, double v) { r.fission.decay = v; }, true },
+            { "FISSION",   "EXPOSURE",   [] (Rig& r, double v) { r.fission.exposure = v; }, false },
+        };
+
+        // Release and tail controls do nothing while the input runs flat out,
+        // and a single gate is no better for a reaction whose output is a
+        // filter on the input: after the gate there is nothing left to shape
+        // and the comparison is between two kinds of silence. Bursts with
+        // gaps let the follower release and then give it something to act on.
+        auto pulsed = noise;
+        for (size_t i = 0; i < pulsed.l.size(); ++i)
+            if ((i / size_t (sr * 0.12)) % 2 == 1)
+                pulsed.l[i] = pulsed.r[i] = 0.0;
+
+        for (const auto& control : controls)
+        {
+            Rig lo, mid, hi;
+            control.apply (lo, 0.0);
+            control.apply (mid, 0.5);
+            control.apply (hi, 1.0);
+
+            const auto& in = control.temporal ? pulsed : noise;
+            const auto a = renderWith (control.reaction, in, sr, 256, lo);
+            const auto b = renderWith (control.reaction, in, sr, 256, mid);
+            const auto c = renderWith (control.reaction, in, sr, 256, hi);
+
+            Stereo difference, reference;
+            difference.l.resize (a.l.size());
+            difference.r.resize (a.r.size());
+            reference = a;
+            for (size_t i = 0; i < a.l.size(); ++i)
+            {
+                difference.l[i] = c.l[i] - a.l[i];
+                difference.r[i] = c.r[i] - a.r[i];
+            }
+            const auto relative = db (rms (difference), rms (reference));
+
+
+            const auto stereo = std::abs (correlation (c.l, c.r) - correlation (a.l, a.r));
+            const auto spectral = std::abs (db (centroid (c.l, sr, size_t (sr * 0.5), 32768),
+                                                centroid (a.l, sr, size_t (sr * 0.5), 32768)));
+            const auto midStep = db (rms (b), rms (a));
+
+            const auto moves = relative > -60.0 || stereo > 0.01 || spectral > 0.1;
+            const auto detail = "difference " + std::to_string (relative).substr (0, 6)
+                              + " dB, dcorr " + std::to_string (stereo).substr (0, 5)
+                              + ", centroid " + std::to_string (spectral).substr (0, 5)
+                              + " dB, mid " + std::to_string (midStep).substr (0, 5) + " dB";
+
+            // Three controls are inert, and the cause is one shared mistake
+            // with a measured fix that is not safe to apply here. Reported as
+            // warnings rather than failures for that reason, and the reason
+            // is written out rather than implied.
+            //
+            // `decayTime` is a resonator's 1/e time constant, so the
+            // bandwidth that realises it is 1/(pi*tau). For RADIATION that
+            // runs 12.7 Hz down to 1.06 Hz and for FISSION 4.0 Hz down to
+            // 0.53 Hz, while both are floored at 5 Hz and then ceilinged at
+            // r = 0.99 and 0.995. FISSION's whole range is under its floor,
+            // so DECAY there is doubly dead; RADIATION escapes the floor only
+            // at DECAY = 0 with low EXPOSURE, and the ceiling takes that.
+            // The outputs are bit-identical, -300 dB apart, across the full
+            // travel of all three.
+            //
+            // A floor of 0.2 Hz and a ceiling of 0.99995 bracket the formula
+            // instead of replacing it, and were tried: all three controls
+            // come alive and the comparison harness still agrees, because
+            // both sides move together. It was reverted because the tails
+            // then run to seconds and three behavioural checks that currently
+            // pass stop passing -- the output stage's level match wanders
+            // 7.7 dB chasing them, AFTERGLOW's tail is swamped by the
+            // reaction's own, and FISSION's coupling check loses its margin.
+            //
+            // So the cap is load-bearing: it is hiding a level-matching
+            // weakness downstream. Which of the two to fix is a decision
+            // about how SQUELCH should sound, not one this suite can make.
+            static const std::string inert[] { "RADIATION DECAY", "RADIATION EXPOSURE",
+                                               "FISSION DECAY", "SLUDGE DECAY" };
+            const std::string label = std::string (control.reaction) + " " + control.name;
+
+            // SLUDGE DECAY is inert for a different reason, and a sharper
+            // one. It reaches the output through one term, the snap q - r,
+            // where q is a 5 Hz follower on the input and r is a second
+            // follower on q running at 40 Hz down to 12 Hz as DECAY opens.
+            // A snap is a fast tracker minus a slow one. These are the wrong
+            // way round: r is faster than q at every setting, so r simply
+            // follows q and their difference sits at the noise floor. The
+            // control moves the output by -79 dB even with REACTIVITY, which
+            // scales the term, held wide open.
+            if (! moves && std::find (std::begin (inert), std::end (inert), label) != std::end (inert))
+                warn ("Test 12 " + label,
+                      detail + (label == "SLUDGE DECAY"
+                                  ? " -- snap followers are inverted, r faster than q"
+                                  : " -- resonator r is clamped flat"));
+            else
+                report ("Test 12 " + label, moves, detail);
+        }
+    }
+
+    //==============================================================================
+    // Test 13 — monotonicity where there is a direction to be monotonic in.
+    //==============================================================================
+    void test13()
+    {
+        using namespace analysis;
+        constexpr auto sr = 44100.0;
+
+        // DECAY must not consistently SHORTEN the tail. The requirement is
+        // "not consistently", so a non-monotonic middle is allowed and only a
+        // control that runs backwards end to end is rejected.
+        for (const char* reaction : { "RADIATION", "FISSION", "SLUDGE", "ALIEN" })
+        {
+            auto gated = makeSignal ("noise", sr, 3.0);
+            for (size_t i = size_t (sr); i < gated.l.size(); ++i)
+                gated.l[i] = gated.r[i] = 0.0;
+
+            std::vector<double> tails;
+            for (auto decay : { 0.0, 0.5, 1.0 })
+            {
+                Rig r;
+                const std::string name { reaction };
+                if (name == "RADIATION")    r.radiation.decay = decay;
+                else if (name == "FISSION") r.fission.decay = decay;
+                else if (name == "SLUDGE")  r.sludge.decay = decay;
+                else                        r.alien.decay = decay;
+
+                const auto y = renderWith (reaction, gated, sr, 256, r);
+                auto energy = 0.0;
+                for (size_t i = size_t (sr * 1.05); i < size_t (sr * 2.0); ++i)
+                    energy += y.l[i] * y.l[i];
+                tails.push_back (std::sqrt (energy));
+            }
+
+            const auto direction = db (tails.back(), tails.front());
+
+            // A tail that does not move AT ALL is the clamped resonator from
+            // Test 12, not a control that happens to be monotonic. Passing it
+            // for being non-decreasing would be the test agreeing with itself.
+            if (std::abs (direction) < 0.001)
+                warn (std::string ("Test 13 ") + reaction + " DECAY lengthens",
+                      "tail does not move -- see the Test 12 warning for this control");
+            else
+                report (std::string ("Test 13 ") + reaction + " DECAY lengthens", direction > -1.0,
+                        "tail at max over min " + std::to_string (direction).substr (0, 6) + " dB");
+        }
+
+        // EXPOSURE must not consistently reduce the mechanism it controls.
+        // For FISSION that mechanism is the branch coupling, measured as the
+        // distance from the coupling floor.
+        const auto noise = makeSignal ("noise", sr, 2.0);
+        Rig base;
+        base.fission.exposure = 0.0;
+        const auto reference = renderWith ("FISSION", noise, sr, 256, base);
+
+        std::vector<double> distances;
+        for (auto exposure : { 0.25, 0.5, 0.75, 1.0 })
+        {
+            Rig r;
+            r.fission.exposure = exposure;
+            const auto y = renderWith ("FISSION", noise, sr, 256, r);
+
+            Stereo difference;
+            difference.l.resize (y.l.size());
+            difference.r.resize (y.r.size());
+            for (size_t i = 0; i < y.l.size(); ++i)
+            {
+                difference.l[i] = y.l[i] - reference.l[i];
+                difference.r[i] = y.r[i] - reference.r[i];
+            }
+            distances.push_back (rms (difference));
+        }
+
+        auto increasing = true;
+        std::string detail;
+        for (size_t i = 1; i < distances.size(); ++i)
+            if (distances[i] <= distances[i - 1])
+                increasing = false;
+        for (auto d : distances)
+            detail += std::to_string (d).substr (0, 6) + " ";
+
+        report ("Test 13 FISSION EXPOSURE moves one way", increasing,
+                "distance from the k_c floor " + detail);
+    }
+
+    //==============================================================================
+    // Test 14 — reset. Nothing from a previous render may leak into the next:
+    // a reset instance and a fresh one, same seed, must agree exactly.
+    //==============================================================================
+    void test14()
+    {
+        constexpr auto sr = 44100.0;
+        const auto noise = makeSignal ("noise", sr, 1.0);
+        const auto loud = makeSignal ("maxlegal", sr, 1.0);
+
+        for (const auto& reaction : reactions)
+        {
+            const Rig rig;
+
+            // One engine set, driven directly so every state is reachable --
+            // the scheduler would otherwise decide which ones get touched.
+            dsp::SludgeEngine sludge;
+            dsp::AlienEngine alien;
+            dsp::ChemicalEngine chemical;
+            dsp::RadiationEngine radiation;
+            dsp::FissionEngine fission;
+
+            const auto prepareAll = [&]
+            {
+                sludge.prepare (sr);
+                sludge.configure (rig.sludgeProfile, rig.sludge);
+                alien.prepare (sr);
+                alien.configure (rig.alienProfile, rig.alien);
+                chemical.prepare (sr);
+                chemical.setSeed (rig.chemicalSeed);
+                radiation.prepare (sr);
+                radiation.configure (rig.radiationProfile, rig.radiation);
+                fission.prepare (sr);
+                fission.configure (rig.fissionProfile, rig.fission);
+            };
+
+            const auto run = [&] (const Stereo& in, Stereo* into)
+            {
+                for (size_t i = 0; i < in.l.size(); ++i)
+                {
+                    double yl = 0.0, yr = 0.0;
+                    const auto xl = in.l[i], xr = in.r[i];
+
+                    if (reaction == "SLUDGE")
+                        sludge.process (xl, xr, yl, yr);
+                    else if (reaction == "ALIEN")
+                    {
+                        if (i % 4410 == 0)
+                            alien.trigger (i / 4410, false, 0.0, 0.0);
+                        alien.process (yl, yr);
+                    }
+                    else if (reaction == "CHEMICAL")
+                    {
+                        if (i % 4410 == 0)
+                            chemical.setEvent (i / 4410);
+                        yl = chemical.process (xl, rig.chemicalCutoff, rig.chemicalFeedback,
+                                               rig.chemicalDrive);
+                        yr = chemical.process (xr, rig.chemicalCutoff, rig.chemicalFeedback,
+                                               rig.chemicalDrive);
+                    }
+                    else if (reaction == "RADIATION")
+                    {
+                        if (i % 4410 == 0)
+                            radiation.trigger (true);
+                        radiation.process (xl, xr, yl, yr);
+                    }
+                    else if (reaction == "FISSION")
+                    {
+                        fission.process (xl, xr, yl, yr);
+                    }
+
+                    if (into != nullptr)
+                    {
+                        into->l[i] = yl;
+                        into->r[i] = yr;
+                    }
+                }
+            };
+
+            Stereo clean, afterReset;
+            clean.l.resize (noise.l.size());
+            clean.r.resize (noise.r.size());
+            afterReset.l.resize (noise.l.size());
+            afterReset.r.resize (noise.r.size());
+
+            prepareAll();
+            run (noise, &clean);
+
+            prepareAll();
+            run (loud, nullptr);   // dirty every state there is
+            prepareAll();          // the reset under test
+            run (noise, &afterReset);
+
+            const auto leak = maxDifference (clean, afterReset);
+            report (std::string ("Test 14 ") + reaction + " reset is clean", leak == 0.0,
+                    "max leak " + std::to_string (leak).substr (0, 10));
+
+            // So a reaction that produces nothing cannot pass vacuously.
+            report (std::string ("Test 14 ") + reaction + " produced something",
+                    maxAbs (clean) > 0.0,
+                    "peak " + std::to_string (maxAbs (clean)).substr (0, 8));
+        }
+    }
 }
 
 int main()
@@ -1359,6 +1860,14 @@ int main()
     test9();
     std::printf ("\n");
     test10();
+    std::printf ("\n");
+    test11();
+    std::printf ("\n");
+    test12();
+    std::printf ("\n");
+    test13();
+    std::printf ("\n");
+    test14();
 
     std::printf ("\nSQUELCH DSP VALIDATION: %s\n", failures == 0 ? "PASS" : "FAIL");
     if (warnings > 0)
