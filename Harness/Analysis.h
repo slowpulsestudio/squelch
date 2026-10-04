@@ -370,6 +370,65 @@ namespace squelch::analysis
         return std::sqrt (variance / double (values.size())) / std::max (mean, 1e-9);
     }
 
+    /** The log-magnitude transfer curve of out over reference, in dB, across
+        a band. The shape of the comb, rather than one number about it.
+    */
+    inline std::vector<double> transferCurve (const std::vector<double>& reference,
+                                              const std::vector<double>& out,
+                                              double sr, double loHz, double hiHz,
+                                              std::size_t from, std::size_t length)
+    {
+        const auto a = spectrum (reference, from, length);
+        const auto b = spectrum (out, from, length);
+        if (a.size() < 8 || a.size() != b.size())
+            return {};
+
+        const auto binHz = sr / double ((a.size() - 1) * 2);
+        const auto lo = std::max<std::size_t> (1, std::size_t (loHz / binHz));
+        const auto hi = std::min (a.size() - 1, std::size_t (hiHz / binHz));
+
+        std::vector<double> curve;
+        curve.reserve (hi - lo + 1);
+        for (auto i = lo; i <= hi; ++i)
+            curve.push_back (20.0 * std::log10 (std::max (b[i], 1e-18) / std::max (a[i], 1e-18)));
+        return curve;
+    }
+
+    /** How uneven that curve is once its overall shape is removed, in dB.
+
+        A comb ripples bin to bin; a resonator has a steep but smooth slope.
+        Taking the standard deviation of the raw curve cannot tell them
+        apart -- a 320 Hz resonator measured across 100 Hz to 4 kHz reads 16
+        dB of "ripple" with no comb present at all. Subtracting a moving
+        average over the curve leaves only the fast variation, which is the
+        interference.
+
+        Also more robust than hunting for the single deepest bin, which on a
+        noise excitation finds whichever bin happened to come out quietest.
+    */
+    inline double ripple (const std::vector<double>& curve, int span = 31)
+    {
+        if (curve.size() < std::size_t (span) * 2)
+            return 0.0;
+
+        const auto half = std::size_t (span / 2);
+        auto variance = 0.0;
+        std::size_t count = 0;
+
+        for (std::size_t i = half; i + half < curve.size(); ++i)
+        {
+            auto local = 0.0;
+            for (std::size_t j = i - half; j <= i + half; ++j)
+                local += curve[j];
+            local /= double (span);
+
+            const auto d = curve[i] - local;
+            variance += d * d;
+            ++count;
+        }
+        return count > 0 ? std::sqrt (variance / double (count)) : 0.0;
+    }
+
     inline double db (double a, double b)
     {
         return 20.0 * std::log10 (std::max (a, 1e-15) / std::max (b, 1e-15));

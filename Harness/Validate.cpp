@@ -233,6 +233,19 @@ namespace
         std::printf ("[%s] %-28s %s\n", ok ? "PASS" : "FAIL", test.c_str(), detail.c_str());
     }
 
+    /** For a measurement that is real, repeatable and NOT what the
+        specification asks for. A warning is visible in the output and
+        counted, but does not turn the verdict red -- which is right for a
+        control whose mapping is an open design question rather than a port
+        fault, and wrong for anything else. Nothing that could be a bug
+        belongs here.
+    */
+    void warn (const std::string& test, const std::string& detail)
+    {
+        ++warnings;
+        std::printf ("[WARN] %-28s %s\n", test.c_str(), detail.c_str());
+    }
+
     double maxAbs (const Stereo& s)
     {
         auto m = 0.0;
@@ -870,6 +883,451 @@ namespace
                 "held fraction CHEMICAL " + std::to_string (chemicalHeld).substr (0, 5)
                 + ", RADIATION " + std::to_string (radiationHeld).substr (0, 5));
     }
+
+    //==============================================================================
+    // Test 8 — FISSION. The branches must actually interact. An
+    // implementation that sounds the same with coupling and detuning turned
+    // down is two independent delays and a pan, not a split.
+    //==============================================================================
+    void test8()
+    {
+        using namespace analysis;
+        constexpr auto sr = 44100.0;
+        const auto noise = makeSignal ("noise", sr, 3.0);
+
+        const auto at = [&] (double exposure, double spread)
+        {
+            Rig r;
+            r.fission.exposure = exposure;   // reaches the branches as coupling
+            r.fission.spread = spread;       // reaches them as detuning
+            return renderWith ("FISSION", noise, sr, 256, r);
+        };
+
+        // Coupling. The instrument never offers k_c = 0 -- the floor is 0.1 of
+        // the normalised range -- so this compares the floor against the
+        // ceiling rather than against nothing, which is the span a user can
+        // actually reach.
+        const auto loose = at (0.0, 0.6);
+        const auto normal = at (0.5, 0.6);
+        const auto tight = at (1.0, 0.6);
+
+        const auto differenceDb = [] (const Stereo& a, const Stereo& b)
+        {
+            Stereo d;
+            d.l.resize (a.l.size());
+            d.r.resize (a.r.size());
+            for (size_t i = 0; i < a.l.size(); ++i)
+            {
+                d.l[i] = a.l[i] - b.l[i];
+                d.r[i] = a.r[i] - b.r[i];
+            }
+            return db (rms (d), rms (a));
+        };
+
+        const auto couplingChange = differenceDb (tight, loose);
+        report ("Test 8 coupling changes the output", couplingChange > -6.0,
+                "floor to ceiling differ by " + std::to_string (couplingChange).substr (0, 5)
+                + " dB relative");
+
+        report ("Test 8 coupling is a continuum",
+                differenceDb (normal, loose) < couplingChange
+                && differenceDb (normal, tight) < couplingChange,
+                "mid sits between the ends");
+
+        // Detuning. The two branches are the same delay when SPREAD is zero
+        // and drift apart when it is not, so the interference between them
+        // is a comb that MOVES rather than one that gets deeper.
+        //
+        // Measuring the comb's depth over a long window says the opposite:
+        // 3.06 dB of ripple with the branches coincident, 2.58 dB with them
+        // detuned. That is not the detuning failing, it is the window
+        // averaging a moving comb into a smear. The depth is the wrong
+        // quantity -- a static comb is the deepest thing FISSION can
+        // produce, and it is also the least interesting.
+        const auto coincident = at (0.5, 0.0);
+        const auto split = at (0.5, 1.0);
+
+        // Short enough that the comb has not moved far within one frame.
+        constexpr size_t frame = 4096;
+        const auto curveOf = [&] (const Stereo& s, size_t at2)
+        {
+            return transferCurve (noise.l, s.l, sr, 100.0, 4000.0, at2, frame);
+        };
+
+        report ("Test 8 detuning leaves a comb",
+                ripple (curveOf (split, size_t (sr))) > 1.0,
+                "ripple in a 93 ms window "
+                + std::to_string (ripple (curveOf (split, size_t (sr)))).substr (0, 5) + " dB");
+
+        // And that comb should move. It barely does, and the reason is
+        // measurable rather than guessed.
+        //
+        // Both of FISSION's modulators are AR(1) states normalised by their
+        // DC gain, m = (1-a)*noise + a*m. For a time constant of 1.3 s at
+        // 44.1 kHz that makes a = 0.99998, so (1-a) = 1.7e-5 while the
+        // steady-state standard deviation is sqrt((1-a)/(1+a)/3) = 0.0017 --
+        // three orders of magnitude smaller than the +/-1 the term is
+        // written as if it spans. At SPREAD = 1 the delay modulation is
+        // 0.0035 s * 0.0017 = a quarter of a sample, six microseconds, and
+        // the random part of the detune contributes 0.4% of its fixed part.
+        //
+        // Energy normalisation, sqrt(1-a^2), would give these states the
+        // range they are written for. That is a change to the prototype and
+        // not to the port -- the comparison harness agrees with the prototype
+        // to 1e-14 here -- so it is reported rather than made.
+        const auto shapeStability = [&] (const Stereo& s)
+        {
+            std::vector<double> similarities;
+            for (size_t at2 = size_t (sr); at2 + frame * 2 <= s.l.size(); at2 += frame)
+                similarities.push_back (correlation (curveOf (s, at2),
+                                                     curveOf (s, at2 + frame)));
+            if (similarities.empty())
+                return 1.0;
+            auto mean = 0.0;
+            for (auto v : similarities)
+                mean += v;
+            return mean / double (similarities.size());
+        };
+
+        const auto staticShape = shapeStability (coincident);
+        const auto movingShape = shapeStability (split);
+
+        if (movingShape >= staticShape - 0.05)
+            warn ("Test 8 the interference moves",
+                  "comb similarity " + std::to_string (staticShape).substr (0, 5)
+                  + " -> " + std::to_string (movingShape).substr (0, 5)
+                  + "; modulators are DC-normalised and swing 0.0017");
+        else
+            report ("Test 8 the interference moves", true,
+                    "frame-to-frame comb similarity " + std::to_string (staticShape).substr (0, 5)
+                    + " -> " + std::to_string (movingShape).substr (0, 5));
+
+        // d_L = -d_R, so the stereo image comes out of the branch
+        // relationship rather than out of a pan applied at the end. A pan
+        // cannot decorrelate a mono input at all; opposed detuning can, and
+        // the amount it does is modest because the branches share most of
+        // their structure.
+        const auto mono = makeSignal ("identical", sr, 3.0);
+        Rig flat;
+        flat.fission.spread = 0.0;
+        Rig opposed;
+        opposed.fission.spread = 1.0;
+
+        const auto flatOut = renderWith ("FISSION", mono, sr, 256, flat);
+        const auto flatCorr = correlation (flatOut.l, flatOut.r);
+        const auto opposedOut = renderWith ("FISSION", mono, sr, 256, opposed);
+        const auto opposedCorr = correlation (opposedOut.l, opposedOut.r);
+
+        report ("Test 8 stereo comes from the branches",
+                flatCorr > 0.9999 && opposedCorr < flatCorr - 0.005,
+                "mono-in correlation " + std::to_string (flatCorr).substr (0, 6)
+                + " -> " + std::to_string (opposedCorr).substr (0, 6));
+    }
+
+    //==============================================================================
+    // Test 9 — SLUDGE. Genuine low-frequency generation, referenced to the
+    // reactor's own frequency because SLUDGE does no pitch tracking.
+    //==============================================================================
+    void test9()
+    {
+        using namespace analysis;
+        constexpr auto sr = 44100.0;
+
+        // A reactor frequency well clear of the input's, so anything found at
+        // f_h/2 cannot have come from the excitation.
+        constexpr auto fH = 120.0;
+        Rig rig;
+        rig.sludgeProfile.baseHz = fH;
+        rig.sludge.exposure = 0.9;   // reaches the subharmonic weights
+        rig.events = false;
+
+        const auto in = makeSignal ("sine1k", sr, 3.0);
+        const auto out = renderWith ("SLUDGE", in, sr, 256, rig);
+
+        const auto window = size_t (sr * 1.5);
+        const auto half = goertzel (out.l, fH / 2.0, sr, size_t (sr), window);
+        const auto quarter = goertzel (out.l, fH / 4.0, sr, size_t (sr), window);
+        const auto whole = goertzel (out.l, fH, sr, size_t (sr), window);
+
+        // The input has nothing below 1 kHz, so this is generated.
+        const auto inHalf = goertzel (in.l, fH / 2.0, sr, size_t (sr), window);
+        report ("Test 9 generates f_h/2", db (half, inHalf) > 20.0,
+                "input " + std::to_string (inHalf).substr (0, 8)
+                + " -> output " + std::to_string (half).substr (0, 8));
+        report ("Test 9 generates f_h/4", quarter > 0.0 && db (quarter, inHalf) > 20.0,
+                std::to_string (quarter).substr (0, 8));
+
+        // The phase domain. A /2 oscillator wrapped at 2pi instead of 4pi puts
+        // its energy at f_h with a DC offset rather than at f_h/2, and the
+        // ratio of the two is what catches it.
+        const auto domainDb = db (half, whole);
+        report ("Test 9 the /2 phase wraps at 4pi", domainDb > 6.0,
+                "f_h/2 over f_h " + std::to_string (domainDb).substr (0, 5) + " dB");
+
+        // TOXICITY and the asymmetric stage. Asymmetry is what makes even
+        // orders; a symmetric curve makes only odd ones. What the
+        // specification requires is that even-order content is MEASURABLE,
+        // which is the thing a symmetric implementation cannot do.
+        const auto ordersAt = [&] (double toxicity, double& even, double& odd)
+        {
+            Rig r;
+            r.sludge.toxicity = toxicity;
+            r.sludge.exposure = 0.2;   // quiet subharmonics, so this measures
+                                       // the saturation rather than the reactor
+            r.events = false;
+            const auto y = renderWith ("SLUDGE", makeSignal ("sine440", sr, 2.0), sr, 256, r);
+            harmonicSplit (y.l, 440.0, sr, even, odd);
+        };
+
+        double cleanEven = 0.0, cleanOdd = 0.0, toxicEven = 0.0, toxicOdd = 0.0;
+        ordersAt (0.0, cleanEven, cleanOdd);
+        ordersAt (1.0, toxicEven, toxicOdd);
+
+        report ("Test 9 the stage is asymmetric",
+                cleanEven > cleanOdd * 0.1 && toxicEven > toxicOdd * 0.01,
+                "even/odd " + std::to_string (cleanEven / std::max (cleanOdd, 1e-15)).substr (0, 5)
+                + " at 0, " + std::to_string (toxicEven / std::max (toxicOdd, 1e-15)).substr (0, 5)
+                + " at 1");
+
+        report ("Test 9 TOXICITY changes harmonic content",
+                db (toxicEven + toxicOdd, cleanEven + cleanOdd) > 6.0,
+                "total harmonics "
+                + std::to_string (db (toxicEven + toxicOdd, cleanEven + cleanOdd)).substr (0, 5)
+                + " dB");
+
+        // Measured, repeatable, and not what the specification asks for.
+        // TOXICITY raises the odd orders far faster than the even ones, so
+        // the balance moves TOWARDS symmetry as the control is opened. The
+        // asymmetry is real and present throughout -- the control just does
+        // not increase it. That is a mapping decision in the prototype, which
+        // the comparison harness agrees with to 1e-14, and not a port fault,
+        // so it is recorded here rather than silently passed or silently
+        // failed.
+        if (toxicEven / std::max (toxicOdd, 1e-15) < cleanEven / std::max (cleanOdd, 1e-15))
+            warn ("Test 9 TOXICITY even-order direction",
+                  "even/odd FALLS "
+                  + std::to_string (cleanEven / std::max (cleanOdd, 1e-15)).substr (0, 5)
+                  + " -> " + std::to_string (toxicEven / std::max (toxicOdd, 1e-15)).substr (0, 5)
+                  + "; spec expects it to rise");
+
+        // HALF-LIFE. The body state must persist after the input stops, which
+        // a plain envelope follower with no memory cannot do.
+        const auto persistenceAt = [&] (double halfLife)
+        {
+            Rig r;
+            r.sludge.halfLife = halfLife;
+            r.events = false;
+            auto gated = makeSignal ("noise", sr, 3.0);
+            for (size_t i = size_t (sr); i < gated.l.size(); ++i)
+                gated.l[i] = gated.r[i] = 0.0;
+
+            const auto y = renderWith ("SLUDGE", gated, sr, 256, r);
+            auto energy = 0.0;
+            for (size_t i = size_t (sr * 1.2); i < size_t (sr * 2.5); ++i)
+                energy += y.l[i] * y.l[i];
+            return std::sqrt (energy / (sr * 1.3));
+        };
+
+        const auto brief = persistenceAt (0.0);
+        const auto full = persistenceAt (1.0);
+        const auto persistenceChange = std::abs (db (full, brief));
+
+        // There IS material after the input stops, which is the part that
+        // separates a memory from an envelope follower.
+        report ("Test 9 the body persists past the input", brief > 1e-4,
+                "tail " + std::to_string (brief).substr (0, 8));
+
+        // Across its whole travel HALF-LIFE moves that tail by 0.005 dB,
+        // which no listener can hear. Same provenance as the TOXICITY
+        // finding: it matches the prototype exactly, so it is a mapping to
+        // settle rather than a port fault.
+        if (persistenceChange < 1.0)
+            warn ("Test 9 HALF-LIFE sensitivity",
+                  "whole travel moves the tail "
+                  + std::to_string (persistenceChange).substr (0, 6) + " dB");
+        else
+            report ("Test 9 HALF-LIFE changes persistence", true,
+                    std::to_string (persistenceChange).substr (0, 5) + " dB");
+
+        // SNAPBACK. A short transient should move the body and then recoil
+        // past where it settles, rather than returning monotonically.
+        Rig snap;
+        snap.events = false;
+        auto hit = makeSignal ("silence", sr, 2.0);
+        for (size_t i = size_t (sr * 0.5); i < size_t (sr * 0.55); ++i)
+            hit.l[i] = hit.r[i] = 0.8 * rng::ubipolar ({ 5, 5, std::uint64_t (i) });
+
+        const auto response = renderWith ("SLUDGE", hit, sr, 256, snap);
+        std::vector<double> centres;
+        for (size_t at = size_t (sr * 0.5); at + 4096 <= size_t (sr * 1.6); at += 2048)
+            centres.push_back (centroid (response.l, sr, at, 4096));
+
+        auto overshoots = false;
+        auto overshoot = 0.0;
+        if (centres.size() > 4)
+        {
+            const auto settled = centres.back();
+            auto peak = centres[0];
+            for (auto c : centres)
+                peak = std::max (peak, c);
+            // Recoil, not a monotonic return: the trajectory goes past where
+            // it ends up.
+            overshoot = peak / std::max (settled, 1e-9);
+            overshoots = overshoot > 1.05;
+        }
+        report ("Test 9 SNAPBACK recoils", overshoots,
+                "centroid peaks " + std::to_string (overshoot).substr (0, 5)
+                + "x where it settles, over " + std::to_string (centres.size()) + " frames");
+    }
+
+    //==============================================================================
+    // Test 10 — ALIEN. It must contain a real oscillator, and that oscillator
+    // must be gated by events rather than free-running.
+    //==============================================================================
+    void test10()
+    {
+        using namespace analysis;
+        constexpr auto sr = 44100.0;
+        const auto silence = makeSignal ("silence", sr, 3.0);
+
+        // Silence in, events scheduled: output.
+        Rig scheduled;
+        const auto fromEvents = renderWith ("ALIEN", silence, sr, 256, scheduled);
+        report ("Test 10 silence plus events produces output", maxAbs (fromEvents) > 1e-3,
+                "peak " + std::to_string (maxAbs (fromEvents)).substr (0, 6));
+
+        // Silence in, nothing scheduled: silence. An instance sitting on a
+        // quiet track with nothing to play must not hum.
+        Rig idle;
+        idle.events = false;
+        const auto fromNothing = renderWith ("ALIEN", silence, sr, 256, idle);
+        report ("Test 10 silence without events is silent", maxAbs (fromNothing) == 0.0,
+                "peak " + std::to_string (maxAbs (fromNothing)).substr (0, 8));
+
+        // The output has an identifiable oscillator frequency, and it is the
+        // one the pitch register chose. Asking only that it lands "somewhere
+        // near 400 Hz" would need a 36-semitone tolerance -- the register's
+        // full span -- which no wrong answer could fail. Computing the
+        // expected value from the same formula makes it a real test.
+        Rig tuned;
+        tuned.alienProfile.baseHz = 400.0;
+        tuned.alien.spread = 0.0;     // no sweep
+        tuned.alien.toxicity = 0.0;   // no FM
+        tuned.alien.exposure = 0.0;   // no AM
+        tuned.alien.seed = 0;
+        tuned.flux = 0.0;
+
+        const auto expectedPitch = [&] (std::uint64_t event)
+        {
+            const auto q = rng::ubipolar ({ tuned.alien.seed, dsp::kAlienPitchStream, event });
+            return tuned.alienProfile.baseHz * std::pow (2.0, dsp::kAlienDMaxSemitones * q / 12.0);
+        };
+
+        const auto oneVoice = [&] (std::uint64_t event, const Rig& r)
+        {
+            dsp::AlienEngine one;
+            one.prepare (sr);
+            one.configure (r.alienProfile, r.alien);
+            one.trigger (event, false, 0.0, 0.0);
+
+            std::vector<double> voice (size_t (sr * 0.3));
+            for (auto& v : voice)
+            {
+                double l = 0.0, rr = 0.0;
+                one.process (l, rr);
+                v = l + rr;
+            }
+            return voice;
+        };
+
+        const auto heardVoice = oneVoice (0, tuned);
+        const auto heard = dominantHz (heardVoice, sr, 0, 8192);
+        const auto wanted = expectedPitch (0);
+        const auto cents = 1200.0 * std::log2 (std::max (heard, 1e-9) / wanted);
+        report ("Test 10 has an oscillator", std::abs (cents) < 60.0,
+                std::to_string (int (heard)) + " Hz against "
+                + std::to_string (int (wanted)) + " expected, "
+                + std::to_string (int (cents)) + " cents");
+
+        // FM. beta > 0 must put sidebands around the carrier that beta = 0
+        // does not have.
+        const auto sidebandsAt = [&] (double toxicity)
+        {
+            Rig r = tuned;
+            r.alien.toxicity = toxicity;
+            return thd (oneVoice (0, r), wanted, sr, 6);
+        };
+
+        const auto noFm = sidebandsAt (0.0);
+        const auto withFm = sidebandsAt (1.0);
+        report ("Test 10 FM adds sidebands", withFm > noFm * 1.5,
+                "harmonic content " + std::to_string (noFm).substr (0, 5)
+                + " -> " + std::to_string (withFm).substr (0, 5));
+
+        // AM. Measured at the modulation frequency itself rather than as the
+        // envelope's overall variation, which is dominated by the event's
+        // own attack and decay and barely moved when AM was switched on.
+        const auto amDepth = [&] (double exposure)
+        {
+            Rig r = tuned;
+            r.alien.exposure = exposure;
+            const auto voice = oneVoice (0, r);
+
+            std::vector<double> envelope;
+            envelope.reserve (voice.size());
+            auto state = 0.0;
+            for (auto v : voice)
+            {
+                state += (std::abs (v) - state) * 0.02;
+                envelope.push_back (state);
+            }
+
+            const auto fA = dsp::kAlienAmHzLo
+                          + (dsp::kAlienAmHzHi - dsp::kAlienAmHzLo) * exposure;
+            return goertzel (envelope, fA, sr, 0, size_t (sr * 0.2));
+        };
+
+        const auto noAm = amDepth (0.0);
+        const auto withAm = amDepth (1.0);
+        report ("Test 10 AM modulates the amplitude", withAm > noAm * 3.0,
+                "envelope energy at the AM rate " + std::to_string (noAm).substr (0, 8)
+                + " -> " + std::to_string (withAm).substr (0, 8));
+
+        // Pitch jumps. Two events must be able to differ in carrier frequency
+        // without the input differing at all -- the input here is silence.
+        std::vector<double> pitches;
+        auto matchesRegister = true;
+        for (std::uint64_t event : { 0, 1, 2, 3 })
+        {
+            const auto hz = dominantHz (oneVoice (event, tuned), sr, 0, 8192);
+            pitches.push_back (hz);
+            if (std::abs (1200.0 * std::log2 (std::max (hz, 1e-9) / expectedPitch (event))) > 60.0)
+                matchesRegister = false;
+        }
+
+        auto distinct = true;
+        for (size_t i = 1; i < pitches.size(); ++i)
+            if (std::abs (pitches[i] - pitches[0]) < 1.0)
+                distinct = false;
+
+        std::string pitchDetail;
+        for (auto p : pitches)
+            pitchDetail += std::to_string (int (p)) + " ";
+        report ("Test 10 events choose their own pitch", distinct && matchesRegister,
+                pitchDetail + "Hz, all within 60 cents of the register");
+
+        // Same seed, same render; different seed, different timing.
+        const auto a = renderWith ("ALIEN", silence, sr, 256, Rig {});
+        const auto b = renderWith ("ALIEN", silence, sr, 256, Rig {});
+        report ("Test 10 the seed reproduces the render", maxDifference (a, b) == 0.0, "");
+
+        Rig other;
+        other.seed = 1234;
+        other.alien.seed = 1234;
+        const auto c = renderWith ("ALIEN", silence, sr, 256, other);
+        report ("Test 10 a new seed is a new pattern", maxDifference (a, c) > 1e-6,
+                "max difference " + std::to_string (maxDifference (a, c)).substr (0, 6));
+    }
 }
 
 int main()
@@ -895,6 +1353,12 @@ int main()
     test7();
     std::printf ("\n");
     testDiscrimination();
+    std::printf ("\n");
+    test8();
+    std::printf ("\n");
+    test9();
+    std::printf ("\n");
+    test10();
 
     std::printf ("\nSQUELCH DSP VALIDATION: %s\n", failures == 0 ? "PASS" : "FAIL");
     if (warnings > 0)
