@@ -192,6 +192,7 @@ Three layers, each answering a question the others cannot.
 ./build/SquelchValidate                                           # dsp-testing.md, Tests 2-20
 ./scripts/test1.sh                                                # dsp-testing.md, Test 1
 ./.venv/bin/python -m prototype.diagnostics                       # dsp-testing.md, Test 19
+./.venv/bin/python scripts/fault-injection.py                     # does the suite catch anything?
 ```
 
 The **prototype** in `prototype/` is the contract. It is NumPy, it is readable,
@@ -296,26 +297,74 @@ control and 94% at the other.
 ### Regressions on the corrected semantics
 
 Each repair above has a test that pins it in the terms it was wrong in, and
-each was checked by putting the fault back. Three of the ten did not fail when
-they should have, which is the point of checking:
+every one was checked by putting its fault back. That is the claim worth
+making: not that the code passes, but that the suite has **discriminatory
+power** — several known regressions demonstrably cause the relevant assertion
+to fail. `scripts/fault-injection.py` re-establishes it on demand rather than
+leaving it as a historical note.
 
-- **FISSION's modulation** was asserted by a test that simulated its own AR(1),
-  so reverting the engine to DC gain left it passing. It now reads the
-  modulator the engine is actually running — 0.96 energy-normalised against
-  0.0028 DC-normalised.
-- **The memory's reach** was asserted by recomputing `tanh(M/ref)` in the test,
-  with the same blindness. It now reads the engine's own value.
-- **The snap's topology** had no coverage at all. Reverting it to a cascade
-  changes the output by under 0.01 dB — inside the golden render's tolerance —
-  so only the state itself can see it. The threshold sits between two measured
-  values, 0.70 as siblings and 0.18 as a cascade, rather than above zero.
+| invariant | pinned by |
+|---|---|
+| FISSION modulation range | engine state, 0.96 against 0.0028 DC-normalised |
+| FISSION branch decorrelation | mono input, 1.000 → 0.182 |
+| FISSION EXPOSURE monotonicity | eight steps, strictly rising |
+| TOXICITY → even-order generation | six steps, 0.68 → 1.27 |
+| HALF-LIFE → requested decay | fitted τ against requested, five settings |
+| HALF-LIFE isolation from level | reactor moves 0.14 dB across the control |
+| memory → cutoff | engine's own `tanh(M/ref)`, 0.45 of range |
+| snap transient semantics | state deviation 0.70 |
+| snap topology | state only — see below |
+| ALIEN/CHEMICAL compatibility | golden hashes, unmoved throughout |
 
-The two that matter most are HALF-LIFE's pair, because together they separate
-*the control works* from *the control happens to change something audible that
-correlates with the test*: the memory's measured 1/e decay tracks the requested
-time constant to three significant figures at every setting, **and** the
-reactor's level moves 0.14 dB across the whole control, which is to say the
-control does its job without doing anything else.
+Fault injection found four tests that did not fail when they should have, which
+is the entire point of running it:
+
+- **FISSION's modulation** and **the memory's reach** were each asserted by a
+  test that *reimplemented the formula it was checking*. That is oracle
+  coupling: the test and the implementation can share the same wrong
+  assumption, so a broken engine passes. Both now read the engine's own value.
+  The rule this produces is worth stating plainly: **a regression must observe
+  the engine's behaviour, not reproduce the equation used to implement it.**
+  Equations can still be tested — the τ-invariance check does exactly that —
+  but never as the sole oracle for the implementation.
+- **The snap's topology** had no coverage anywhere. Reverting it to a cascade
+  changes the render by under 0.01 dB, inside the golden render's tolerance.
+  That is not a weakness in the golden test; it is telling us something about
+  the DSP: *this invariant can change materially at the structural level
+  without producing a reliably measurable full-render difference.* So the
+  acceptance mechanism has to be state instrumentation, and the threshold sits
+  between two measured values — 0.70 as siblings, 0.18 as a cascade — rather
+  than above zero.
+- **Test 12's warn-list** was stale. Four controls had been routed to warnings
+  while they were known-broken, and after they were fixed the list stayed,
+  silently suppressing exactly the failure it had been documenting. Putting the
+  clamp back produced a green run. Removed, and the fault now reads −299 dB.
+- **The pump check's thresholds** had stopped measuring anything. They were set
+  at 7.0 dB and 6.0 dB/s when the figures were around 6, and the comment called
+  that "well inside its own ceiling" — which it was, for the material of the
+  time. After the resonator and drive-staging repairs the shipped build reads
+  3.18 dB and 1.74 dB/s, so reverting the level match to its old 0.6/1.2 s
+  tracker gave 6.10 dB and 4.95 dB/s — a gain riding the music by any
+  description — and passed. Tightened to 5.0 and 3.5, set from the correct
+  build with a factor of two in hand.
+
+HALF-LIFE carries two orthogonal criteria, which together separate *the control
+works* from *the control happens to change something audible that correlates
+with the test*:
+
+- **semantic correctness** — requested half-life → measured memory decay, fitted
+  by least squares over two time constants: 0.30, 1.47, 2.65, 3.82 and 5.00 s
+  against exactly those requested, inside 5%;
+- **isolation** — changing HALF-LIFE moves the reactor oscillator's level by
+  0.14 dB across the whole control.
+
+Both measurements had to be built the right way round first. A finite window
+has to be chosen against the time constant it is measuring — a fixed 2 s window
+reads a 10 s constant as 0.138 against a true 0.577 — and the capture cannot
+begin while the state is still being driven, or what is measured is
+`memory decay ⊗ gate decay` rather than the memory. Hence settle (five of `q`'s
+time constants), capture (two of the memory's), fit, in that order, with both
+windows scaled to the thing being measured.
 
 
 ## Constraints learned the hard way
@@ -392,17 +441,31 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
 - "Not applicable" is a third outcome and worth having. Folding it into the
   passes inflates them with assertions that never ran; folding it into the
   warnings reports a working control as suspect.
-- A test that recomputes the value it is checking cannot see the code stop
-  producing it. Two regressions written to pin a normalisation simulated the
-  formula themselves and passed happily with the fault put back. Read the
-  state the engine is actually running.
+- A regression must observe the engine's behaviour, not reproduce the equation
+  used to implement it. That is oracle coupling: the test and the code can
+  share the same wrong assumption, so a broken engine passes. Two regressions
+  written to pin a normalisation reimplemented the formula themselves and
+  passed happily with the fault put back. Test the equation separately if it
+  is worth testing, but never as the sole oracle.
 - Put the fault back and watch the test fail, or you do not know you have a
-  test. Three of ten regressions written for faults that had just been fixed
-  did not catch those faults, and one of them had no coverage at all because
-  the change is under the golden render's tolerance.
+  test. Four written for faults that had just been fixed did not catch them,
+  and two of those were suppressors left behind rather than missing tests: a
+  warn-list kept after its controls were repaired, and a pair of thresholds
+  set when the material was worse behaved and never revisited. Both were
+  quietly passing the exact regression they had been written to document.
+- When a fault is real but produces less difference than the golden render's
+  tolerance, that is not a weakness in the golden test. It is telling you the
+  invariant lives at the structural level and audio is the wrong measurement
+  domain for it. Instrument the state.
 - Set a threshold from both measurements, not from one. "Greater than zero"
   passes a mechanism that is a quarter alive; the snap reads 0.70 correct and
   0.18 broken, so the line belongs between them and the comment should say so.
+- A finite observation window has to be chosen against the time constant it is
+  measuring, and the capture cannot start while the state is still being
+  driven. A fixed 2 s window reads a 10 s constant as 0.138 against a true
+  0.577, and a decay measured from the gate is the memory and the gate in
+  series. Settle, capture, fit — with the windows scaled to the thing being
+  measured.
 
 
 

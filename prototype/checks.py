@@ -1501,15 +1501,20 @@ def check_peak_control_does_not_pump() -> tuple[bool, str]:
     # The hold is a level offset, not movement, so it is reported rather than
     # asserted: what matters is that the gain is not riding the music.
     #
-    # Widened from 3.0: fixing RADIATION's independent-noise-stream bug (see
-    # reactor.py) changed its specific realisation under this same seed, and
-    # swapping between equally-valid stream derivations swings this figure
-    # 2.98-5.94 dB on its own. 3.0 was tight enough to depend on which
-    # particular draw landed in the test window rather than on the gain
-    # actually riding the music — sustained movement (the thing a compressor
-    # does) is the more reliable signal and stays well inside its own ceiling
-    # throughout that range.
-    ok = swing < 7.0 and sustained < 6.0
+    # Tightened from 7.0/6.0 once the resonator and the drive staging were
+    # repaired. Those figures were set when this measured around 6 dB and the
+    # comment called 6.0 dB/s "well inside its own ceiling" -- which it was,
+    # for the material of the time. The material is better behaved now: the
+    # shipped build reads 3.18 dB and 1.74 dB/s, and a ceiling that still
+    # admits almost three times the sustained movement is not measuring
+    # anything. Fault injection found it, by reverting the level match to the
+    # 0.6/1.2 s tracker it used to have and watching nothing fail: that reads
+    # 6.10 dB and 4.95 dB/s, which is a gain riding the music by any
+    # description and was passing.
+    #
+    # Set from the correct build with roughly a factor of two in hand, the
+    # same way the snap's threshold is set from both of its measurements.
+    ok = swing < 5.0 and sustained < 3.5
     return ok, (
         f"gain wanders {swing:.2f} dB, sustained {sustained:.2f} dB/s, "
         f"holding at {blocks.mean():+.2f} dB"

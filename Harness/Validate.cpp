@@ -1641,53 +1641,8 @@ namespace
                               + ", centroid " + std::to_string (spectral).substr (0, 5)
                               + " dB, mid " + std::to_string (midStep).substr (0, 5) + " dB";
 
-            // Three controls are inert, and the cause is one shared mistake
-            // with a measured fix that is not safe to apply here. Reported as
-            // warnings rather than failures for that reason, and the reason
-            // is written out rather than implied.
-            //
-            // `decayTime` is a resonator's 1/e time constant, so the
-            // bandwidth that realises it is 1/(pi*tau). For RADIATION that
-            // runs 12.7 Hz down to 1.06 Hz and for FISSION 4.0 Hz down to
-            // 0.53 Hz, while both are floored at 5 Hz and then ceilinged at
-            // r = 0.99 and 0.995. FISSION's whole range is under its floor,
-            // so DECAY there is doubly dead; RADIATION escapes the floor only
-            // at DECAY = 0 with low EXPOSURE, and the ceiling takes that.
-            // The outputs are bit-identical, -300 dB apart, across the full
-            // travel of all three.
-            //
-            // A floor of 0.2 Hz and a ceiling of 0.99995 bracket the formula
-            // instead of replacing it, and were tried: all three controls
-            // come alive and the comparison harness still agrees, because
-            // both sides move together. It was reverted because the tails
-            // then run to seconds and three behavioural checks that currently
-            // pass stop passing -- the output stage's level match wanders
-            // 7.7 dB chasing them, AFTERGLOW's tail is swamped by the
-            // reaction's own, and FISSION's coupling check loses its margin.
-            //
-            // So the cap is load-bearing: it is hiding a level-matching
-            // weakness downstream. Which of the two to fix is a decision
-            // about how SQUELCH should sound, not one this suite can make.
-            static const std::string inert[] { "RADIATION DECAY", "RADIATION EXPOSURE",
-                                               "FISSION DECAY", "SLUDGE DECAY" };
-            const std::string label = std::string (control.reaction) + " " + control.name;
-
-            // SLUDGE DECAY is inert for a different reason, and a sharper
-            // one. It reaches the output through one term, the snap q - r,
-            // where q is a 5 Hz follower on the input and r is a second
-            // follower on q running at 40 Hz down to 12 Hz as DECAY opens.
-            // A snap is a fast tracker minus a slow one. These are the wrong
-            // way round: r is faster than q at every setting, so r simply
-            // follows q and their difference sits at the noise floor. The
-            // control moves the output by -79 dB even with REACTIVITY, which
-            // scales the term, held wide open.
-            if (! moves && std::find (std::begin (inert), std::end (inert), label) != std::end (inert))
-                warn ("Test 12 " + label,
-                      detail + (label == "SLUDGE DECAY"
-                                  ? " -- snap followers are inverted, r faster than q"
-                                  : " -- resonator r is clamped flat"));
-            else
-                report ("Test 12 " + label, moves, detail);
+            report ("Test 12 " + std::string (control.reaction) + " " + control.name,
+                    moves, detail);
         }
     }
 
@@ -2225,47 +2180,81 @@ namespace
         // 4. HALF-LIFE must set the memory's decay, and set it to the value it
         //    asks for. A control that moved the state in the right direction
         //    by an arbitrary amount would pass everything above this.
+        //
+        //    Settle, capture, fit, in that order. A finite window has to be
+        //    chosen against the time constant it is measuring, and the capture
+        //    cannot start while the state is still being driven: M is a
+        //    lowpass of q, so for the first few of q's own time constants what
+        //    is falling is the two in series and not the memory. Measured from
+        //    the gate the short end read 0.33 s against a requested 0.30 and
+        //    looked like a 10% mapping error.
+        //
+        //    Fitted over a decade of the decay rather than read off a single
+        //    1/e crossing, so one noisy sample cannot move the answer.
         const auto measuredTau = [&] (double halfLife)
         {
+            const auto wanted = 0.3 + (5.0 - 0.3) * halfLife;
+            const auto gate = 2.0;
+
+            // Five of q's time constants, which is the settle.
+            const auto settle = gate + 5.0 / (2.0 * M_PI * 5.0);
+
+            // Two of the memory's own, which is the capture. Scaling with the
+            // thing being measured is the whole point.
+            const auto span = 2.0 * wanted;
+
             std::vector<double> trace;
             Rig r;
             r.sludge.halfLife = halfLife;
             r.events = false;
             r.stateTrace = &trace;
 
-            auto gated = makeSignal ("noise", sr, 12.0);
-            for (size_t i = size_t (sr * 2); i < gated.l.size(); ++i)
+            auto gated = makeSignal ("noise", sr, gate + settle + span + 1.0);
+            for (size_t i = size_t (sr * gate); i < gated.l.size(); ++i)
                 gated.l[i] = gated.r[i] = 0.0;
 
             renderWith ("SLUDGE", gated, sr, 256, r);
 
-            // Started a little after the gate rather than at it. M is a
-            // lowpass of q, and q has its own 32 ms fall, so the first tenth
-            // of a second is the two decays in series: at the short end that
-            // read 0.33 s against a requested 0.30 and looked like a 10%
-            // mapping error rather than the cascade it is.
-            const auto from = size_t (sr * 2.15);
-            const auto start = trace[from];
-            const auto target = start / M_E;
-            for (size_t i = from; i < trace.size(); ++i)
-                if (trace[i] <= target)
-                    return (double (i) - double (from)) / sr;
-            return (double (trace.size()) - double (from)) / sr;
+            // Least squares on log M against t. The slope is -1/tau.
+            double n = 0.0, sumT = 0.0, sumY = 0.0, sumTT = 0.0, sumTY = 0.0;
+            for (size_t i = size_t (sr * settle); i < size_t (sr * (settle + span)); ++i)
+            {
+                if (trace[i] <= 0.0)
+                    continue;
+
+                const auto t = double (i) / sr;
+                const auto y = std::log (trace[i]);
+                n += 1.0;
+                sumT += t;
+                sumY += y;
+                sumTT += t * t;
+                sumTY += t * y;
+            }
+
+            if (n < 2.0)
+                return 0.0;
+
+            const auto denominator = n * sumTT - sumT * sumT;
+            if (std::abs (denominator) < 1e-12)
+                return 0.0;
+
+            const auto slope = (n * sumTY - sumT * sumY) / denominator;
+            return slope < 0.0 ? -1.0 / slope : 0.0;
         };
 
         auto tracks = true;
         std::string tauDetail;
-        for (auto halfLife : { 0.0, 0.5, 1.0 })
+        for (auto halfLife : { 0.0, 0.25, 0.5, 0.75, 1.0 })
         {
             const auto wanted = 0.3 + (5.0 - 0.3) * halfLife;
             const auto found = measuredTau (halfLife);
-            if (std::abs (found - wanted) / wanted > 0.1)
+            if (std::abs (found - wanted) / wanted > 0.05)
                 tracks = false;
             tauDetail += std::to_string (found).substr (0, 4) + "/"
                        + std::to_string (wanted).substr (0, 4) + "s  ";
         }
         report ("Regression HALF-LIFE sets the decay it asks for", tracks,
-                "measured/requested 1/e time " + tauDetail);
+                "fitted/requested tau " + tauDetail);
 
         // 5. And it must do that WITHOUT moving the level, which is what
         //    separates "HALF-LIFE works" from "HALF-LIFE happens to change
