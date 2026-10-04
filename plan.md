@@ -3,7 +3,7 @@
 Working plan for building the five reactions as five separate effects.
 
 The specification is [README.md](README.md), the transfer functions are in
-[maths.md](maths.md), and the validation contract is
+[dsp-maths.md](dsp-maths.md), and the validation contract is
 [dsp-testing.md](dsp-testing.md). This file is only the order of work.
 
 ---
@@ -14,7 +14,7 @@ Measured, not estimated.
 
 | | state |
 |---|---|
-| specification | all five reactions specified in maths.md |
+| specification | all five reactions specified in dsp-maths.md |
 | implementation | five distinct engines (SLUDGE, ALIEN, CHEMICAL, RADIATION, FISSION), dispatched per-reaction; no shared ladder |
 | `prototype/checks.py` | 37/37 passing |
 | reaction distinctness | 0/10 pairs too alike; closest FISSION/CHEMICAL at −6.1 dB |
@@ -115,7 +115,7 @@ a resonant peak. It is finished when:
 - its own test in dsp-testing.md passes;
 - the distinctness check improves, and no pair it is part of remains below
   −9 dB;
-- the forbidden shortcut in the maths.md audit table is demonstrably not what
+- the forbidden shortcut in the dsp-maths.md audit table is demonstrably not what
   was built.
 
 The last one is the point. Every reaction has a named lazy implementation that

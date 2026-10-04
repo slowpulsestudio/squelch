@@ -1,7 +1,7 @@
 # SQUELCH — Concept, Architecture & Parameters
 
 > What the plugin has to do. The transfer functions are in
-> [maths.md](maths.md). Where this document and the code disagree, the code is
+> [dsp-maths.md](dsp-maths.md). Where this document and the code disagree, the code is
 > unfinished.
 
 ## Core concept
@@ -27,7 +27,7 @@ on resonance; it is not a claim that every reaction is a filter.
 
 ## Architecture
 
-The transfer functions live in [maths.md](maths.md), each under a heading
+The transfer functions live in [dsp-maths.md](dsp-maths.md), each under a heading
 naming the reaction it belongs to.
 
 | reaction | mechanism | status |
@@ -39,7 +39,7 @@ naming the reaction it belongs to.
 | SLUDGE | subharmonic generation, asymmetric saturation, long memory | specified |
 | ALIEN | event-gated oscillator + FM/AM synthesis | specified |
 
-All five are now specified in [maths.md](maths.md). The code still runs one
+All five are now specified in [dsp-maths.md](dsp-maths.md). The code still runs one
 ladder with different coefficients for all five, which is why they measure as
 one effect rather than five, and that is the open work.
 
@@ -295,7 +295,7 @@ a term written as if its input were normalised, when it is a raw envelope that
 sits near 0.15 on real material.
 
 - **DECAY** reaches the output through one term, the snap `q − r`.
-  [maths.md](maths.md) writes `r` as a filter *of* `q` and then describes `r`
+  [dsp-maths.md](dsp-maths.md) writes `r` as a filter *of* `q` and then describes `r`
   as "moving first and `q` following" — which a cascade cannot do, since `q` is
   `r`'s input. Made siblings off the envelope, the prose becomes the behaviour.
   Then as a fraction of the body rather than a raw difference, DECAY's span
@@ -451,7 +451,7 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
   held at one value, so the first time the control actually moved, four
   separate stages turned out to be depending on the bug.
 - When a specification's equations and its prose disagree, the prose is
-  usually describing the intent and the equations the mistake. maths.md wrote
+  usually describing the intent and the equations the mistake. dsp-maths.md wrote
   SLUDGE's snap as a cascade and then described the two states as racing each
   other, which only a parallel pair can do.
 - A bare difference or sum of envelopes is only O(1) if the envelope is
@@ -511,7 +511,7 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
 
 # Cheatsheet
 
-Glyphs and transfer functions are in [maths.md](maths.md).
+Glyphs and transfer functions are in [dsp-maths.md](dsp-maths.md).
 
 ### Structure — what fires, and when
 

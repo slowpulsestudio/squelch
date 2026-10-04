@@ -37,7 +37,7 @@ does not override it: if a reaction does not yet do what README.md describes, th
 reaction is unfinished, not the document. Do not edit README.md to match the
 implementation.
 
-[maths.md](maths.md) holds the transfer functions, each under a heading naming the
+[dsp-maths.md](dsp-maths.md) holds the transfer functions, each under a heading naming the
 reaction it belongs to. A reaction with no maths there is not yet specified, and
 the gap is the work, not something to fill by reusing another reaction's engine.
 

@@ -994,7 +994,36 @@ Does it demonstrate an actual oscillator, FM/AM and reaction-specific timing?
 
 # Definition of done
 
-The implementation is considered mathematically validated only when:
+The contract has four axes and they are different claims. State them
+separately; do not let one stand in for another.
+
+* **All 27 DSP primitives agree with the prototype.** The implementation
+  computes what the contract computes.
+* **All 39 behavioural checks pass.** Behavioural verification passes.
+* **`SquelchValidate` reports zero FAIL and zero WARN.** A warning is a
+  deferred failure, and a warn-list outlives the fault it was written for.
+* **Specification coverage reports the expected clause set**, with every
+  uncovered clause carrying an explicit documented reason, printed in the
+  output rather than left to be inferred.
+* **Fault injection demonstrates that each injected known fault is detected by
+  its corresponding assertion.** This is materially stronger than the checks
+  passing: it establishes that the assertions are not merely capable of
+  passing, but were each shown to fail when their fault was restored.
+* **Coverage instrumentation fails closed.** If a named specification
+  assertion stops executing, specification coverage must decrease rather than
+  silently continue reporting the previous level.
+
+Clause coverage is not to be reported as a nominal pass without its
+qualification. The honest formulation is the one the README uses:
+*implementation regression coverage and specification coverage are different
+claims.* Fault injection establishes the first and says nothing about a
+requirement nothing has ever broken — which has therefore never been tested
+either. So the disposition to state is:
+
+`SQUELCH validation: PASS, with N explicitly documented specification-coverage gaps.`
+
+Underneath those axes, the implementation is considered mathematically
+validated only when:
 
 * the plugin builds;
 * plugin validation passes;
