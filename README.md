@@ -293,6 +293,30 @@ Tests 6 and 7 read CHEMICAL's register and RADIATION's stochastic state, the
 body is 21% intact half a second after the input stops at one end of the
 control and 94% at the other.
 
+### Regressions on the corrected semantics
+
+Each repair above has a test that pins it in the terms it was wrong in, and
+each was checked by putting the fault back. Three of the ten did not fail when
+they should have, which is the point of checking:
+
+- **FISSION's modulation** was asserted by a test that simulated its own AR(1),
+  so reverting the engine to DC gain left it passing. It now reads the
+  modulator the engine is actually running — 0.96 energy-normalised against
+  0.0028 DC-normalised.
+- **The memory's reach** was asserted by recomputing `tanh(M/ref)` in the test,
+  with the same blindness. It now reads the engine's own value.
+- **The snap's topology** had no coverage at all. Reverting it to a cascade
+  changes the output by under 0.01 dB — inside the golden render's tolerance —
+  so only the state itself can see it. The threshold sits between two measured
+  values, 0.70 as siblings and 0.18 as a cascade, rather than above zero.
+
+The two that matter most are HALF-LIFE's pair, because together they separate
+*the control works* from *the control happens to change something audible that
+correlates with the test*: the memory's measured 1/e decay tracks the requested
+time constant to three significant figures at every setting, **and** the
+reactor's level moves 0.14 dB across the whole control, which is to say the
+control does its job without doing anything else.
+
 
 ## Constraints learned the hard way
 
@@ -368,6 +392,17 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
 - "Not applicable" is a third outcome and worth having. Folding it into the
   passes inflates them with assertions that never ran; folding it into the
   warnings reports a working control as suspect.
+- A test that recomputes the value it is checking cannot see the code stop
+  producing it. Two regressions written to pin a normalisation simulated the
+  formula themselves and passed happily with the fault put back. Read the
+  state the engine is actually running.
+- Put the fault back and watch the test fail, or you do not know you have a
+  test. Three of ten regressions written for faults that had just been fixed
+  did not catch those faults, and one of them had no coverage at all because
+  the change is under the golden render's tolerance.
+- Set a threshold from both measurements, not from one. "Greater than zero"
+  passes a mechanism that is a quarter alive; the snap reads 0.70 correct and
+  0.18 broken, so the line belongs between them and the comment should say so.
 
 
 

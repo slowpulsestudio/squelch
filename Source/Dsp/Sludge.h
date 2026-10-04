@@ -123,12 +123,14 @@ namespace squelch::dsp
             // A fraction of the body, not a raw difference: deltaSnap is an
             // exponent in octaves, so this has to be O(1) to mean anything.
             const auto sSnap = std::clamp ((q - r) / std::max (q, kSnapFloor), -1.0, 1.0);
+            snap = sSnap;
 
             const auto m = mFilter.process (q, gM);
             memory = m;
             // Against a reference level, because tanh needs an O(1) argument:
             // q is a lowpassed max|x| and never left the linear region.
             const auto mB = std::tanh (m / kMemoryRef);
+            memoryReach = mB;
 
             const auto fC = std::pow (2.0, fBaseOct + deltaF * mB);
             const auto fEffective = std::clamp (fC * std::pow (2.0, deltaSnap * sSnap),
@@ -183,6 +185,16 @@ namespace squelch::dsp
         /// out of the audio.
         double memoryValue() const noexcept { return memory; }
 
+        /// The saturated memory, which is what the cutoff actually follows.
+        /// Recomputing tanh(M) in a test would not notice the engine dropping
+        /// its reference and sitting in the linear region again.
+        double memoryReachValue() const noexcept { return memoryReach; }
+
+        /// The snap. It collapses if its two followers are made a cascade
+        /// again, and that change is under 0.01 dB at the output, so nothing
+        /// but the state itself catches it.
+        double snapValue() const noexcept { return snap; }
+
     private:
         static constexpr double kFQHz = 5.0;
         static constexpr double kFRLoHz = 45.0;
@@ -207,7 +219,7 @@ namespace squelch::dsp
         // Per-sample state.
         ZeroStateOnePole qFilter, rFilter, mFilter, smoothL, smoothR;
         Oversampler oversamplerL, oversamplerR;
-        double theta { 0.0 }, memory { 0.0 };
+        double theta { 0.0 }, memory { 0.0 }, snap { 0.0 }, memoryReach { 0.0 };
 
         /// A fixed-length delay line, used to keep a causally-computed
         /// signal or coefficient in step with the oversampler's lagged path.

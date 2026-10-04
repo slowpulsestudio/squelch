@@ -175,6 +175,11 @@ namespace squelch::dsp
             outR = right.process (xR, -d, delayR, r, coupling, baseHz, sr);
         }
 
+        /// The delay modulator. Its swing is what decides whether the comb
+        /// moves, and it collapses silently if the normalisation goes back to
+        /// DC gain, so the regression reads it rather than the audio.
+        double modulationValue() const noexcept { return mD; }
+
     private:
         double sr { 44100.0 };
         std::uint64_t seed { 0 }, index { 0 };

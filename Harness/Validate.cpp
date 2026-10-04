@@ -112,6 +112,13 @@ namespace
         /// Filled in by renderWith when asked, so the state diagnostics can
         /// look at the mechanism rather than inferring it from the audio.
         std::vector<double>* stateTrace { nullptr };
+
+        /// A second state, for the reactions that have more than one worth
+        /// reading: SLUDGE's snap alongside its memory.
+        std::vector<double>* auxTrace { nullptr };
+
+        /// Trace the saturated memory rather than the raw one.
+        bool traceMemoryReach { false };
     };
 
     Stereo renderWith (const std::string& reaction, const Stereo& in, double sr, int blockSize,
@@ -155,6 +162,8 @@ namespace
 
         if (rig.stateTrace != nullptr)
             rig.stateTrace->resize (static_cast<size_t> (n));
+        if (rig.auxTrace != nullptr)
+            rig.auxTrace->resize (static_cast<size_t> (n));
 
         std::vector<dsp::ScheduledEvent> pending;
         pending.reserve (64);
@@ -209,8 +218,14 @@ namespace
                 if (rig.stateTrace != nullptr)
                     (*rig.stateTrace)[k] = reaction == "CHEMICAL" ? chemical.registerValue()
                                          : reaction == "RADIATION" ? radiation.stateValue()
-                                         : reaction == "SLUDGE" ? sludge.memoryValue()
+                                         : reaction == "SLUDGE" ? (rig.traceMemoryReach
+                                                                      ? sludge.memoryReachValue()
+                                                                      : sludge.memoryValue())
+                                         : reaction == "FISSION" ? fission.modulationValue()
                                          : 0.0;
+
+                if (rig.auxTrace != nullptr)
+                    (*rig.auxTrace)[k] = reaction == "SLUDGE" ? sludge.snapValue() : 0.0;
 
                 out.l[k] = yl;
                 out.r[k] = yr;
@@ -2036,6 +2051,333 @@ namespace
     }
 
     //==============================================================================
+    // Regressions on the corrected semantics.
+    //
+    // Each pins a specific thing that was wrong, in the terms it was wrong in,
+    // rather than relying on the test that happened to catch it. Most of those
+    // faults were invisible for a long time precisely because nothing asked
+    // the question this directly.
+    //==============================================================================
+    double deviation (const std::vector<double>& v)
+    {
+        if (v.size() < 2)
+            return 0.0;
+        auto mean = 0.0;
+        for (auto x : v)
+            mean += x;
+        mean /= double (v.size());
+
+        auto variance = 0.0;
+        for (auto x : v)
+            variance += (x - mean) * (x - mean);
+        return std::sqrt (variance / double (v.size()));
+    }
+
+    void testCorrectedSemantics()
+    {
+        using namespace analysis;
+        constexpr auto sr = 44100.0;
+
+        // 1. FISSION's modulation must not collapse as the time constant
+        //    lengthens. That is the exact signature of DC normalisation:
+        //    (1-a) falls off a cliff with tau and sqrt(1-a^2) does not, so a
+        //    tau-invariant swing is the property to pin. Simulated across four
+        //    orders of magnitude, because the shipped value is one number and
+        //    a regression that only tests that number cannot see the shape of
+        //    the mistake.
+        std::vector<double> swings;
+        std::string swingDetail;
+        for (auto tau : { 0.01, 0.1, 1.0, 10.0 })
+        {
+            const auto a = std::exp (-1.0 / std::max (tau * sr, 1.0));
+            const auto b = std::sqrt (1.0 - a * a);
+
+            // Both windows scale with tau. A slow state needs a few time
+            // constants to fill and a great many to show its steady-state
+            // deviation rather than how little it moves in a second: measured
+            // over a fixed 2 s the tau = 10 s case reads 0.138 against a true
+            // 0.577, which is the measurement being short-sighted and not the
+            // normalisation failing.
+            const auto settle = size_t (tau * sr * 4);
+            const auto window = size_t (tau * sr * 40);
+
+            auto state = 0.0;
+            std::vector<double> trace;
+            trace.reserve (window);
+            for (size_t i = 0; i < settle + window; ++i)
+            {
+                state = b * rng::ubipolar ({ 3, 909, i }) + a * state;
+                if (i >= settle)
+                    trace.push_back (state);
+            }
+
+            swings.push_back (deviation (trace));
+            swingDetail += std::to_string (tau).substr (0, 5) + "s "
+                         + std::to_string (swings.back()).substr (0, 5) + "  ";
+        }
+
+        auto widest = 0.0, narrowest = 1e30;
+        for (auto s : swings)
+        {
+            widest = std::max (widest, s);
+            narrowest = std::min (narrowest, s);
+        }
+        report ("Regression FISSION modulation survives long tau",
+                narrowest > 0.3 && widest / narrowest < 1.5,
+                "deviation at tau = " + swingDetail
+                + "(spread " + std::to_string (widest / narrowest).substr (0, 4) + "x)");
+
+        // The above pins the formula and not the engine: it simulates its own
+        // recursion, so reverting FISSION to DC gain leaves it passing. This
+        // reads the modulator the engine is actually running. Its deviation is
+        // 0.577 energy-normalised and 0.0017 DC-normalised, which is not a
+        // threshold anyone needs to think about.
+        {
+            std::vector<double> trace;
+            Rig r;
+            r.stateTrace = &trace;
+            renderWith ("FISSION", makeSignal ("noise", sr, 4.0), sr, 256, r);
+
+            trace.erase (trace.begin(), trace.begin() + long (sr));
+            const auto swing = deviation (trace);
+            report ("Regression FISSION modulator has its full range", swing > 0.3,
+                    "delay modulator deviation " + std::to_string (swing).substr (0, 6)
+                    + ", DC-normalised would be 0.0017");
+        }
+
+        // And the delivered consequence, since a correct modulator that never
+        // reached the output would pass the above: the branches must
+        // decorrelate a mono input, which no final pan could do.
+        const auto mono = makeSignal ("identical", sr, 3.0);
+        Rig flat, opposed;
+        flat.fission.spread = 0.0;
+        opposed.fission.spread = 1.0;
+
+        const auto flatOut = renderWith ("FISSION", mono, sr, 256, flat);
+        const auto opposedOut = renderWith ("FISSION", mono, sr, 256, opposed);
+        const auto decorrelation = correlation (flatOut.l, flatOut.r)
+                                 - correlation (opposedOut.l, opposedOut.r);
+
+        report ("Regression FISSION branches decorrelate", decorrelation > 0.5,
+                "mono-in correlation drops " + std::to_string (decorrelation).substr (0, 5)
+                + " with opposed detuning");
+
+        // 2. FISSION's EXPOSURE over the whole control, not three points of it.
+        const auto noise = makeSignal ("noise", sr, 2.0);
+        Rig floorRig;
+        floorRig.fission.exposure = 0.0;
+        const auto atFloor = renderWith ("FISSION", noise, sr, 256, floorRig);
+
+        std::vector<double> couplingDistance;
+        for (auto exposure : { 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0 })
+        {
+            Rig r;
+            r.fission.exposure = exposure;
+            const auto y = renderWith ("FISSION", noise, sr, 256, r);
+
+            Stereo difference;
+            difference.l.resize (y.l.size());
+            difference.r.resize (y.r.size());
+            for (size_t i = 0; i < y.l.size(); ++i)
+            {
+                difference.l[i] = y.l[i] - atFloor.l[i];
+                difference.r[i] = y.r[i] - atFloor.r[i];
+            }
+            couplingDistance.push_back (rms (difference));
+        }
+
+        auto monotonic = true;
+        for (size_t i = 1; i < couplingDistance.size(); ++i)
+            if (couplingDistance[i] < couplingDistance[i - 1])
+                monotonic = false;
+
+        report ("Regression FISSION EXPOSURE is monotonic end to end", monotonic,
+                "eight steps, " + std::to_string (couplingDistance.front()).substr (0, 6)
+                + " to " + std::to_string (couplingDistance.back()).substr (0, 6));
+
+        // 3. SLUDGE's TOXICITY, likewise. The fault it replaces was a
+        //    reversal, so endpoints alone would not notice a mapping that
+        //    doubles back in the middle.
+        std::vector<double> balance;
+        std::string balanceDetail;
+        for (auto toxicity : { 0.0, 0.2, 0.4, 0.6, 0.8, 1.0 })
+        {
+            Rig r;
+            r.sludge.toxicity = toxicity;
+            r.sludge.exposure = 0.2;
+            r.events = false;
+
+            const auto y = renderWith ("SLUDGE", makeSignal ("sine440", sr, 2.0), sr, 256, r);
+            double even = 0.0, odd = 0.0;
+            harmonicSplit (y.l, 440.0, sr, even, odd);
+            balance.push_back (even / std::max (odd, 1e-15));
+            balanceDetail += std::to_string (balance.back()).substr (0, 4) + " ";
+        }
+
+        auto rising = true;
+        for (size_t i = 1; i < balance.size(); ++i)
+            if (balance[i] <= balance[i - 1])
+                rising = false;
+
+        report ("Regression TOXICITY raises even orders throughout", rising,
+                "even/odd " + balanceDetail);
+
+        // 4. HALF-LIFE must set the memory's decay, and set it to the value it
+        //    asks for. A control that moved the state in the right direction
+        //    by an arbitrary amount would pass everything above this.
+        const auto measuredTau = [&] (double halfLife)
+        {
+            std::vector<double> trace;
+            Rig r;
+            r.sludge.halfLife = halfLife;
+            r.events = false;
+            r.stateTrace = &trace;
+
+            auto gated = makeSignal ("noise", sr, 12.0);
+            for (size_t i = size_t (sr * 2); i < gated.l.size(); ++i)
+                gated.l[i] = gated.r[i] = 0.0;
+
+            renderWith ("SLUDGE", gated, sr, 256, r);
+
+            // Started a little after the gate rather than at it. M is a
+            // lowpass of q, and q has its own 32 ms fall, so the first tenth
+            // of a second is the two decays in series: at the short end that
+            // read 0.33 s against a requested 0.30 and looked like a 10%
+            // mapping error rather than the cascade it is.
+            const auto from = size_t (sr * 2.15);
+            const auto start = trace[from];
+            const auto target = start / M_E;
+            for (size_t i = from; i < trace.size(); ++i)
+                if (trace[i] <= target)
+                    return (double (i) - double (from)) / sr;
+            return (double (trace.size()) - double (from)) / sr;
+        };
+
+        auto tracks = true;
+        std::string tauDetail;
+        for (auto halfLife : { 0.0, 0.5, 1.0 })
+        {
+            const auto wanted = 0.3 + (5.0 - 0.3) * halfLife;
+            const auto found = measuredTau (halfLife);
+            if (std::abs (found - wanted) / wanted > 0.1)
+                tracks = false;
+            tauDetail += std::to_string (found).substr (0, 4) + "/"
+                       + std::to_string (wanted).substr (0, 4) + "s  ";
+        }
+        report ("Regression HALF-LIFE sets the decay it asks for", tracks,
+                "measured/requested 1/e time " + tauDetail);
+
+        // 5. And it must do that WITHOUT moving the level, which is what
+        //    separates "HALF-LIFE works" from "HALF-LIFE happens to change
+        //    something audible that correlates with the test". Once the input
+        //    stops, what is left is the reactor oscillator, and the memory is
+        //    specified to drive the cutoff and the reactor's pitch -- not how
+        //    loud it is.
+        const auto reactorLevel = [&] (double halfLife)
+        {
+            Rig r;
+            r.sludge.halfLife = halfLife;
+            r.events = false;
+
+            auto gated = makeSignal ("noise", sr, 4.0);
+            for (size_t i = size_t (sr); i < gated.l.size(); ++i)
+                gated.l[i] = gated.r[i] = 0.0;
+
+            const auto y = renderWith ("SLUDGE", gated, sr, 256, r);
+
+            auto energy = 0.0;
+            size_t count = 0;
+            for (size_t i = size_t (sr * 2.0); i < size_t (sr * 4.0); ++i, ++count)
+                energy += y.l[i] * y.l[i];
+            return std::sqrt (energy / double (std::max<size_t> (count, 1)));
+        };
+
+        const auto levelMove = std::abs (db (reactorLevel (1.0), reactorLevel (0.0)));
+        report ("Regression HALF-LIFE does not move the reactor level", levelMove < 1.0,
+                "reactor level moves " + std::to_string (levelMove).substr (0, 5)
+                + " dB across the control");
+
+        // 5b. The memory also has to REACH the output, which the decay test
+        //     above cannot see: it measures a ratio, and a ratio is unchanged
+        //     by how far the state is allowed to swing. Dropping the reference
+        //     and letting tanh sit in its linear region again moves the render
+        //     by under 0.01 dB, so only the state says anything.
+        {
+            std::vector<double> reach;
+            Rig r;
+            r.sludge.spread = 1.0;
+            r.events = false;
+            r.stateTrace = &reach;
+            r.traceMemoryReach = true;
+            renderWith ("SLUDGE", makeSignal ("noise", sr, 3.0), sr, 256, r);
+
+            auto peak = 0.0;
+            for (size_t i = size_t (sr); i < reach.size(); ++i)
+                peak = std::max (peak, reach[i]);
+
+            report ("Regression the memory reaches the cutoff", peak > 0.4,
+                    "tanh(M) peaks at " + std::to_string (peak).substr (0, 5)
+                    + " of its range, unnormalised it was 0.17");
+        }
+
+        // 5c. The snap's two followers must be siblings off the envelope and
+        //     not a chain. As a cascade q - r sits at the noise floor, and
+        //     that change is under 0.01 dB at the output and inside Test 12's
+        //     threshold, so nothing else in the suite catches it at all.
+        {
+            // Bursts with gaps. On stationary noise the two followers both
+            // converge on the same mean and the snap is small whether they
+            // are siblings or a chain, so the material has to contain the
+            // transients the term exists to detect.
+            auto pulsed = makeSignal ("noise", sr, 3.0);
+            for (size_t i = 0; i < pulsed.l.size(); ++i)
+                if ((i / size_t (sr * 0.12)) % 2 == 1)
+                    pulsed.l[i] = pulsed.r[i] = 0.0;
+
+            std::vector<double> memory, snap;
+            Rig r;
+            r.sludge.reactivity = 1.0;
+            r.events = false;
+            r.stateTrace = &memory;
+            r.auxTrace = &snap;
+            renderWith ("SLUDGE", pulsed, sr, 256, r);
+
+            snap.erase (snap.begin(), snap.begin() + long (sr * 0.5));
+            const auto swing = deviation (snap);
+
+            // 0.70 as siblings and 0.18 as a cascade, measured both ways. The
+            // cascade is not dead any more because the fraction amplifies it
+            // in the gaps where the body is small, so the threshold has to sit
+            // between two real numbers rather than above zero.
+            report ("Regression the snap is a transient term", swing > 0.4,
+                    "snap deviation " + std::to_string (swing).substr (0, 6)
+                    + ", as a cascade it is 0.18");
+        }
+
+        // 6. ALIEN and CHEMICAL were untouched by all of this and must stay
+        //    that way. Test 17 would catch a change, but it would read as
+        //    "a golden moved" rather than as what it would actually be: a
+        //    repair to one reaction leaking into another.
+        auto untouched = true;
+        std::string untouchedDetail;
+        for (const auto& golden : goldens)
+        {
+            const std::string name { golden.reaction };
+            if (name != "ALIEN" && name != "CHEMICAL")
+                continue;
+
+            const auto wanted = name == "ALIEN" ? 17311358974143198345ull
+                                                : 2381812392278790764ull;
+            if (golden.hash != wanted)
+                untouched = false;
+            untouchedDetail += name + (golden.hash == wanted ? " held  " : " MOVED  ");
+        }
+
+        report ("Regression untouched reactions stayed untouched", untouched,
+                untouchedDetail + "since before the DECAY repair");
+    }
+
+    //==============================================================================
     // Test 20 — the five questions the report has to answer out loud. Each one
     // is answered by the mechanism tests above and nothing else: producing
     // audio, sounding distorted, or having a peak somewhere does not count.
@@ -2271,6 +2613,8 @@ int main (int argc, char** argv)
     test14();
     std::printf ("\n");
     test17 (regenerateGoldens);
+    std::printf ("\n");
+    testCorrectedSemantics();
 
     std::printf ("\nSQUELCH DSP VALIDATION: %s\n", failures == 0 ? "PASS" : "FAIL");
     if (warnings > 0)
