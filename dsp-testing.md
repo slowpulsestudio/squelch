@@ -19,6 +19,61 @@ Do not judge success only by "it sounds interesting".
 
 ---
 
+# Measurement principles
+
+These are not advice. Each one is a mistake this suite actually made, found by
+deliberately reintroducing a fixed bug and watching the test pass anyway.
+
+**1. Use a behavioural oracle, not a duplicated implementation formula.**
+
+A test that independently reconstructs the implementation's equation can verify
+arithmetic, but cannot detect a shared semantic error: the test and the code
+assume the same wrong thing and the broken engine passes. Two regressions
+written here to pin a normalisation reimplemented the formula themselves and
+caught nothing. Read the state the engine is actually running — expose an
+accessor if you have to. Test the equation separately if it is worth testing,
+but never as the sole oracle.
+
+**2. Use the measurement domain appropriate to the invariant.**
+
+| the invariant is about | measure |
+|---|---|
+| audible or output behaviour | the audio render |
+| persistence, memory, topology | the internal state |
+| monotonicity and range | a parameter sweep |
+| unintended change | the golden render |
+
+**3. Do not use golden audio to prove a structurally weakly observable property.**
+
+Reverting SLUDGE's snap to a cascade is a real topology change that moves the
+render by under 0.01 dB — inside the golden render's own tolerance. That is not
+a weakness in the golden test. It is telling you the invariant lives at the
+structural level and audio is the wrong domain for it. Instrument the state.
+
+**4. The observation window and starting conditions are part of the
+measurement specification.**
+
+They are not incidental test implementation. A finite window has to be chosen
+against the time constant it is measuring — a fixed 2 s window reads a 10 s
+exponential as a deviation of 0.138 against a true 0.577 — and a capture cannot
+begin while the state is still being driven, or what is measured is
+`state decay ⊗ input decay`. Settle, capture, fit, with both windows scaled to
+the thing being measured.
+
+**5. Fault injection is a test of the test suite.**
+
+Getting the current build green proves the code passes. Deliberately restoring
+a known bug and requiring the named regression to fail proves the suite would
+notice if it stopped passing. Those are different claims and only the second is
+worth much. `scripts/fault-injection.py` does it on demand.
+
+Keep implementation regression coverage and specification coverage apart.
+Fault injection establishes the first. It says nothing about a requirement
+nothing has ever broken — which has therefore never been tested either. The
+second needs its own map, and `SquelchValidate` prints one.
+
+---
+
 # Test inputs
 
 Generate deterministic test signals.

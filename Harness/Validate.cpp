@@ -602,6 +602,21 @@ namespace
     // Test 6 — CHEMICAL. The resonator, and the stochastic register inspected
     // directly rather than inferred from the audio.
     //==============================================================================
+    double deviation (const std::vector<double>& v)
+    {
+        if (v.size() < 2)
+            return 0.0;
+        auto mean = 0.0;
+        for (auto x : v)
+            mean += x;
+        mean /= double (v.size());
+
+        auto variance = 0.0;
+        for (auto x : v)
+            variance += (x - mean) * (x - mean);
+        return std::sqrt (variance / double (v.size()));
+    }
+
     double relativeSpread (const std::vector<double>& v)
     {
         if (v.size() < 2)
@@ -763,6 +778,31 @@ namespace
         report ("Test 16 spectral hole does not silence", outHole > inHole,
                 "input " + std::to_string (inHole).substr (0, 8)
                 + " -> output " + std::to_string (outHole).substr (0, 8));
+
+        // ENRICHMENT is the gain into the reaction, so harder in must mean
+        // more excitation out. Measured at the ladder's own resonance, where
+        // the excitation is what is being amplified.
+        const auto excitationAt = [&] (double gain)
+        {
+            Rig r;
+            r.chemicalFeedback = 3.2;
+            r.events = false;
+
+            auto driven = makeSignal ("saw", sr, 2.0);
+            for (size_t i = 0; i < driven.l.size(); ++i)
+            {
+                driven.l[i] *= gain;
+                driven.r[i] *= gain;
+            }
+
+            const auto out = renderWith ("CHEMICAL", driven, sr, 256, r);
+            return goertzel (out.l, r.chemicalCutoff * 1.93, sr, size_t (sr * 0.5), size_t (sr * 0.5));
+        };
+
+        const auto excitationRise = db (excitationAt (1.0), excitationAt (0.25));
+        report ("Test 6 ENRICHMENT changes excitation", excitationRise > 3.0,
+                "resonance rises " + std::to_string (excitationRise).substr (0, 5)
+                + " dB for 12 dB more input");
     }
 
     //==============================================================================
@@ -890,6 +930,41 @@ namespace
         other.stateTrace = &otherTrace;
         renderWith ("RADIATION", noise, sr, 256, other);
         report ("Test 7 a new seed is a new trajectory", trace != otherTrace, "");
+
+        // The ticks must be discrete events rather than a bed of noise, and
+        // the specification is explicit that they are "rounded" rather than
+        // full-band bursts. Both fall out of the same measurement: a sparse
+        // train of rounded impulses has a high crest factor against a noise
+        // bed, which has almost none.
+        Rig ticking;
+        ticking.events = false;        // no scheduled pulses, so what is left
+        ticking.radiation.decay = 0.0; // is the tick generator alone
+        const auto quiet = makeSignal ("lowsine", sr, 3.0);
+        const auto ticks = renderWith ("RADIATION", quiet, sr, 256, ticking);
+
+        const auto crest = db (maxAbs (ticks), rms (ticks));
+        report ("Test 7 the ticks are discrete", crest > 12.0,
+                "crest factor " + std::to_string (crest).substr (0, 5)
+                + " dB; a noise bed would be near 10");
+
+        // And sparse: most of the render should be well below its own peak,
+        // which is not true of anything continuous. Within 6 dB rather than
+        // 12, because at 12 the figure lands on 49.3% against a 50% line and
+        // the threshold would be deciding the answer.
+        const auto frame = size_t (sr) / 100;
+        size_t loud = 0, frames = 0;
+        for (size_t at = 0; at + frame <= ticks.l.size(); at += frame, ++frames)
+        {
+            auto peak = 0.0;
+            for (size_t i = at; i < at + frame; ++i)
+                peak = std::max (peak, std::abs (ticks.l[i]));
+            if (peak > maxAbs (ticks) * 0.5)
+                ++loud;
+        }
+
+        const auto active = 100.0 * double (loud) / double (std::max<size_t> (frames, 1));
+        report ("Test 7 the activity is sparse", active < 25.0,
+                std::to_string (active).substr (0, 4) + "% of 10 ms frames within 6 dB of the peak");
     }
 
     //==============================================================================
@@ -1076,6 +1151,82 @@ namespace
                 flatCorr > 0.9999 && opposedCorr < flatCorr - 0.005,
                 "mono-in correlation " + std::to_string (flatCorr).substr (0, 6)
                 + " -> " + std::to_string (opposedCorr).substr (0, 6));
+
+        // Left against right in phase, not just in level. Opposed detuning
+        // puts the branches at different frequencies, so the two channels
+        // drift in and out of phase with each other; a pan cannot do that at
+        // all, and the coincident case is the control that shows it.
+        const auto phaseSpread = [&] (const Stereo& s)
+        {
+            std::vector<double> angles;
+            for (size_t at = 0; at + 8192 <= s.l.size(); at += 4096)
+            {
+                auto left = spectrum (s.l, at, 8192);
+                auto right = spectrum (s.r, at, 8192);
+                if (left.size() < 8)
+                    continue;
+
+                // Where the branches live, not the whole band.
+                const auto binHz = sr / double ((left.size() - 1) * 2);
+                const auto lo = size_t (200.0 / binHz), hi = size_t (900.0 / binHz);
+
+                auto sum = 0.0;
+                size_t count = 0;
+                for (auto i = lo; i <= hi && i < left.size(); ++i, ++count)
+                    sum += std::abs (left[i] - right[i]) / std::max (left[i] + right[i], 1e-15);
+                angles.push_back (count ? sum / double (count) : 0.0);
+            }
+            return deviation (angles);
+        };
+
+        // The coincident case is structurally exactly zero -- identical
+        // branches give identical channels -- so this needs an absolute floor
+        // rather than "more than nothing", which anything at all would pass.
+        report ("Test 8 the channels differ in phase",
+                phaseSpread (coincident) < 1e-9 && phaseSpread (split) > 0.01,
+                "band imbalance varies " + std::to_string (phaseSpread (coincident)).substr (0, 6)
+                + " -> " + std::to_string (phaseSpread (split)).substr (0, 6));
+
+        // Beating. Two branches a few Hz apart sum to one tone whose envelope
+        // pulses at the difference, so this needs a tonal excitation at the
+        // branch frequency: on noise the envelope is already moving for
+        // reasons of its own and reads 0.44 at every SPREAD. The follower is
+        // fast, 3 ms, because the beat is tens of Hz and a slow one averages
+        // it away -- the same window-against-timescale point as everywhere
+        // else in this file.
+        const auto beatDepth = [&] (double spread)
+        {
+            Rig r;
+            r.fission.spread = spread;
+            r.fission.exposure = 0.5;
+            r.events = false;
+
+            Stereo tone;
+            tone.l.resize (size_t (sr * 3.0));
+            tone.r.resize (tone.l.size());
+            for (size_t i = 0; i < tone.l.size(); ++i)
+                tone.l[i] = tone.r[i] = 0.4 * std::sin (2.0 * M_PI * Rig {}.fissionProfile.baseHz
+                                                        * double (i) / sr);
+
+            const auto y = renderWith ("FISSION", tone, sr, 256, r);
+
+            const auto coefficient = std::exp (-1.0 / (0.003 * sr));
+            std::vector<double> envelope;
+            auto state = 0.0;
+            for (size_t i = size_t (sr) / 2; i < y.l.size(); ++i)
+            {
+                state = (1.0 - coefficient) * std::abs (y.l[i]) + coefficient * state;
+                envelope.push_back (state);
+            }
+            return relativeSpread (envelope);
+        };
+
+        const auto coincidentBeat = beatDepth (0.0);
+        const auto splitBeat = beatDepth (1.0);
+        report ("Test 8 the branches beat", splitBeat > coincidentBeat * 3.0,
+                "envelope depth on a branch-frequency tone "
+                + std::to_string (coincidentBeat).substr (0, 5)
+                + " -> " + std::to_string (splitBeat).substr (0, 5));
     }
 
     //==============================================================================
@@ -1495,6 +1646,39 @@ namespace
         return std::sqrt (sum / double (std::max<size_t> (a.size(), 1)));
     }
 
+    /** The same render with the shared output stage on the end.
+
+        Test 11 is explicit that differentiation has to be measured in two
+        domains, because "a fixed shared EQ curve and a common level target
+        will pull distinct architectures toward a common spectrum". Those two
+        stages are exactly Voice and UnityMatch, so those are what this
+        applies -- not the whole chain, which would also bring in per-event
+        placement and the reverb and measure something other than the
+        re-convergence risk the spec names.
+    */
+    Stereo throughOutputStage (const Stereo& raw, double sr)
+    {
+        dsp::Voice voiceL, voiceR;
+        dsp::UnityMatch unity;
+        voiceL.prepare (sr);
+        voiceR.prepare (sr);
+        unity.prepare (sr);
+
+        Stereo out;
+        out.l.resize (raw.l.size());
+        out.r.resize (raw.r.size());
+
+        for (size_t i = 0; i < raw.l.size(); ++i)
+        {
+            double l = voiceL.process (raw.l[i]);
+            double r = voiceR.process (raw.r[i]);
+            unity.process (l, r, l, r);
+            out.l[i] = l;
+            out.r[i] = r;
+        }
+        return out;
+    }
+
     void test11()
     {
         constexpr auto sr = 44100.0;
@@ -1502,9 +1686,13 @@ namespace
 
         // The same input, pattern, seed and every control held fixed. Only
         // REACTION changes.
+        std::vector<Stereo> raw;
         std::vector<std::vector<double>> descriptors;
         for (const auto& reaction : reactions)
-            descriptors.push_back (descriptorsOf (renderWith (reaction, noise, sr, 256, Rig {}), sr));
+        {
+            raw.push_back (renderWith (reaction, noise, sr, 256, Rig {}));
+            descriptors.push_back (descriptorsOf (raw.back(), sr));
+        }
 
         // The reference for "too alike" is one reaction against ITSELF on a
         // different seed. Two reactions closer together than that have
@@ -1541,6 +1729,33 @@ namespace
         report ("Test 11 reactions have not converged", closest > withinReaction,
                 "closest pair " + closestPair + " at " + std::to_string (closest).substr (0, 5)
                 + ", a reaction against itself " + std::to_string (withinReaction).substr (0, 5));
+
+        // The product domain. Raw-domain separation proves the architectures
+        // differ; this proves the shared output stage does not put them back
+        // together. Failing here while passing above would mean the output
+        // stage is the problem and not the reactions.
+        std::vector<std::vector<double>> finals;
+        for (const auto& render : raw)
+            finals.push_back (descriptorsOf (throughOutputStage (render, sr), sr));
+
+        auto closestFinal = 1e30;
+        std::string closestFinalPair;
+        for (size_t i = 0; i < finals.size(); ++i)
+            for (size_t j = i + 1; j < finals.size(); ++j)
+            {
+                const auto d = descriptorDistance (finals[i], finals[j]);
+                if (d < closestFinal)
+                {
+                    closestFinal = d;
+                    closestFinalPair = reactions[i] + "/" + reactions[j];
+                }
+            }
+
+        report ("Test 11 the output stage does not reconverge them",
+                closestFinal > withinReaction,
+                "closest pair after voicing and level match " + closestFinalPair
+                + " at " + std::to_string (closestFinal).substr (0, 5)
+                + ", raw " + std::to_string (closest).substr (0, 5));
     }
 
     //==============================================================================
@@ -2013,21 +2228,6 @@ namespace
     // faults were invisible for a long time precisely because nothing asked
     // the question this directly.
     //==============================================================================
-    double deviation (const std::vector<double>& v)
-    {
-        if (v.size() < 2)
-            return 0.0;
-        auto mean = 0.0;
-        for (auto x : v)
-            mean += x;
-        mean /= double (v.size());
-
-        auto variance = 0.0;
-        for (auto x : v)
-            variance += (x - mean) * (x - mean);
-        return std::sqrt (variance / double (v.size()));
-    }
-
     void testCorrectedSemantics()
     {
         using namespace analysis;
@@ -2367,6 +2567,140 @@ namespace
     }
 
     //==============================================================================
+    // Specification coverage.
+    //
+    // Fault injection proves the suite catches faults this instrument has
+    // actually had. That is implementation regression coverage, and it is not
+    // the same claim as covering the specification: a requirement nothing has
+    // ever broken has never been tested either, and a green run says nothing
+    // about it.
+    //
+    // So every measurable clause in dsp-testing.md is listed here against the
+    // assertion that covers it. A renamed or deleted assertion turns this red
+    // rather than quietly reducing coverage, and the clauses with nothing
+    // against them are printed as uncovered rather than left to be inferred
+    // from a passing run.
+    //==============================================================================
+    struct Clause { const char* spec; const char* requirement; const char* assertion; const char* why; };
+
+    void testSpecificationCoverage()
+    {
+        static const Clause clauses[]
+        {
+            // Test 6 — CHEMICAL
+            { "6", "resonant response exists",            "Test 6 resonance exists" , nullptr },
+            { "6", "resonance increases with EXPOSURE",   "Test 6 EXPOSURE raises resonance" , nullptr },
+            { "6", "resonant frequency follows SPREAD",   "Test 6 resonance follows cutoff" , nullptr },
+            { "6", "TOXICITY changes harmonic content",   "Test 6 TOXICITY adds harmonics" , nullptr },
+            { "6", "feedback bounded below stability",    "Test 6 feedback stays bounded" , nullptr },
+            { "6", "ladder rings past the transient",     "Test 6 ladder rings on" , nullptr },
+            { "6", "register held across an event",       "Test 6 register is event-held" , nullptr },
+            { "6", "register relocates, does not scale",  "Test 6 register moves where, not whether" , nullptr },
+            { "6", "same seed, same register",            "Test 6 register is reproducible" , nullptr },
+            { "6", "new seed, new register",              "Test 6 register follows the seed" , nullptr },
+            { "6", "DECAY changes event duration",        nullptr,
+              "the rig runs the engines directly and CHEMICAL's event envelope "
+              "lives in the scheduler stage above them" },
+            { "6", "ENRICHMENT changes excitation",       "Test 6 ENRICHMENT changes excitation" , nullptr },
+
+            // Test 7 — RADIATION
+            { "7", "VOLATILITY moves the spectrum",       "Test 7 VOLATILITY moves the spectrum" , nullptr },
+            { "7", "state evolves sample to sample",      "Test 7 state evolves per sample" , nullptr },
+            { "7", "state is temporally correlated",      "Test 7 state is correlated" , nullptr },
+            { "7", "same seed reproduces the waveform",   "Test 7 seed reproduces the waveform" , nullptr },
+            { "7", "new seed, new trajectory",            "Test 7 a new seed is a new trajectory" , nullptr },
+            { "7", "CHEMICAL/RADIATION discrimination",   "CHEMICAL and RADIATION have not converged" , nullptr },
+            { "7", "ticks discrete, not a noise bed",     "Test 7 the ticks are discrete" , nullptr },
+            { "7", "high-frequency activity is sparse",   "Test 7 the activity is sparse" , nullptr },
+            { "7", "event-to-event correlation",          nullptr,
+              "the specification lists it to be measured, not to be met; no "
+              "threshold is given and none has been invented" },
+
+            // Test 8 — FISSION
+            { "8", "coupling changes the output",         "Test 8 coupling changes the output" , nullptr },
+            { "8", "coupling is a continuum",             "Test 8 coupling is a continuum" , nullptr },
+            { "8", "detuning leaves interference",        "Test 8 detuning leaves a comb" , nullptr },
+            { "8", "the interference moves",              "Test 8 the interference moves" , nullptr },
+            { "8", "stereo from branches, not a pan",     "Test 8 stereo comes from the branches" , nullptr },
+            { "8", "left/right phase difference",         "Test 8 the channels differ in phase" , nullptr },
+            { "8", "branch beating",                      "Test 8 the branches beat" , nullptr },
+
+            // Test 9 — SLUDGE
+            { "9", "generates f_h/2",                     "Test 9 generates f_h/2" , nullptr },
+            { "9", "generates f_h/4",                     "Test 9 generates f_h/4" , nullptr },
+            { "9", "the /2 phase wraps at 4pi",           "Test 9 the /2 phase wraps at 4pi" , nullptr },
+            { "9", "the stage is asymmetric",             "Test 9 the stage is asymmetric" , nullptr },
+            { "9", "TOXICITY changes harmonic content",   "Test 9 TOXICITY changes harmonic content" , nullptr },
+            { "9", "HALF-LIFE persistence",               "Test 9 the body persists past the input" , nullptr },
+            { "9", "SNAPBACK recoils",                    "Test 9 SNAPBACK recoils" , nullptr },
+
+            // Test 10 — ALIEN
+            { "10", "silence plus events gives output",   "Test 10 silence plus events produces output" , nullptr },
+            { "10", "silence without events is silent",   "Test 10 silence without events is silent" , nullptr },
+            { "10", "identifiable oscillator frequency",  "Test 10 has an oscillator" , nullptr },
+            { "10", "FM adds sidebands",                  "Test 10 FM adds sidebands" , nullptr },
+            { "10", "AM structure",                       "Test 10 AM modulates the amplitude" , nullptr },
+            { "10", "discrete pitch jumps",               "Test 10 events choose their own pitch" , nullptr },
+            { "10", "same seed reproduces the render",    "Test 10 the seed reproduces the render" , nullptr },
+            { "10", "new seed, new timing",               "Test 10 a new seed is a new pattern" , nullptr },
+
+            // Tests 11 to 20
+            { "11", "reaction domain differentiation",    "Test 11 reactions have not converged" , nullptr },
+            { "11", "product domain differentiation",     "Test 11 the output stage does not reconverge" , nullptr },
+            { "13", "DECAY does not shorten the tail",    "Test 13 RADIATION DECAY lengthens" , nullptr },
+            { "13", "EXPOSURE does not reduce its own",   "Test 13 FISSION EXPOSURE moves one way" , nullptr },
+            { "13", "AFTERGLOW does not reduce it",       nullptr,
+              "covered by prototype.checks, which has the reverb in the chain; "
+              "this suite runs the engines without it" },
+            { "14", "reset leaks nothing",                "Test 14 SLUDGE reset is clean" , nullptr },
+            { "16", "a spectral hole is not silence",     "Test 16 spectral hole does not silence" , nullptr },
+            { "17", "golden renders hold",                "Test 17 SLUDGE golden" , nullptr },
+        };
+
+        std::printf ("\nSpecification coverage\n\n");
+
+        int covered = 0, uncovered = 0, broken = 0;
+        std::string missing;
+
+        for (const auto& clause : clauses)
+        {
+            if (clause.assertion == nullptr)
+            {
+                ++uncovered;
+                std::printf ("  [    ] Test %-3s %s\n", clause.spec, clause.requirement);
+                if (clause.why != nullptr)
+                    std::printf ("         %s\n", clause.why);
+                continue;
+            }
+
+            const auto found = std::any_of (results.begin(), results.end(),
+                                            [&clause] (const Result& r)
+                                            {
+                                                return r.test.rfind (clause.assertion, 0) == 0;
+                                            });
+            if (found)
+            {
+                ++covered;
+            }
+            else
+            {
+                ++broken;
+                missing += std::string ("\n    ") + clause.assertion;
+            }
+        }
+
+        std::printf ("\n  %d of %d measurable clauses covered, %d with no assertion.\n",
+                     covered, covered + uncovered + broken, uncovered);
+
+        // A clause pointing at an assertion that no longer runs is a silent
+        // loss of coverage, and the only way to notice is to check.
+        report ("Specification coverage map is intact", broken == 0,
+                broken == 0 ? "every named assertion ran"
+                            : std::to_string (broken) + " clause(s) name an assertion that did not run:"
+                              + missing);
+    }
+
+    //==============================================================================
     // Test 20 — the five questions the report has to answer out loud. Each one
     // is answered by the mechanism tests above and nothing else: producing
     // audio, sounding distorted, or having a peak somewhere does not count.
@@ -2604,9 +2938,9 @@ int main (int argc, char** argv)
     test17 (regenerateGoldens);
     std::printf ("\n");
     testCorrectedSemantics();
+    testSpecificationCoverage();
 
-    std::printf ("\nSQUELCH DSP VALIDATION: %s\n", failures == 0 ? "PASS" : "FAIL");
-    if (warnings > 0)
+    std::printf ("\nSQUELCH DSP VALIDATION: %s\n", failures == 0 ? "PASS" : "FAIL");    if (warnings > 0)
         std::printf ("%d warning(s)\n", warnings);
     if (skipped > 0)
         std::printf ("%d assertion(s) not applicable\n", skipped);

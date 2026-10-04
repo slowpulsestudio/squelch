@@ -217,12 +217,36 @@ picture and identical in a table.
 
 ### What it currently says
 
-99 passed, 0 failed, 0 warnings, 1 assertion not applicable.
+> 27/27 primitives and 39/39 behavioural checks pass, with fault-injection
+> validation demonstrating discriminatory regression coverage: all eight known
+> FISSION, TOXICITY, HALF-LIFE, SNAP, resonator and level-match regressions are
+> pinned at the appropriate behavioural or state level, and each has been
+> confirmed to fail when its fault is restored. 48 of 51 measurable
+> specification clauses carry a named assertion. ALIEN and CHEMICAL golden
+> renders remain invariant throughout. SNAP topology requires state-level
+> coverage because its output manifestation is below golden-render sensitivity.
 
-The not-applicable one is Test 13's "higher DECAY should not shorten the tail",
-asked of SLUDGE, which has no tail: it is a filter on the input and its own
-reactor oscillator never decays. Counted apart from the passes, because an
-assertion that never ran is not a pass.
+That is a more defensible statement than `SQUELCH DSP VALIDATION: PASS`, which
+says only that the current build passes the tests that exist.
+
+**Implementation regression coverage and specification coverage are different
+claims** and the suite reports them separately. Fault injection establishes the
+first. It says nothing about a requirement that nothing has ever broken — which
+has therefore never been tested either — so `SquelchValidate` also prints a map
+of every measurable clause in `dsp-testing.md` against the assertion covering
+it, and goes red if a named assertion stops running. Three clauses have none,
+and the reason is printed rather than left to be inferred:
+
+| clause | why there is no assertion |
+|---|---|
+| Test 6, DECAY changes event duration | the rig runs the engines directly; CHEMICAL's event envelope lives in the scheduler stage above them |
+| Test 7, event-to-event correlation | the spec lists it to be measured, not to be met — no threshold is given and none has been invented |
+| Test 13, AFTERGLOW does not reduce persistence | covered by `prototype.checks`, which has the reverb in the chain |
+
+One assertion is marked not-applicable rather than passing: Test 13's "higher
+DECAY should not shorten the tail", asked of SLUDGE, which has no tail — it is
+a filter on the input and its own reactor oscillator never decays. Counted
+apart from the passes, because an assertion that never ran is not a pass.
 
 ### What was fixed
 
@@ -308,12 +332,17 @@ leaving it as a historical note.
 | FISSION modulation range | engine state, 0.96 against 0.0028 DC-normalised |
 | FISSION branch decorrelation | mono input, 1.000 → 0.182 |
 | FISSION EXPOSURE monotonicity | eight steps, strictly rising |
+| FISSION left/right phase | band imbalance 0.000 → 0.025 |
+| FISSION branch beating | envelope depth on a branch-frequency tone, 0.045 → 0.735 |
 | TOXICITY → even-order generation | six steps, 0.68 → 1.27 |
-| HALF-LIFE → requested decay | fitted τ against requested, five settings |
+| HALF-LIFE → requested decay | fitted τ against requested, five settings, inside 5% |
 | HALF-LIFE isolation from level | reactor moves 0.14 dB across the control |
 | memory → cutoff | engine's own `tanh(M/ref)`, 0.45 of range |
 | snap transient semantics | state deviation 0.70 |
-| snap topology | state only — see below |
+| snap topology | state only — 0.70 as siblings against 0.18 as a cascade |
+| RADIATION tick character | crest 13.2 dB, 8.7% of frames active |
+| reaction-domain differentiation | closest pair against a reaction versus itself |
+| product-domain differentiation | the same, after the shared voicing and level match |
 | ALIEN/CHEMICAL compatibility | golden hashes, unmoved throughout |
 
 Fault injection found four tests that did not fail when they should have, which
@@ -465,7 +494,16 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
   driven. A fixed 2 s window reads a 10 s constant as 0.138 against a true
   0.577, and a decay measured from the gate is the memory and the gate in
   series. Settle, capture, fit — with the windows scaled to the thing being
-  measured.
+  measured. The window and the starting conditions are part of the measurement
+  specification, not incidental test implementation.
+- Catching every fault you have ever had is not the same as covering the
+  specification. A requirement nothing has broken has never been tested
+  either, and fault injection cannot see it. Keep a map of the clauses against
+  the assertions, print the ones with nothing against them, and make a renamed
+  assertion turn it red rather than quietly reduce coverage.
+- Beating, and anything else that is a relationship between two tones, is only
+  observable on a tonal excitation. Measured on noise it reads 0.44 at every
+  setting; on a tone at the branch frequency it reads 0.045 against 0.735.
 
 
 
