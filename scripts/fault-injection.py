@@ -17,6 +17,14 @@ at it. None of that was visible from a passing run.
 
 Refuses to start on a dirty tree, and restores with git rather than by
 reversing its own edit, so an interrupted run cannot leave a fault behind.
+
+Restoring the sources is not the whole of putting things back. The build
+directory still holds the artefacts compiled from the last fault, so a clean
+`git status` can sit over faulty binaries and every later harness run measures
+the injected fault without saying so. This harness is the one thing that
+deliberately creates that state, so it is the one thing that has to clear it:
+the invariant on exit is restored source, freshly rebuilt artefacts and a
+green baseline, and it does not exit 0 without all three.
 """
 
 from __future__ import annotations
@@ -132,6 +140,31 @@ def restore() -> None:
     subprocess.run(["git", "checkout", "--", "Source/", "prototype/"], cwd=ROOT, check=True)
 
 
+def restore_and_verify() -> bool:
+    """Put the sources back, rebuild from them, and prove the baseline is green.
+
+    Run unconditionally on the way out, including after an exception, because
+    the alternative is leaving faulty binaries under a clean working tree.
+    """
+    restore()
+    print("Sources restored.")
+
+    failures = run_suite()
+    if failures is None:
+        print("Clean rebuild FAILED.")
+        return False
+    print("Clean rebuild completed.")
+
+    if failures:
+        print("Baseline validation: FAIL")
+        for line in failures:
+            print("   ", line[:110])
+        return False
+
+    print("Baseline validation: PASS")
+    return True
+
+
 def run_suite() -> list[str] | None:
     """Every failing line from both suites, or None if it will not build.
 
@@ -187,41 +220,46 @@ def main() -> int:
     print("  baseline green\n")
 
     undetected = []
-    for fault in faults:
-        print(f"{fault.key}: {fault.what}")
-        if not apply(fault):
+    clean = False
+    try:
+        for fault in faults:
+            print(f"{fault.key}: {fault.what}")
+            if not apply(fault):
+                restore()
+                undetected.append(fault.key)
+                continue
+
+            failures = run_suite()
             restore()
-            undetected.append(fault.key)
-            continue
 
-        failures = run_suite()
-        restore()
+            if failures is None:
+                print("    did not build (the fault may no longer apply cleanly)")
+                undetected.append(fault.key)
+                continue
 
-        if failures is None:
-            print("    did not build (the fault may no longer apply cleanly)")
-            undetected.append(fault.key)
-            continue
+            caught = [line for line in failures
+                      if any(name in line for name in fault.caught_by)]
+            if caught:
+                for line in caught:
+                    print("    caught by:", line[:100])
+            else:
+                print("    *** NOT CAUGHT by " + " or ".join(fault.caught_by) + " ***")
+                if failures:
+                    print("    (something else failed: "
+                          + "; ".join(line[7:50].strip() for line in failures[:3]) + ")")
+                undetected.append(fault.key)
+            print()
 
-        caught = [line for line in failures
-                  if any(name in line for name in fault.caught_by)]
-        if caught:
-            for line in caught:
-                print("    caught by:", line[:100])
-        else:
-            print("    *** NOT CAUGHT by " + " or ".join(fault.caught_by) + " ***")
-            if failures:
-                print("    (something else failed: "
-                      + "; ".join(line[7:50].strip() for line in failures[:3]) + ")")
-            undetected.append(fault.key)
         print()
+        caught_count = len(faults) - len(undetected)
+        print(f"Fault injection: {caught_count}/{len(faults)} caught.")
+        if undetected:
+            print("  not caught: " + ", ".join(undetected))
+        print()
+    finally:
+        clean = restore_and_verify()
 
-    print()
-    if undetected:
-        print(f"{len(undetected)} of {len(faults)} not caught: " + ", ".join(undetected))
-        return 1
-
-    print(f"All {len(faults)} faults caught by the assertion written for them.")
-    return 0
+    return 0 if clean and not undetected else 1
 
 
 if __name__ == "__main__":

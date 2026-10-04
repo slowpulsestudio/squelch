@@ -1009,6 +1009,12 @@ separately; do not let one stand in for another.
   its corresponding assertion.** This is materially stronger than the checks
   passing: it establishes that the assertions are not merely capable of
   passing, but were each shown to fail when their fault was restored.
+* **Fault injection is observationally clean on exit**: restored source,
+  freshly rebuilt artefacts, and a passing baseline, all three verified before
+  it reports success. Restoring sources alone leaves the build directory
+  holding the artefacts of the last injected fault, which is a clean
+  `git status` over faulty binaries — a false state created by the validation
+  harness itself, and therefore its responsibility to clear.
 * **Coverage instrumentation fails closed.** If a named specification
   assertion stops executing, specification coverage must decrease rather than
   silently continue reporting the previous level.

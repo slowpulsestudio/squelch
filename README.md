@@ -327,6 +327,24 @@ power** — several known regressions demonstrably cause the relevant assertion
 to fail. `scripts/fault-injection.py` re-establishes it on demand rather than
 leaving it as a historical note.
 
+It is the one tool here that deliberately puts the instrument into an invalid
+state, so it owns putting it back, and "back" is more than the source. Restoring
+`Source/` and `prototype/` with git leaves `build/` holding the artefacts of the
+last injected fault — a clean `git status` over faulty binaries, with every
+later harness run silently measuring the fault. It cost a confusing 26/27 on
+`unity_match` once. The invariant now enforced is **restored source, freshly
+rebuilt artefacts and a green baseline**, checked in a `finally` so a fault
+cannot survive an interrupted run, and reported explicitly:
+
+```
+Fault injection: 8/8 caught.
+Sources restored.
+Clean rebuild completed.
+Baseline validation: PASS
+```
+
+All three have to hold before it exits 0.
+
 | invariant | pinned by |
 |---|---|
 | FISSION modulation range | engine state, 0.96 against 0.0028 DC-normalised |
@@ -504,6 +522,11 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
 - Beating, and anything else that is a relationship between two tones, is only
   observable on a tonal excitation. Measured on noise it reads 0.44 at every
   setting; on a tone at the branch frequency it reads 0.045 against 0.735.
+- A tool that deliberately breaks the code has to put back more than the code.
+  Restoring sources with git while leaving the build directory alone is a
+  clean `git status` over binaries compiled from the last injected fault, and
+  the next run measures that fault without saying so. Rebuild as the final
+  step, assert the baseline is green, and do it in a `finally`.
 
 
 
