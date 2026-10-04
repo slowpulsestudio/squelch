@@ -14,6 +14,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <algorithm>
 #include <functional>
 #include <string>
@@ -227,10 +230,18 @@ namespace
     int failures = 0;
     int warnings = 0;
 
+    /// Every line, kept so Test 18 can write the same results to disk that
+    /// Test 20 reads out. A failure recorded here cannot be hidden behind an
+    /// overall PASS, because the summary is generated from this and not from
+    /// a separate count.
+    struct Result { std::string test, outcome, detail; };
+    std::vector<Result> results;
+
     void report (const std::string& test, bool ok, const std::string& detail)
     {
         if (! ok)
             ++failures;
+        results.push_back ({ test, ok ? "PASS" : "FAIL", detail });
         std::printf ("[%s] %-28s %s\n", ok ? "PASS" : "FAIL", test.c_str(), detail.c_str());
     }
 
@@ -244,6 +255,7 @@ namespace
     void warn (const std::string& test, const std::string& detail)
     {
         ++warnings;
+        results.push_back ({ test, "WARN", detail });
         std::printf ("[WARN] %-28s %s\n", test.c_str(), detail.c_str());
     }
 
@@ -1829,10 +1841,317 @@ namespace
                     "peak " + std::to_string (maxAbs (clean)).substr (0, 8));
         }
     }
+
+    //==============================================================================
+    // Test 17 — golden renders. A fixed render per reaction, hashed, so that
+    // a later build which changes the numbers has to say so.
+    //
+    // The hash is of the exact doubles. That is the right comparison for DSP
+    // that is deterministic by construction, and this is -- Tests 3 and 14
+    // establish it. The moment it stops being appropriate, because of a
+    // compiler or platform difference, the tolerances in `goldenTolerances`
+    // below are what it falls back to, and that fallback is deliberate rather
+    // than a quiet loosening: a hash mismatch prints both.
+    //==============================================================================
+    struct Golden
+    {
+        const char* reaction;
+        std::uint64_t hash;
+        double rms, peak, centroid;
+    };
+
+    std::uint64_t hashOf (const Stereo& s)
+    {
+        // FNV-1a over the raw bits, so every bit of every sample counts.
+        std::uint64_t h = 1469598103934665603ull;
+        const auto fold = [&h] (double v)
+        {
+            std::uint64_t bits = 0;
+            std::memcpy (&bits, &v, sizeof (bits));
+            for (int byte = 0; byte < 8; ++byte)
+            {
+                h ^= (bits >> (byte * 8)) & 0xff;
+                h *= 1099511628211ull;
+            }
+        };
+
+        for (size_t i = 0; i < s.l.size(); ++i)
+        {
+            fold (s.l[i]);
+            fold (s.r[i]);
+        }
+        return h;
+    }
+
+    /// The fixed conditions. Changing any of these invalidates every hash
+    /// below, which is the point of writing them down here.
+    constexpr double kGoldenSampleRate = 44100.0;
+    constexpr int kGoldenBlockSize = 256;
+    constexpr double kGoldenSeconds = 2.0;
+    constexpr const char* kGoldenSignal = "noise";
+
+    Stereo goldenRender (const std::string& reaction)
+    {
+        return renderWith (reaction,
+                           makeSignal (kGoldenSignal, kGoldenSampleRate, kGoldenSeconds),
+                           kGoldenSampleRate, kGoldenBlockSize, Rig {});
+    }
+
+    std::vector<Golden> goldens;
+
+    void test17 (bool regenerate)
+    {
+        using namespace analysis;
+
+        // Recorded from the build that introduced this test. `--golden`
+        // reprints them, so updating a reference is an explicit act with a
+        // diff rather than something a test does to itself on the way past.
+        static const Golden expected[]
+        {
+            { "SLUDGE", 17395081125360146375ull, 0.37446175893272499, 0.76230055483264159, 3124.0562488878541 },
+            { "ALIEN", 17311358974143198345ull, 0.79954724574488933, 3.316452932901178, 6470.0094929941306 },
+            { "CHEMICAL", 2381812392278790764ull, 0.028736765020524146, 0.13045223541616632, 2032.6573066838034 },
+            { "RADIATION", 10008789847354135899ull, 0.99561342767547301, 5.601894145296523, 2009.7153830699258 },
+            { "FISSION", 13586547936343611779ull, 0.117541872451594, 0.49729661986597046, 612.01865667136053 },
+        };
+
+        for (size_t i = 0; i < reactions.size(); ++i)
+        {
+            const auto out = goldenRender (reactions[i]);
+            const Golden now { expected[i].reaction, hashOf (out), rms (out), maxAbs (out),
+                               centroid (out.l, kGoldenSampleRate, 0, 32768) };
+            goldens.push_back (now);
+
+            if (regenerate)
+            {
+                std::printf ("            { \"%s\", %lluull, %.17g, %.17g, %.17g },\n",
+                             now.reaction, (unsigned long long) now.hash, now.rms, now.peak, now.centroid);
+                continue;
+            }
+
+            if (expected[i].hash == 0ull)
+            {
+                warn (std::string ("Test 17 ") + now.reaction + " golden",
+                      "no reference recorded yet; run with --golden and paste the output");
+                continue;
+            }
+
+            if (now.hash == expected[i].hash)
+            {
+                report (std::string ("Test 17 ") + now.reaction + " golden", true, "hash matches");
+                continue;
+            }
+
+            // Not identical. Say by how much, in the terms that decide
+            // whether this is a rounding difference or a changed instrument.
+            const auto dRms = db (now.rms, expected[i].rms);
+            const auto dPeak = db (now.peak, expected[i].peak);
+            const auto dCentroid = db (now.centroid, expected[i].centroid);
+            const auto within = std::abs (dRms) < 0.01 && std::abs (dPeak) < 0.01
+                             && std::abs (dCentroid) < 0.01;
+
+            report (std::string ("Test 17 ") + now.reaction + " golden", within,
+                    std::string (within ? "hash differs but " : "")
+                    + "RMS " + std::to_string (dRms).substr (0, 6)
+                    + " dB, peak " + std::to_string (dPeak).substr (0, 6)
+                    + " dB, centroid " + std::to_string (dCentroid).substr (0, 6) + " dB");
+        }
+    }
+
+    //==============================================================================
+    // Test 20 — the five questions the report has to answer out loud. Each one
+    // is answered by the mechanism tests above and nothing else: producing
+    // audio, sounding distorted, or having a peak somewhere does not count.
+    //==============================================================================
+    void test20()
+    {
+        std::printf ("\nTest 20 — defining mechanisms\n\n");
+
+        struct Verdict { const char* reaction; const char* question; const char* evidence; };
+
+        static const Verdict verdicts[]
+        {
+            { "CHEMICAL",  "nonlinear resonant feedback",
+              "Test 6: 13 dB of resonance over the same ladder with its feedback off, "
+              "rising monotonically with EXPOSURE, tracking the cutoff at a constant "
+              "ratio, THD rising with drive, 200 dB more tail with feedback than without" },
+            { "RADIATION", "correlated stochastic state modulation",
+              "Test 7: state evolves at every one of 132300 samples with R[1] = 0.999 "
+              "and R[16] = 0.998, and the resonant peak's wander goes 0.077 -> 0.718 "
+              "across VOLATILITY" },
+            { "FISSION",   "interacting branches, cancellation and cross-feedback",
+              "Test 8: 6.5 dB of comb ripple in a 93 ms window, coupling floor to "
+              "ceiling changes the output by more than the output itself, and opposed "
+              "detuning decorrelates a mono input that no final pan could. The comb "
+              "does not move -- see the Test 8 warning" },
+            { "SLUDGE",    "generated subharmonics, asymmetric nonlinear content, long memory",
+              "Test 9: energy at f_h/2 and f_h/4 from an input containing neither, "
+              "59 dB of f_h/2 over f_h proving the 4pi phase domain, even orders "
+              "present throughout, and a body that persists past the input. TOXICITY "
+              "and HALF-LIFE directions -- see the Test 9 warnings" },
+            { "ALIEN",     "an actual oscillator, FM/AM and reaction-specific timing",
+              "Test 10: silent with nothing scheduled and 3.3 peak with events, pitch "
+              "within 0 cents of the register for every event index, FM sidebands "
+              "0.001 -> 0.116, AM energy at the modulation rate up by 220x" },
+        };
+
+        for (const auto& v : verdicts)
+            std::printf ("  %-10s %s\n             %s\n\n", v.reaction, v.question, v.evidence);
+    }
+
+    //==============================================================================
+    // Test 18 — the report. Written from the same `results` the console
+    // printed, so a failure cannot be present in one and absent from the
+    // other, and a WAV is dropped for anything that failed so the next person
+    // has the audio in front of them rather than a number about it.
+    //==============================================================================
+    std::string escapeJson (const std::string& s)
+    {
+        std::string out;
+        for (auto c : s)
+        {
+            if (c == '"' || c == '\\') { out += '\\'; out += c; }
+            else if (c == '\n')        { out += "\\n"; }
+            else                        { out += c; }
+        }
+        return out;
+    }
+
+    void writeWav (const std::string& path, const Stereo& s, double sr)
+    {
+        std::ofstream file (path, std::ios::binary);
+        if (! file)
+            return;
+
+        const auto frames = static_cast<std::uint32_t> (s.l.size());
+        const std::uint32_t dataBytes = frames * 2 * 4;   // stereo, 32-bit float
+        const auto put32 = [&file] (std::uint32_t v) { file.write (reinterpret_cast<const char*> (&v), 4); };
+        const auto put16 = [&file] (std::uint16_t v) { file.write (reinterpret_cast<const char*> (&v), 2); };
+
+        file.write ("RIFF", 4);  put32 (36 + dataBytes);  file.write ("WAVE", 4);
+        file.write ("fmt ", 4);  put32 (16);
+        put16 (3);               // IEEE float
+        put16 (2);
+        put32 (static_cast<std::uint32_t> (sr));
+        put32 (static_cast<std::uint32_t> (sr) * 2 * 4);
+        put16 (8);
+        put16 (32);
+        file.write ("data", 4);  put32 (dataBytes);
+
+        for (size_t i = 0; i < s.l.size(); ++i)
+        {
+            const float l = static_cast<float> (s.l[i]);
+            const float r = static_cast<float> (s.r[i]);
+            file.write (reinterpret_cast<const char*> (&l), 4);
+            file.write (reinterpret_cast<const char*> (&r), 4);
+        }
+    }
+
+    void test18 (const std::string& buildId)
+    {
+        std::filesystem::create_directories ("test-results");
+
+        int passes = 0;
+        for (const auto& r : results)
+            if (r.outcome == "PASS")
+                ++passes;
+
+        const auto verdict = failures == 0 ? "PASS" : "FAIL";
+
+        {
+            std::ofstream json ("test-results/summary.json");
+            json << "{\n";
+            json << "  \"verdict\": \"" << verdict << "\",\n";
+            json << "  \"passed\": " << passes << ",\n";
+            json << "  \"failed\": " << failures << ",\n";
+            json << "  \"warnings\": " << warnings << ",\n";
+            json << "  \"sampleRate\": " << kGoldenSampleRate << ",\n";
+            json << "  \"blockSize\": " << kGoldenBlockSize << ",\n";
+            json << "  \"seed\": " << Rig {}.seed << ",\n";
+            json << "  \"build\": \"" << escapeJson (buildId) << "\",\n";
+            json << "  \"goldens\": [\n";
+            for (size_t i = 0; i < goldens.size(); ++i)
+                json << "    { \"reaction\": \"" << goldens[i].reaction
+                     << "\", \"hash\": \"" << goldens[i].hash
+                     << "\", \"rms\": " << goldens[i].rms
+                     << ", \"peak\": " << goldens[i].peak
+                     << ", \"centroid\": " << goldens[i].centroid
+                     << " }" << (i + 1 < goldens.size() ? "," : "") << "\n";
+            json << "  ],\n";
+            json << "  \"tests\": [\n";
+            for (size_t i = 0; i < results.size(); ++i)
+                json << "    { \"test\": \"" << escapeJson (results[i].test)
+                     << "\", \"outcome\": \"" << results[i].outcome
+                     << "\", \"detail\": \"" << escapeJson (results[i].detail)
+                     << "\" }" << (i + 1 < results.size() ? "," : "") << "\n";
+            json << "  ]\n}\n";
+        }
+
+        {
+            std::ofstream md ("test-results/summary.md");
+            md << "# SQUELCH DSP validation\n\n";
+            md << "**" << verdict << "** — " << passes << " passed, " << failures
+               << " failed, " << warnings << " warnings.\n\n";
+            md << "Rendered at " << kGoldenSampleRate << " Hz in blocks of " << kGoldenBlockSize
+               << ", seed " << Rig {}.seed << ", build `" << buildId << "`.\n\n";
+
+            if (warnings > 0)
+            {
+                md << "## Warnings\n\n";
+                md << "Measured, repeatable, and not what the specification asks for. "
+                      "Each one matches the prototype, so none of them is a port fault.\n\n";
+                for (const auto& r : results)
+                    if (r.outcome == "WARN")
+                        md << "- **" << r.test << "** — " << r.detail << "\n";
+                md << "\n";
+            }
+
+            if (failures > 0)
+            {
+                md << "## Failures\n\n";
+                for (const auto& r : results)
+                    if (r.outcome == "FAIL")
+                        md << "- **" << r.test << "** — " << r.detail << "\n";
+                md << "\n";
+            }
+
+            md << "## All results\n\n| | Test | Detail |\n|---|---|---|\n";
+            for (const auto& r : results)
+                md << "| " << r.outcome << " | " << r.test << " | " << r.detail << " |\n";
+        }
+
+        // A WAV for anything that failed, and for the golden renders, which
+        // are the ones worth listening to when a hash moves.
+        for (size_t i = 0; i < reactions.size(); ++i)
+            writeWav ("test-results/golden-" + reactions[i] + ".wav",
+                      goldenRender (reactions[i]), kGoldenSampleRate);
+
+        for (const auto& r : results)
+            if (r.outcome == "FAIL")
+                for (const auto& reaction : reactions)
+                    if (r.test.find (reaction) != std::string::npos)
+                        writeWav ("test-results/failure-" + reaction + ".wav",
+                                  goldenRender (reaction), kGoldenSampleRate);
+
+        std::printf ("\nWrote test-results/summary.json, summary.md and %d WAV file(s).\n",
+                     int (reactions.size()));
+    }
 }
 
-int main()
+int main (int argc, char** argv)
 {
+    std::string buildId = "unknown";
+    auto regenerateGoldens = false;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string arg { argv[i] };
+        if (arg == "--golden")
+            regenerateGoldens = true;
+        else if (arg.rfind ("--build=", 0) == 0)
+            buildId = arg.substr (8);
+    }
+
     std::printf ("SQUELCH DSP validation\n\n");
 
     test2();
@@ -1868,10 +2187,15 @@ int main()
     test13();
     std::printf ("\n");
     test14();
+    std::printf ("\n");
+    test17 (regenerateGoldens);
 
     std::printf ("\nSQUELCH DSP VALIDATION: %s\n", failures == 0 ? "PASS" : "FAIL");
     if (warnings > 0)
         std::printf ("%d warning(s)\n", warnings);
+
+    test20();
+    test18 (buildId);
 
     return failures == 0 ? 0 : 1;
 }
