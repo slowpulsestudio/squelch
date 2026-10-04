@@ -48,6 +48,11 @@ namespace squelch::dsp
             return ladder.process (x, cutoffHz * registerOffset, feedback, drive);
         }
 
+        /// The stochastic register itself. Test 6 has to see that this is
+        /// piecewise constant between events rather than evolving per sample,
+        /// which is what separates CHEMICAL from RADIATION.
+        double registerValue() const noexcept { return registerOffset; }
+
     private:
         Ladder ladder;
         std::uint64_t seed { 0 };

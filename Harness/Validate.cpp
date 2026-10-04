@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include "Analysis.h"
+
 #include "../Source/Dsp/Alien.h"
 #include "../Source/Dsp/Chemical.h"
 #include "../Source/Dsp/Fission.h"
@@ -76,7 +78,40 @@ namespace
     // One reaction, rendered in blocks of a given size. The scheduler is driven
     // by absolute sample position, so block size must not change the result.
     //==============================================================================
-    Stereo render (const std::string& reaction, const Stereo& in, double sr, int blockSize)
+
+    /** Everything Tests 6 to 11 need to vary. The defaults are the settings
+        the invariance tests use, so a mechanism test differs from the
+        baseline only in the control it is actually probing.
+    */
+    struct Rig
+    {
+        dsp::SludgeProfile sludgeProfile {};
+        dsp::SludgeParams sludge { 0.4, 0.6, 0.65, 0.5, 0.7, 0.35 };
+        dsp::AlienProfile alienProfile {};
+        dsp::AlienParams alien { 0.6, 0.35, 0.7, 0.4, 5 };
+        dsp::RadiationProfile radiationProfile {};
+        dsp::RadiationParams radiation { 0.7, 0.6, 0.45, 0.3, 7 };
+        dsp::FissionProfile fissionProfile {};
+        dsp::FissionParams fission { 0.8, 0.5, 0.6, 7 };
+
+        double chemicalCutoff { 700.0 };
+        double chemicalFeedback { 2.2 };
+        double chemicalDrive { 1.4 };
+        std::uint64_t chemicalSeed { 7 };
+
+        double flux { 0.3 };
+        double probability { 0.9 };
+        double reactivity { 0.5 };
+        std::uint64_t seed { 7 };
+        bool events { true };
+
+        /// Filled in by renderWith when asked, so the state diagnostics can
+        /// look at the mechanism rather than inferring it from the audio.
+        std::vector<double>* stateTrace { nullptr };
+    };
+
+    Stereo renderWith (const std::string& reaction, const Stereo& in, double sr, int blockSize,
+                       const Rig& rig)
     {
         const auto n = static_cast<int> (in.l.size());
         Stereo out;
@@ -86,12 +121,12 @@ namespace
         dsp::ScheduleSettings settings;
         settings.gridIndex = 8;   // 1/16
         settings.bpm = 140.0;
-        settings.flux = 0.3;
-        settings.probability = 0.9;
-        settings.reactivity = 0.5;
+        settings.flux = rig.flux;
+        settings.probability = rig.events ? rig.probability : 0.0;
+        settings.reactivity = rig.reactivity;
         settings.volatility = 0.4;
         settings.subEventBias = 1.0;
-        settings.seed = 7;
+        settings.seed = rig.seed;
 
         dsp::Scheduler scheduler;
         scheduler.prepare (sr);
@@ -104,15 +139,18 @@ namespace
         dsp::FissionEngine fission;
 
         sludge.prepare (sr);
-        sludge.configure ({}, { 0.4, 0.6, 0.65, 0.5, 0.7, 0.35 });
+        sludge.configure (rig.sludgeProfile, rig.sludge);
         alien.prepare (sr);
-        alien.configure ({}, { 0.6, 0.35, 0.7, 0.4, 5 });
+        alien.configure (rig.alienProfile, rig.alien);
         chemical.prepare (sr);
-        chemical.setSeed (7);
+        chemical.setSeed (rig.chemicalSeed);
         radiation.prepare (sr);
-        radiation.configure ({}, { 0.7, 0.6, 0.45, 0.3, 7 });
+        radiation.configure (rig.radiationProfile, rig.radiation);
         fission.prepare (sr);
-        fission.configure ({}, { 0.8, 0.5, 0.6, 7 });
+        fission.configure (rig.fissionProfile, rig.fission);
+
+        if (rig.stateTrace != nullptr)
+            rig.stateTrace->resize (static_cast<size_t> (n));
 
         std::vector<dsp::ScheduledEvent> pending;
         pending.reserve (64);
@@ -155,16 +193,30 @@ namespace
 
                 if (reaction == "SLUDGE")         sludge.process (xl, xr, yl, yr);
                 else if (reaction == "ALIEN")     alien.process (yl, yr);
-                else if (reaction == "CHEMICAL")  { yl = chemical.process (xl, 700.0, 2.2, 1.4);
-                                                    yr = chemical.process (xr, 700.0, 2.2, 1.4); }
+                else if (reaction == "CHEMICAL")  { yl = chemical.process (xl, rig.chemicalCutoff,
+                                                                          rig.chemicalFeedback,
+                                                                          rig.chemicalDrive);
+                                                    yr = chemical.process (xr, rig.chemicalCutoff,
+                                                                          rig.chemicalFeedback,
+                                                                          rig.chemicalDrive); }
                 else if (reaction == "RADIATION") radiation.process (xl, xr, yl, yr);
                 else if (reaction == "FISSION")   fission.process (xl, xr, yl, yr);
+
+                if (rig.stateTrace != nullptr)
+                    (*rig.stateTrace)[k] = reaction == "CHEMICAL" ? chemical.registerValue()
+                                         : reaction == "RADIATION" ? radiation.stateValue()
+                                         : 0.0;
 
                 out.l[k] = yl;
                 out.r[k] = yr;
             }
         }
         return out;
+    }
+
+    Stereo render (const std::string& reaction, const Stereo& in, double sr, int blockSize)
+    {
+        return renderWith (reaction, in, sr, blockSize, Rig {});
     }
 
     const std::vector<std::string> reactions { "SLUDGE", "ALIEN", "CHEMICAL", "RADIATION", "FISSION" };
@@ -490,6 +542,334 @@ namespace
         report ("Scheduler INPUT does not fire on a steady tone", onTone.size() <= 3,
                 std::to_string (onTone.size()) + " events");
     }
+    //==============================================================================
+    // Test 6 — CHEMICAL. The resonator, and the stochastic register inspected
+    // directly rather than inferred from the audio.
+    //==============================================================================
+    double relativeSpread (const std::vector<double>& v)
+    {
+        if (v.size() < 2)
+            return 0.0;
+        auto mean = 0.0;
+        for (auto x : v)
+            mean += x;
+        mean /= double (v.size());
+
+        auto variance = 0.0;
+        for (auto x : v)
+            variance += (x - mean) * (x - mean);
+        return std::sqrt (variance / double (v.size())) / std::max (std::abs (mean), 1e-12);
+    }
+
+    void test6()
+    {
+        using namespace analysis;
+        constexpr auto sr = 44100.0;
+
+        // White noise, so the excitation is flat and the measurement is of
+        // the filter rather than of the input's harmonic structure.
+        const auto noise = makeSignal ("noise", sr, 2.0);
+
+        const auto outputAt = [&] (double feedback, double cutoff)
+        {
+            Rig r;
+            r.chemicalFeedback = feedback;
+            r.chemicalCutoff = cutoff;
+            r.events = false;   // no register offset, so the cutoff is the cutoff
+            return renderWith ("CHEMICAL", noise, sr, 256, r);
+        };
+
+        // Against the same ladder with its feedback off, so what is left is
+        // what the feedback added rather than the lowpass slope.
+        const auto responseAt = [&] (double feedback, double cutoff,
+                                     double& peakDb, double& peakHz)
+        {
+            const auto flat = outputAt (0.0, cutoff);
+            const auto out = outputAt (feedback, cutoff);
+            ratioPeak (flat.l, out.l, sr, 60.0, 6000.0, peakDb, peakHz, size_t (sr * 0.5));
+        };
+
+        // A resonant response at all.
+        double resonantDb = 0.0, resonantHz = 0.0;
+        responseAt (3.2, 700.0, resonantDb, resonantHz);
+        report ("Test 6 resonance exists", resonantDb > 6.0,
+                std::to_string (resonantDb).substr (0, 5) + " dB over the unresonant ladder at "
+                + std::to_string (int (resonantHz)) + " Hz");
+
+        // Resonance increases with EXPOSURE, which reaches the ladder as
+        // feedback.
+        auto previous = -1e30;
+        auto rising = true;
+        std::string exposureDetail;
+        for (auto fb : { 0.5, 1.5, 2.5, 3.5 })
+        {
+            double peakDb = 0.0, peakHz = 0.0;
+            responseAt (fb, 700.0, peakDb, peakHz);
+            if (peakDb <= previous)
+                rising = false;
+            previous = peakDb;
+            exposureDetail += std::to_string (peakDb).substr (0, 5) + " ";
+        }
+        report ("Test 6 EXPOSURE raises resonance", rising, exposureDetail);
+
+        // The resonant frequency follows the cutoff it is given.
+        //
+        // It does not land on it: the peak sits at a fixed multiple of the
+        // control, because the ladder's one-pole stages are not frequency
+        // warped and four of them in series move the peak up. That multiple
+        // is inherited from the prototype -- the comparison harness agrees to
+        // 1e-16 -- so it is the instrument's calibration rather than a port
+        // fault, and what this asserts is that the ratio is CONSTANT. A
+        // resonance that drifted relative to the control would be a fault; a
+        // resonance that is reliably 1.9x it is a tuning.
+        std::vector<double> ratios;
+        std::string trackDetail;
+        for (auto hz : { 300.0, 700.0, 1600.0 })
+        {
+            double peakDb = 0.0, peakHz = 0.0;
+            responseAt (3.4, hz, peakDb, peakHz);
+            ratios.push_back (peakHz / hz);
+            trackDetail += std::to_string (peakHz / hz).substr (0, 4) + "x ";
+        }
+        const auto drift = relativeSpread (ratios);
+        report ("Test 6 resonance follows cutoff", drift < 0.1,
+                trackDetail + "(spread " + std::to_string (drift).substr (0, 5) + ")");
+
+        // TOXICITY reaches the ladder as drive, and drive is what the in-loop
+        // tanh works on. More drive, more harmonic content.
+        const auto harmonicsAt = [&] (double drive)
+        {
+            Rig r;
+            r.chemicalDrive = drive;
+            r.chemicalCutoff = 900.0;
+            r.events = false;
+            return thd (renderWith ("CHEMICAL", makeSignal ("sine100", sr, 2.0), sr, 256, r).l, 100.0, sr);
+        };
+
+        const auto thdQuiet = harmonicsAt (0.4);
+        const auto thdLoud = harmonicsAt (6.0);
+        report ("Test 6 TOXICITY adds harmonics", thdLoud > thdQuiet * 1.5,
+                "THD " + std::to_string (thdQuiet).substr (0, 5)
+                + " -> " + std::to_string (thdLoud).substr (0, 5));
+
+        // Bounded below the stability limit at the hottest settings offered.
+        Rig extreme;
+        extreme.chemicalFeedback = 3.9;
+        extreme.chemicalDrive = 8.0;
+        const auto hot = renderWith ("CHEMICAL", makeSignal ("maxlegal", sr, 2.0), sr, 256, extreme);
+        const auto peak = maxAbs (hot);
+        report ("Test 6 feedback stays bounded", std::isfinite (peak) && peak < 50.0,
+                "peak " + std::to_string (peak).substr (0, 6));
+
+        // Ringing continues past the transient: the ladder holds energy
+        // rather than only shaping what is present. Measured against the
+        // same ladder without feedback, because a four-pole lowpass has a
+        // tail of its own and an absolute threshold would be measuring that.
+        const auto tailAfterImpulse = [&] (double feedback)
+        {
+            Rig r;
+            r.chemicalFeedback = feedback;
+            r.events = false;
+            auto burst = makeSignal ("silence", sr, 1.0);
+            burst.l[0] = burst.r[0] = 1.0;
+            const auto out = renderWith ("CHEMICAL", burst, sr, 256, r);
+
+            auto energy = 0.0;
+            for (size_t i = size_t (sr * 0.02); i < size_t (sr * 0.08); ++i)
+                energy += out.l[i] * out.l[i];
+            return std::sqrt (energy);
+        };
+
+        const auto ringing = db (tailAfterImpulse (3.6), tailAfterImpulse (0.0));
+        report ("Test 6 ladder rings on", ringing > 12.0,
+                std::to_string (ringing).substr (0, 5) + " dB more tail with feedback");
+
+        // Test 16 — a spectral hole in the input must not silence it. Notch
+        // the band around the cutoff out of the excitation and check the
+        // resonator still produces output there.
+        auto holed = makeSignal ("noise", sr, 2.0);
+        dsp::Biquad notchL, notchR;
+        const auto coefficients = dsp::notch (700.0, 2.0, sr);
+        notchL.setCoefficients (coefficients);
+        notchR.setCoefficients (coefficients);
+        for (size_t i = 0; i < holed.l.size(); ++i)
+        {
+            holed.l[i] = notchL.process (holed.l[i]);
+            holed.r[i] = notchR.process (holed.r[i]);
+        }
+
+        Rig holeRig;
+        holeRig.chemicalFeedback = 3.4;
+        holeRig.events = false;
+        const auto fromHole = renderWith ("CHEMICAL", holed, sr, 256, holeRig);
+        const auto inHole = goertzel (holed.l, 700.0, sr, size_t (sr * 0.5), size_t (sr * 0.5));
+        const auto outHole = goertzel (fromHole.l, 700.0, sr, size_t (sr * 0.5), size_t (sr * 0.5));
+        report ("Test 16 spectral hole does not silence", outHole > inHole,
+                "input " + std::to_string (inHole).substr (0, 8)
+                + " -> output " + std::to_string (outHole).substr (0, 8));
+    }
+
+    //==============================================================================
+    // Test 6 — the register diagnostic. The formulation this guards against
+    // folds q into the sweep exponent, which would let the register scale or
+    // reverse the sweep instead of only relocating it.
+    //==============================================================================
+    void test6Register()
+    {
+        using namespace analysis;
+        constexpr auto sr = 44100.0;
+        const auto saw = makeSignal ("saw", sr, 2.0);
+
+        std::vector<double> trace;
+        Rig rig;
+        rig.stateTrace = &trace;
+        renderWith ("CHEMICAL", saw, sr, 256, rig);
+
+        // Piecewise constant: the register changes at events, so the number
+        // of changes is of the order of the event count, not the sample count.
+        int changes = 0;
+        for (size_t i = 1; i < trace.size(); ++i)
+            if (trace[i] != trace[i - 1])
+                ++changes;
+
+        report ("Test 6 register is event-held",
+                changes > 0 && changes < int (trace.size() / 1000),
+                std::to_string (changes) + " changes in "
+                + std::to_string (trace.size()) + " samples");
+
+        // It is an offset, not a depth. Across seeds the register moves the
+        // resonance around without changing how much resonance there is.
+        std::vector<double> centres, strengths;
+        for (std::uint64_t seed : { 1, 2, 3, 4, 5, 6, 7, 8 })
+        {
+            Rig r;
+            r.chemicalSeed = seed;
+            r.chemicalFeedback = 3.2;
+            const auto y = renderWith ("CHEMICAL", saw, sr, 256, r);
+            centres.push_back (centroid (y.l, sr, size_t (sr * 0.5), 32768));
+            strengths.push_back (rms (y));
+        }
+
+        const auto whereSpread = relativeSpread (centres);
+        const auto howMuchSpread = relativeSpread (strengths);
+        report ("Test 6 register moves where, not whether",
+                whereSpread > howMuchSpread,
+                "centroid spread " + std::to_string (whereSpread).substr (0, 5)
+                + " vs level spread " + std::to_string (howMuchSpread).substr (0, 5));
+
+        // Same seed, same register sequence; a new seed, a new one.
+        std::vector<double> again, other;
+        Rig repeat;
+        repeat.stateTrace = &again;
+        renderWith ("CHEMICAL", saw, sr, 256, repeat);
+        report ("Test 6 register is reproducible", trace == again, "");
+
+        Rig different;
+        different.chemicalSeed = 99;
+        different.stateTrace = &other;
+        renderWith ("CHEMICAL", saw, sr, 256, different);
+        report ("Test 6 register follows the seed", trace != other, "");
+    }
+
+    //==============================================================================
+    // Test 7 — RADIATION. The state must be continuous and correlated, which
+    // is the one thing keeping it from being CHEMICAL with a different EQ.
+    //==============================================================================
+    void test7()
+    {
+        using namespace analysis;
+        constexpr auto sr = 44100.0;
+        const auto noise = makeSignal ("noise", sr, 3.0);
+
+        // VOLATILITY changes short-timescale spectral movement. Measured as
+        // the wander of the resonant peak itself rather than of the spectral
+        // centroid, which on a noise excitation moves frame to frame anyway
+        // and would hide the effect under its own variance.
+        const auto movementAt = [&] (double volatility)
+        {
+            Rig r;
+            r.radiation.volatility = volatility;
+            r.events = false;   // the resonator excited by the input alone, so
+                                // the measurement is of its frequency moving
+                                // rather than of broadband event pulses
+            return peakMovement (noise.l, renderWith ("RADIATION", noise, sr, 256, r).l,
+                                 sr, 60.0, 4000.0);
+        };
+
+        const auto still = movementAt (0.0);
+        const auto moving = movementAt (1.0);
+        report ("Test 7 VOLATILITY moves the spectrum", moving > still * 2.0,
+                "peak wander " + std::to_string (still).substr (0, 5)
+                + " -> " + std::to_string (moving).substr (0, 5));
+
+        // The state is continuous, not held.
+        std::vector<double> trace;
+        Rig rig;
+        rig.stateTrace = &trace;
+        renderWith ("RADIATION", noise, sr, 256, rig);
+
+        int held = 0;
+        for (size_t i = 1; i < trace.size(); ++i)
+            if (trace[i] == trace[i - 1])
+                ++held;
+        report ("Test 7 state evolves per sample", held < int (trace.size() / 100),
+                std::to_string (held) + " repeats of " + std::to_string (trace.size()));
+
+        // And correlated. White noise would sit near zero at every non-zero
+        // lag; an AR(1) state does not.
+        const auto r1 = autocorrelation (trace, 1);
+        const auto r16 = autocorrelation (trace, 16);
+        report ("Test 7 state is correlated", r1 > 0.5 && r16 > 0.05,
+                "R[1] " + std::to_string (r1).substr (0, 5)
+                + ", R[16] " + std::to_string (r16).substr (0, 5));
+
+        // Same seed, same waveform -- not merely the same average spectrum.
+        const auto a = renderWith ("RADIATION", noise, sr, 256, Rig {});
+        const auto b = renderWith ("RADIATION", noise, sr, 256, Rig {});
+        report ("Test 7 seed reproduces the waveform", maxDifference (a, b) == 0.0, "");
+
+        std::vector<double> otherTrace;
+        Rig other;
+        other.radiation.seed = 404;
+        other.stateTrace = &otherTrace;
+        renderWith ("RADIATION", noise, sr, 256, other);
+        report ("Test 7 a new seed is a new trajectory", trace != otherTrace, "");
+    }
+
+    //==============================================================================
+    // The discrimination that matters more than comparing spectra: two
+    // architectures can be EQ-matched to sound alike while remaining
+    // different instruments, so compare the states and not the outputs.
+    //==============================================================================
+    void testDiscrimination()
+    {
+        constexpr auto sr = 44100.0;
+        const auto noise = makeSignal ("noise", sr, 3.0);
+
+        std::vector<double> chemicalTrace, radiationTrace;
+        Rig c, r;
+        c.stateTrace = &chemicalTrace;
+        r.stateTrace = &radiationTrace;
+        renderWith ("CHEMICAL", noise, sr, 256, c);
+        renderWith ("RADIATION", noise, sr, 256, r);
+
+        const auto heldFraction = [] (const std::vector<double>& v)
+        {
+            int count = 0;
+            for (size_t i = 1; i < v.size(); ++i)
+                if (v[i] == v[i - 1])
+                    ++count;
+            return double (count) / double (std::max<size_t> (v.size() - 1, 1));
+        };
+
+        const auto chemicalHeld = heldFraction (chemicalTrace);
+        const auto radiationHeld = heldFraction (radiationTrace);
+
+        report ("CHEMICAL and RADIATION have not converged",
+                chemicalHeld > 0.99 && radiationHeld < 0.01,
+                "held fraction CHEMICAL " + std::to_string (chemicalHeld).substr (0, 5)
+                + ", RADIATION " + std::to_string (radiationHeld).substr (0, 5));
+    }
 }
 
 int main()
@@ -507,6 +887,14 @@ int main()
     test15();
     std::printf ("\n");
     testSchedulerModes();
+    std::printf ("\n");
+    test6();
+    std::printf ("\n");
+    test6Register();
+    std::printf ("\n");
+    test7();
+    std::printf ("\n");
+    testDiscrimination();
 
     std::printf ("\nSQUELCH DSP VALIDATION: %s\n", failures == 0 ? "PASS" : "FAIL");
     if (warnings > 0)

@@ -139,6 +139,11 @@ namespace squelch::dsp
             outR = vReR;
         }
 
+        /// The stochastic state itself. Test 7 has to see that this evolves
+        /// sample to sample and is correlated, rather than being held between
+        /// events the way CHEMICAL's register is.
+        double stateValue() const noexcept { return q; }
+
     private:
         double sr { 44100.0 };
         std::uint64_t seed { 0 }, index { 0 };
