@@ -40,9 +40,18 @@ LIMITER_RELEASE_S = 0.050
 #: than the fall but both are long: an instant attack snaps the gain down on
 #: every transient, which measured 11.7 dB/s of sustained movement and is a
 #: compressor by any other name. The limiter catches what gets past this.
+#:
+#: Slowed from 0.6/1.2 when RADIATION's DECAY was unpinned. These were set
+#: when its longest tail was 16 ms; it is now 1.28 s at this check's settings,
+#: so a 1.2 s tracker was following the reaction's own ring. Swept across the
+#: range the result is U-shaped — 7.65 dB of swing at 0.6/1.2, 4.80 at 2.0/4.0,
+#: back to 6.65 at 6.0/12.0, where the tracker no longer settles inside the
+#: render at all — while sustained movement, which is the thing a compressor
+#: actually does, falls the whole way. 2.0/4.0 is the floor of the first and
+#: well down the second, and beats the figures from before DECAY was fixed.
 PEAK_TARGET = 0.89
-PEAK_TRACK_S = 1.2
-PEAK_ATTACK_S = 0.6
+PEAK_TRACK_S = 4.0
+PEAK_ATTACK_S = 2.0
 
 
 #: How slowly the streaming level match tracks. Long on purpose: anything near

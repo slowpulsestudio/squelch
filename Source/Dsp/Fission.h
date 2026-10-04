@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 
+#include "Filters.h"
 #include "Rng.h"
 
 /** FISSION's engine, ported from `prototype/reactor.py`'s `_fission_engine`.
@@ -147,8 +148,11 @@ namespace squelch::dsp
 
             const auto decayTime = profile.decayLoS
                                  + (profile.decayHiS - profile.decayLoS) * p.decay;
-            const auto bandwidth = std::max (1.0 / (M_PI * std::max (decayTime, 0.005)), 5.0);
-            r = std::clamp (std::exp (-M_PI * bandwidth / sr), 0.0, 0.995);
+            // Same correction as RADIATION's, and FISSION had it worse: every
+            // setting of its 80 ms to 600 ms range asked for a bandwidth under
+            // the old 5 Hz floor, so DECAY there did nothing at all.
+            const auto bandwidth = std::max (bandwidthForT60 (decayTime), 0.2);
+            r = std::clamp (std::exp (-M_PI * bandwidth / sr), 0.0, 0.99995);
 
             coupling = kFissionKcMinFrac + kFissionKcNormFrac * p.exposure;
         }

@@ -35,8 +35,11 @@ namespace squelch::dsp
     inline constexpr double kCollimatorCentreHz = 650.0;
 
     inline constexpr double kPeakTarget = 0.89;
-    inline constexpr double kPeakTrackS = 1.2;
-    inline constexpr double kPeakAttackS = 0.6;
+    // Slowed from 0.6/1.2 when RADIATION's DECAY was unpinned: these were set
+    // when its longest tail was 16 ms and it is now 1.28 s, so the tracker was
+    // following the reaction's own ring rather than its level.
+    inline constexpr double kPeakTrackS = 4.0;
+    inline constexpr double kPeakAttackS = 2.0;
     inline constexpr double kLevelMatchRangeDb = 36.0;
     inline constexpr double kLevelMatchGateDb = -60.0;
     inline constexpr double kGainSmoothS = 0.05;

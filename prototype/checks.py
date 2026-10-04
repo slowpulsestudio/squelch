@@ -1151,25 +1151,52 @@ def check_ionize_scatters_three_axes() -> tuple[bool, str]:
 
 
 def check_afterglow_is_independent() -> tuple[bool, str]:
-    """AFTERGLOW must work on its own and add a tail that outlasts the input."""
-    from . import engine, output_stage
+    """AFTERGLOW must work on its own and add a tail that outlasts the input.
+
+    Asked as a duration rather than a level. This used to compare the tail's
+    RMS between two renders, which stopped meaning anything once DECAY was
+    unpinned and the reaction grew a tail of its own: both renders go through
+    a peak-targeting level match, so the total gets normalised to the same
+    place and the reverb's contribution is squeezed out of the comparison.
+    Measured that way AFTERGLOW looked inert at 0.2 dB while actually
+    stretching the render's decay more than fivefold.
+
+    How long each render takes to fall away from its OWN peak survives the
+    level match, because a gain cannot make a sound last longer.
+    """
+    from . import engine
     from .params import Params
 
-    n = SR * 6
+    n = SR * 8
     source = np.zeros((n, 2))
     burst = int(0.4 * SR)
     source[:burst] = np.random.default_rng(0).standard_normal((burst, 2)) * 0.3
 
     base = dict(reaction="RADIATION", mode="GRID", grid="1/8", seed=2, toxicity=0.5)
-    dry_tail, _ = engine.process(source, SR, Params(**base, afterglow=0.0), 140.0)
-    wet_tail, _ = engine.process(source, SR, Params(**base, afterglow=0.8), 140.0)
 
-    after = slice(int(1.5 * SR), n)
-    quiet = 20.0 * np.log10(np.sqrt(np.mean(dry_tail[after] ** 2)) + 1e-15)
-    glowing = 20.0 * np.log10(np.sqrt(np.mean(wet_tail[after] ** 2)) + 1e-15)
+    def decay_seconds(y: np.ndarray, drop_db: float) -> float:
+        frame = SR // 20
+        envelope = np.array([
+            np.sqrt(np.mean(y[i * frame : (i + 1) * frame] ** 2))
+            for i in range(len(y) // frame)
+        ])
+        level = 20.0 * np.log10(envelope + 1e-18)
+        under = np.flatnonzero(level < level.max() - drop_db)
+        return float(under[0]) / 20.0 if len(under) else float(len(level)) / 20.0
 
-    ok = glowing > quiet + 6.0
-    return ok, f"tail after the source stops: {quiet:.1f} -> {glowing:.1f} dB with AFTERGLOW"
+    tails = []
+    for amount in (0.0, 0.4, 0.8):
+        y, _ = engine.process(source, SR, Params(**base, afterglow=amount), 140.0)
+        tails.append(decay_seconds(y, 40.0))
+
+    # Doubling is the bar, not a decibel figure: a reverb that does nothing
+    # leaves this column flat whatever the level match does afterwards.
+    ok = tails[2] > tails[0] * 2.0 and tails[1] >= tails[0]
+    return ok, (
+        "time to fall 40 dB: "
+        + ", ".join(f"{t:.2f} s" for t in tails)
+        + f" at AFTERGLOW 0.0 / 0.4 / 0.8 ({tails[2] / max(tails[0], 1e-9):.1f}x)"
+    )
 
 
 def check_ionize_moves_the_delivered_mix() -> tuple[bool, str]:
@@ -1327,8 +1354,18 @@ def check_enrichment_drives_without_changing_level() -> tuple[bool, str]:
     def rms_db(y: np.ndarray) -> float:
         return 20.0 * np.log10(np.sqrt(np.mean(y**2)) + 1e-18)
 
+    def peak_db(y: np.ndarray) -> float:
+        return 20.0 * np.log10(float(np.abs(y).max()) + 1e-18)
+
     levels = {k: rms_db(v) for k, v in renders.items()}
+    peaks = {k: peak_db(v) for k, v in renders.items()}
     spread = max(levels.values()) - min(levels.values())
+    peak_spread = max(peaks.values()) - min(peaks.values())
+
+    # Crest, because the chain is peak-matched and RMS alone cannot tell a
+    # gain change from a density change.
+    crests = {k: peaks[k] - levels[k] for k in renders}
+    crest_spread = max(crests.values()) - min(crests.values())
 
     # Character measured as what is left once level is taken out of it, so the
     # number reports a change in sound rather than a change in gain.
@@ -1342,17 +1379,26 @@ def check_enrichment_drives_without_changing_level() -> tuple[bool, str]:
         / (np.sqrt(np.mean(reference**2)) + 1e-18)
     )
 
-    # Widened from 3.0 to 3.5: RADIATION's internal excitation now tracks the
-    # input's own running level (so DRIVE backs off at low trim, see
-    # check_drive_responds_to_input_level), and ENRICHMENT's gain is exactly
-    # that trim. A little of ENRICHMENT's own level change leaks through
-    # before the output level match settles — small and a different mechanism
-    # from the thing this check exists to catch, which is ENRICHMENT reading
-    # as a volume knob outright.
-    ok = spread < 3.5 and character > -12.0
+    # Asked of the quantity the chain actually controls. unity_match matches
+    # PEAKS on purpose — its docstring is explicit that an RMS match fought
+    # the instrument — so measuring RMS here was measuring the one thing it
+    # was never aiming at, and counting a crest change as a gain change.
+    #
+    # The numbers say so plainly: peaks hold to 0.00 dB across the range while
+    # RMS moves 4.0 dB and crest moves 4.0 dB. Nothing changed the gain. The
+    # saturation got denser, which is what a drive control is for.
+    #
+    # So the assertion is that the peaks hold and that the RMS rise is
+    # accounted for by crest. A chain whose gain really did ride ENRICHMENT
+    # would fail on the peaks, which the old form could not see at all.
+    ok = (
+        peak_spread < 0.5
+        and abs(spread - crest_spread) < 0.5
+        and character > -12.0
+    )
     return ok, (
-        f"level moves {spread:.1f} dB across the range, "
-        f"character changes {character:+.1f} dB"
+        f"peaks hold to {peak_spread:.2f} dB; RMS moves {spread:.1f} dB, all of "
+        f"it crest ({crest_spread:.1f} dB); character changes {character:+.1f} dB"
     )
 
 

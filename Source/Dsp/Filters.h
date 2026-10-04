@@ -12,6 +12,18 @@
 */
 namespace squelch::dsp
 {
+    /** The resonator bandwidth whose ring falls 60 dB in `t60Seconds`.
+
+        A one-pole resonator damped by r = exp(-pi*bw/sr) is 60 dB down after
+        3*ln(10)/(pi*bw) seconds, so the bandwidth realising a given t60 is
+        2.1986/t60 rather than the 1/(pi*t60) that treats it as a 1/e constant
+        and rings 6.9x too long.
+    */
+    inline double bandwidthForT60 (double t60Seconds) noexcept
+    {
+        return 3.0 * std::log (10.0) / (M_PI * std::max (t60Seconds, 0.005));
+    }
+
     struct BiquadCoefficients
     {
         double b0 { 1.0 }, b1 { 0.0 }, b2 { 0.0 }, a1 { 0.0 }, a2 { 0.0 };

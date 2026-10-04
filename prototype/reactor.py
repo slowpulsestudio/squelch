@@ -597,6 +597,35 @@ RADIATION_EPS_G = 0.015
 RADIATION_EXCITATION_TRACK_S = 0.3
 RADIATION_EXCITATION_REF = 0.3
 
+#: Where the chain's gain staging wants RADIATION to sit. While a clamp
+#: pinned r_damp at 0.99 for every control setting, the energy normalisation
+#: below was a constant 0.1411 that normalised nothing, and the drive staging
+#: and the limiter's headroom were both set against it. Letting r_damp follow
+#: the controls drops the drive stage's input 7.3 dB, which reads as a quieter
+#: reaction rather than as a working control.
+#:
+#: Measured against the two requirements that bracket it rather than derived.
+#: Too low and the drive curve is never reached: at 1.0 only 60% of samples
+#: saturate at full level and 17% at -12 dB, which is the "drive responds to
+#: input level" check's floor. Too high and the limiter stops being a safety
+#: net: at 2.0 it holds 72% of samples against the ceiling. The window is 1.2
+#: to 1.5 and this sits in the middle of it.
+#:
+#: The normalisation itself stays free to vary with the controls, which is the
+#: whole point of it: DECAY changes the ring, not the level.
+RADIATION_CALIBRATION_GAIN = 1.3
+
+
+def _bandwidth_for_t60(t60_s: float) -> float:
+    """The resonator bandwidth whose ring falls 60 dB in `t60_s` seconds.
+
+    A one-pole resonator damped by r = exp(-pi*bw/sr) is 60 dB down after
+    3*ln(10)/(pi*bw) seconds, so the bandwidth realising a given t60 is
+    2.1986/t60 rather than the 1/(pi*t60) that treats it as a 1/e constant and
+    rings 6.9x too long.
+    """
+    return 3.0 * np.log(10.0) / (np.pi * max(t60_s, 0.005))
+
 
 def _radiation_engine(
     x: np.ndarray,
@@ -649,16 +678,18 @@ def _radiation_engine(
     # Resonator persistence: DECAY sets the ring time, EXPOSURE tightens the
     # bandwidth (sharper resonance), same roles those controls play elsewhere.
     decay_time = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
-    bandwidth = 1.0 / (np.pi * max(decay_time, 0.005)) * (1.0 - 0.7 * p.exposure)
-    bandwidth = max(bandwidth, 5.0)
-    # Capped below the theoretical 0.999 ceiling: the natural bandwidth formula
-    # above sits below the old floor for almost every realistic decay/exposure
-    # setting, so that ceiling was the one actually in force nearly all the
-    # time, pinning RADIATION at its absolute sharpest resonance regardless of
-    # the controls. 0.99 still rings hard but leaves the output stage's slow,
-    # intentionally non-compressing level match (see unity_match) enough
-    # headroom to track real program material without pumping.
-    r_damp = float(np.clip(np.exp(-np.pi * bandwidth / sr), 0.0, 0.99))
+    # decay_time is the t60, which is what a profile written as 0.025 to 0.3
+    # seconds reads as. The old 1/(pi*tau) made it the 1/e time instead and
+    # delivered t60s 6.9x longer, so RADIATION's tightest Geiger tick was a
+    # 173 ms ring. It also pushed every setting under the 5 Hz bandwidth floor
+    # and the 0.99 damping ceiling, which between them pinned r flat and left
+    # DECAY and EXPOSURE bit-identical across their whole travel.
+    bandwidth = _bandwidth_for_t60(decay_time) * (1.0 - 0.7 * p.exposure)
+    # Now a safety limit rather than the operating point: 0.2 Hz is an 11 s
+    # t60 and 0.99995 is 3.1 s, and nothing in the control range reaches
+    # either.
+    bandwidth = max(bandwidth, 0.2)
+    r_damp = float(np.clip(np.exp(-np.pi * bandwidth / sr), 0.0, 0.99995))
 
     # Event-local percussive pulse.
     pulse = np.zeros(n)
@@ -693,7 +724,9 @@ def _radiation_engine(
     # correct energy-domain normalisation for a resonator fed broadband
     # content; resonance still changes the ring, not the delivered level,
     # it is just measured in RMS rather than in peak amplitude.
-    e = e * max(np.sqrt(1.0 - r_damp**2), 1e-4)
+    #
+    # The calibration gain is the price of unpinning DECAY: see its definition.
+    e = e * max(np.sqrt(1.0 - r_damp**2), 1e-4) * RADIATION_CALIBRATION_GAIN
 
     out = np.zeros((n, channels))
     v_re = np.zeros(channels)
@@ -949,8 +982,11 @@ def _fission_engine(
     delay_r = (delay_s_0 - delay_s_m * m_d) * sr
 
     decay_time = profile.decay_lo_s + (profile.decay_hi_s - profile.decay_lo_s) * p.decay
-    bandwidth = max(1.0 / (np.pi * max(decay_time, 0.005)), 5.0)
-    r = float(np.clip(np.exp(-np.pi * bandwidth / sr), 0.0, 0.995))
+    # Same correction as RADIATION's, and FISSION had it worse: every setting
+    # of its 80 ms to 600 ms range asked for a bandwidth under the old 5 Hz
+    # floor, so DECAY there did nothing at all.
+    bandwidth = max(_bandwidth_for_t60(decay_time), 0.2)
+    r = float(np.clip(np.exp(-np.pi * bandwidth / sr), 0.0, 0.99995))
 
     # EXPOSURE sets how much of the available stability headroom is used;
     # _fission_branch_pair turns this into a per-sample k_c (see its

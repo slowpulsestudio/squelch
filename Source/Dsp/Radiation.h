@@ -36,6 +36,16 @@ namespace squelch::dsp
     inline constexpr double kRadiationExcitationTrackS = 0.3;
     inline constexpr double kRadiationExcitationRef = 0.3;
 
+    /** Where the chain's gain staging wants RADIATION to sit.
+
+        While a clamp pinned rDamp at 0.99 for every setting, the energy
+        normalisation was a constant that normalised nothing, and the drive
+        staging and the limiter's headroom were both set against it. The
+        window either side is narrow: below about 1.2 the drive curve is never
+        reached and above about 1.5 the limiter stops being a safety net.
+    */
+    inline constexpr double kRadiationCalibrationGain = 1.3;
+
     inline constexpr int kRadiationStreamQ = 601;
     inline constexpr int kRadiationStreamM = 602;
     inline constexpr int kRadiationStreamTick = 603;
@@ -84,14 +94,15 @@ namespace squelch::dsp
 
             const auto decayTime = profile.decayLoS
                                  + (profile.decayHiS - profile.decayLoS) * p.decay;
-            auto bandwidth = 1.0 / (M_PI * std::max (decayTime, 0.005)) * (1.0 - 0.7 * p.exposure);
-            bandwidth = std::max (bandwidth, 5.0);
-            // Capped below the theoretical 0.999: the natural bandwidth sits
-            // under that for almost every realistic setting, so the ceiling
-            // was what actually applied and pinned RADIATION at its sharpest
-            // regardless of the controls.
-            rDamp = std::clamp (std::exp (-M_PI * bandwidth / sr), 0.0, 0.99);
-            excitationNorm = std::max (std::sqrt (1.0 - rDamp * rDamp), 1e-4);
+            auto bandwidth = bandwidthForT60 (decayTime) * (1.0 - 0.7 * p.exposure);
+            // A safety limit now rather than the operating point: 0.2 Hz is an
+            // 11 s t60 and 0.99995 is 3.1 s, and the control range reaches
+            // neither. The old 5 Hz floor and 0.99 ceiling between them pinned
+            // r flat and left DECAY and EXPOSURE bit-identical throughout.
+            bandwidth = std::max (bandwidth, 0.2);
+            rDamp = std::clamp (std::exp (-M_PI * bandwidth / sr), 0.0, 0.99995);
+            excitationNorm = std::max (std::sqrt (1.0 - rDamp * rDamp), 1e-4)
+                           * kRadiationCalibrationGain;
 
             pulseDecay = std::exp (-1.0 / (kRadiationTauPS * sr));
         }

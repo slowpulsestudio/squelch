@@ -216,30 +216,20 @@ picture and identical in a table.
 
 ### What it currently says
 
-99 passed, 0 failed, 10 warnings.
+99 passed, 0 failed, 5 warnings.
 
 A warning is a measurement that is real, repeatable, and not what the
-specification asks for. All ten match the prototype exactly, so none of them is
-a port fault, and all ten are decisions about how SQUELCH should sound rather
-than mistakes in translating it. They are counted and printed and never hidden
-behind the overall verdict.
+specification asks for. All five match the prototype exactly, so none of them
+is a port fault, and all five are decisions about how SQUELCH should sound
+rather than mistakes in translating it. They are counted and printed and never
+hidden behind the overall verdict.
 
-- **Three controls are inert because a limit became the operating point.**
-  RADIATION's DECAY and EXPOSURE and FISSION's DECAY produce bit-identical
-  output, −300 dB apart, across their whole travel. `decay_time` is a
-  resonator's 1/e time constant, so the bandwidth realising it runs 12.7 Hz
-  down to 1.06 Hz for RADIATION and 4.0 Hz down to 0.53 Hz for FISSION — and
-  both are floored at 5 Hz, which is above FISSION's entire range, and then
-  ceilinged at r = 0.99 and 0.995. A floor of 0.2 Hz and a ceiling of 0.99995
-  bracket the formula instead of replacing it and bring all three alive, but
-  the tails then run to seconds and the output stage's level match wanders
-  7.7 dB chasing them. The cap is load-bearing: it is hiding a level-matching
-  weakness downstream, and which of the two to fix is a sound decision.
 - **SLUDGE's DECAY is inert because its two followers are the wrong way
   round.** It reaches the output only through the snap `q − r`, and a snap is a
   fast tracker minus a slow one. Here `q` runs at 5 Hz and `r`, the one DECAY
   sets, at 40 down to 12 Hz — so `r` just follows `q` and the difference sits
-  at the noise floor.
+  at the noise floor. −79 dB with REACTIVITY, which scales the term, held wide
+  open.
 - **FISSION's comb does not move.** Both modulators are AR(1) states normalised
   by DC gain, `(1−a)·noise + a·m`, which at a 1.3 s time constant gives a
   steady-state deviation of 0.0017 rather than the ±1 the term is written as if
@@ -249,6 +239,36 @@ behind the overall verdict.
   present throughout, but opening the control raises the odd orders faster than
   the even ones, so even/odd falls from 4.5 to 0.1. **HALF-LIFE** moves the
   post-input tail by 0.005 dB across its full range.
+
+### What was fixed
+
+RADIATION's DECAY and EXPOSURE and FISSION's DECAY used to produce
+bit-identical output, −300 dB apart, across their whole travel. `decay_time` is
+a t60 — which is what a profile written as 0.025 to 0.3 seconds reads as — but
+the bandwidth realising it was computed as `1/(pi*tau)`, the 1/e form, which
+rings 6.9× too long. Every setting then fell under a 5 Hz bandwidth floor and a
+r = 0.99 damping ceiling, which between them pinned the resonator flat.
+
+The repair ran four layers deep, and each layer was only visible once the one
+above it was fixed:
+
+1. `2.1986/t60` for the bandwidth, with the floor and ceiling moved out to
+   0.2 Hz and 0.99995 where nothing in the control range reaches them. DECAY
+   now spans 25 ms to 1 s of t60, which is what RADIATION's profile says.
+2. The level match was following the reaction's own ring. Its 0.6 s/1.2 s
+   tracker was set when the longest tail was 16 ms; slowed to 2 s/4 s, the gain
+   swing drops from 7.65 dB to 3.2 dB and sustained movement — the thing a
+   compressor actually does — from 5.15 dB/s to 1.7.
+3. Unpinning `r` let the energy normalisation vary where it had been a fixed
+   −17 dB trim, dropping the drive stage's input 7.3 dB. A calibration gain of
+   1.3 puts it back. The window is narrow and measured from both sides: below
+   1.2 the drive curve is never reached, above 1.5 the limiter stops being a
+   safety net.
+4. Two checks were then measuring quantities the output stage deliberately
+   equalises. ENRICHMENT's 4 dB "level move" is entirely crest — peaks hold to
+   0.00 dB — and AFTERGLOW looked inert at 0.2 dB while actually stretching the
+   render's decay from 0.70 s to 3.80 s. Both now ask for what the chain
+   controls rather than what it normalises away.
 
 
 ## Constraints learned the hard way
@@ -296,6 +316,15 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
   Before trusting a threshold, check what reference it is implicitly using —
   an earlier differentiation test scored a reaction against *itself* as more
   different than two genuinely distinct ones, and passed both.
+- Never measure the one quantity a later stage normalises away. The output
+  stage matches PEAKS on purpose, so an RMS check downstream of it reports
+  crest-factor changes as gain changes, and a tail-level check reports a
+  working reverb as inert. Ask for duration, or for peak, or for whatever the
+  stage is not holding constant.
+- A calibration that was never exercised is not a calibration. Every gain
+  stage downstream of RADIATION had been set against a resonator that a clamp
+  held at one value, so the first time the control actually moved, four
+  separate stages turned out to be depending on the bug.
 
 
 
