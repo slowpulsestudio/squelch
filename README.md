@@ -191,6 +191,7 @@ Three layers, each answering a question the others cannot.
 ./build/SquelchHarness | ./.venv/bin/python -m prototype.compare  # 27 numerical primitives
 ./build/SquelchValidate                                           # dsp-testing.md, Tests 2-20
 ./scripts/test1.sh                                                # dsp-testing.md, Test 1
+./.venv/bin/python -m prototype.diagnostics                       # dsp-testing.md, Test 19
 ```
 
 The **prototype** in `prototype/` is the contract. It is NumPy, it is readable,
@@ -208,7 +209,10 @@ invariance, each reaction's defining mechanism, five-reaction differentiation,
 control sensitivity, monotonicity, reset, silence, spectral holes, golden
 renders — and writes `test-results/summary.json`, `summary.md` and WAVs.
 `scripts/test1.sh` runs pluginval at strictness 10 across five sample rates and
-seven block sizes.
+seven block sizes. `prototype.diagnostics` turns the WAVs into six plots each,
+because what kind of failure something is — mathematical, numerical,
+implementation, parameter mapping, or a poor threshold — looks different in a
+picture and identical in a table.
 
 ### What it currently says
 

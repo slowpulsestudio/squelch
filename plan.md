@@ -19,7 +19,7 @@ Measured, not estimated.
 | `prototype/checks.py` | 37/37 passing |
 | reaction distinctness | 0/10 pairs too alike; closest FISSION/CHEMICAL at −6.1 dB |
 | noise generation | fully causal: every stochastic value hashes (seed, stream, sample index), no stateful RNG left in reactor.py/reactions.py/rng.py |
-| C++ port | 27/27 primitives agree; the whole signal path is in processBlock -- five engines, scheduler, envelopes, placement, AFTERGLOW, and the full output chain including both halves of fallout; Tests 2/3/4/5/15 pass; scheduler RANDOM and INPUT modes still absent |
+| C++ port | The whole signal path is in processBlock and 27/27 primitives agree with the prototype. dsp-testing.md Tests 1 through 20 are all implemented: 99 passed, 0 failed, 10 warnings, and every warning is a control whose mapping is an open question rather than a port fault |
 | git | ALIEN port committed, nothing pushed |
 
 Steps 1-6 below are done. Step 7 (the C++ port) is in progress.
