@@ -82,7 +82,7 @@ AFTERGLOW_LEVEL = 0.9
 
 #: SLUDGE's body/snap envelope followers. Fixed architecture constants, not
 #: knobs: f_q is the slow body corner, f_r the fast snap corner that DECAY
-#: slows down from. maths.md requires f_r > f_q; this stays true across the
+#: slows down from. dsp-maths.md requires f_r > f_q; this stays true across the
 #: whole DECAY range by construction.
 SLUDGE_F_Q_HZ = 5.0
 SLUDGE_F_R_LO_HZ = 45.0
@@ -96,7 +96,7 @@ SLUDGE_SNAP_FLOOR = 1e-3
 SLUDGE_TAU_M_LO_S = 0.3
 SLUDGE_TAU_M_HI_S = 5.0
 
-#: The envelope level M is measured against before tanh. maths.md writes
+#: The envelope level M is measured against before tanh. dsp-maths.md writes
 #: M_b = tanh(M) as if M were normalised, and it is not: q is a lowpassed
 #: max|x| and sits around 0.17 on real material, so tanh never left its linear
 #: region and the whole molasses movement was 0.2 of the 1.17 octaves SPREAD
@@ -452,9 +452,9 @@ def _ladder_engine(
 ) -> np.ndarray:
     """CHEMICAL's engine: the nonlinear resonant feedback ladder.
 
-    maths.md's audit table names this mechanism CHEMICAL's and forbids the
+    dsp-maths.md's audit table names this mechanism CHEMICAL's and forbids the
     other four from using it as their own voice. It is still every other
-    reaction's placeholder engine until each gets the one maths.md specifies
+    reaction's placeholder engine until each gets the one dsp-maths.md specifies
     for it (see plan.md); until then they measure as one effect, which is the
     open defect `check_reactions_are_distinct` exists to catch.
     """
@@ -465,7 +465,7 @@ def _ladder_engine(
 CHEMICAL_REGISTER_STREAM = 501
 
 #: Register spread in octaves. Internal to CHEMICAL, not VOLATILITY and not a
-#: plugin control (maths.md: "R_q is an internal CHEMICAL parameter").
+#: plugin control (dsp-maths.md: "R_q is an internal CHEMICAL parameter").
 CHEMICAL_REGISTER_OCT = 1.3
 
 
@@ -485,7 +485,7 @@ def _chemical_engine(
 
     Each event draws a deterministic q_i, held constant for the whole event,
     that offsets the cutoff in log-frequency: f_c -> f_c * 2**(R_q * q_i).
-    Per maths.md this must be an offset, never a multiplier on the sweep's own
+    Per dsp-maths.md this must be an offset, never a multiplier on the sweep's own
     depth, or the register ends up controlling whether the sweep happens
     instead of where it lands.
     """
@@ -507,7 +507,7 @@ def _chemical_engine(
 
 
 def _one_pole_hz(x: np.ndarray, f_hz: float, sr: int) -> np.ndarray:
-    """Constant-coefficient one-pole lowpass, maths.md's g = 1 - e^(-2*pi*f/fs)."""
+    """Constant-coefficient one-pole lowpass, dsp-maths.md's g = 1 - e^(-2*pi*f/fs)."""
     g = 1.0 - np.exp(-2.0 * np.pi * f_hz / sr)
     return lfilter([g], [1.0, -(1.0 - g)], x, axis=0)
 
@@ -526,7 +526,7 @@ def _sludge_engine(
 ) -> np.ndarray:
     """SLUDGE's engine: nonlinear subharmonic generation plus long memory.
 
-    maths.md's SLUDGE section. No event sweep and no ladder: the reaction
+    dsp-maths.md's SLUDGE section. No event sweep and no ladder: the reaction
     tracks its own slow/fast envelope followers off the input, generates the
     /2 and /4 subharmonics from its own reactor frequency (no pitch tracking),
     and runs the asymmetric-saturated result through a memory-driven lowpass.
@@ -539,7 +539,7 @@ def _sludge_engine(
     f_r = SLUDGE_F_R_LO_HZ + (SLUDGE_F_R_HI_HZ - SLUDGE_F_R_LO_HZ) * (
         decay_time / profile.decay_hi_s
     )
-    # Off e, not off q. maths.md writes r as a filter of q and in the same
+    # Off e, not off q. dsp-maths.md writes r as a filter of q and in the same
     # breath says r "moves first and q follows", which a cascade cannot do:
     # q is r's input, so r can only ever lag it. Filtering a 5 Hz-limited
     # signal at 12-45 Hz changed almost nothing, q - r sat at the noise floor,
@@ -555,7 +555,7 @@ def _sludge_engine(
     r = _one_pole_hz(e, f_r, sr)
     # As a fraction of the body, not as a raw difference. delta_snap is an
     # exponent in octaves, so s_snap has to be O(1) for it to mean anything,
-    # and maths.md writes q - r as if the envelope were normalised. It is not:
+    # and dsp-maths.md writes q - r as if the envelope were normalised. It is not:
     # e is max|x|, which on real material sits around 0.15, so the raw
     # difference is O(0.05) and the whole 0.4-octave range of REACTIVITY moves
     # the cutoff by 2%. Dividing by the body makes it a relative deviation --
@@ -576,7 +576,7 @@ def _sludge_engine(
     f_c = np.power(2.0, f_base_oct + delta_f * m_b)
 
     # The fast state briefly recoils the cutoff before it settles, per the
-    # correction in maths.md's Viscous snapback section: q - r already carries
+    # correction in dsp-maths.md's Viscous snapback section: q - r already carries
     # its own rise/decay from f_r > f_q, with no separate state needed.
     delta_snap = 0.4 * p.reactivity
     f_effective = np.clip(f_c * np.power(2.0, delta_snap * s_snap), 20.0, sr * 0.45)
@@ -605,7 +605,7 @@ def _sludge_engine(
     # The one lowpass stage whose cutoff genuinely varies every sample: the
     # memory-driven movement is slow by construction (HALF-LIFE's seconds), so
     # a Python loop here costs nothing a smoothed control-rate approximation
-    # would have saved, and stays exactly what maths.md specifies.
+    # would have saved, and stays exactly what dsp-maths.md specifies.
     s = np.zeros_like(sat)
     state = np.zeros(sat.shape[1])
     g_c = 1.0 - np.exp(-2.0 * np.pi * f_effective / sr)
@@ -627,7 +627,7 @@ RADIATION_DELTA_F_SEMITONES = 30.0
 RADIATION_BETA_M = 0.4
 
 #: Stochastic excitation: a short percussive pulse per event, plus a
-#: continuous low-level rounded tick source (maths.md's p[n] and g[n]).
+#: continuous low-level rounded tick source (dsp-maths.md's p[n] and g[n]).
 RADIATION_TAU_P_S = 0.012
 RADIATION_EPS_P = 0.8
 RADIATION_TAU_G_S = 0.008
@@ -690,7 +690,7 @@ def _radiation_engine(
     correlated stochastic state, not CHEMICAL's event-held register and not
     independent per-sample randomness.
 
-    Per maths.md the resonator uses the coupled quadrature form (rotation
+    Per dsp-maths.md the resonator uses the coupled quadrature form (rotation
     matrix, not a direct-form recurrence) because frequency is modulated
     rapidly and continuously: a direct form would pump amplitude as its
     coefficients move. There is no saturation inside this loop — the
@@ -813,7 +813,7 @@ ALIEN_TAU_Z_S = 0.01
 ALIEN_ATTACK_S = 0.003
 
 #: Input energy's share of an event's amplitude: an event fires from silence,
-#: but a loud input drives it harder, per maths.md's A_i = A_event + g_x E_x.
+#: but a loud input drives it harder, per dsp-maths.md's A_i = A_event + g_x E_x.
 ALIEN_INPUT_GAIN = 0.6
 
 
@@ -835,7 +835,7 @@ def _alien_engine(
     from the input), an exponential pitch sweep, FM with a decaying modulation
     index, a separate AM burst, an attack/release envelope and a short
     high-frequency chirp accent. With no events and a silent input this
-    produces nothing: the oscillator is event-gated, per maths.md and
+    produces nothing: the oscillator is event-gated, per dsp-maths.md and
     dsp-testing.md Test 10, not a continuously running synth.
     """
     n, channels = x.shape
@@ -932,7 +932,7 @@ def _fission_branch_pair(
 ) -> np.ndarray:
     """One channel's coupled pair: two second-order resonators detuned apart
     by d_arr (semitones), cross-feeding each other, recombined with v2 read
-    back through a moving fractional delay (maths.md's FISSION branch pair).
+    back through a moving fractional delay (dsp-maths.md's FISSION branch pair).
 
     A second-order resonator this close to self-oscillation (r -> 1, for the
     long ring DECAY asks for) has a steady-state gain on the order of
@@ -1006,7 +1006,7 @@ def _fission_engine(
     a slowly-wandering amount, cross-fed into each other, and recombined
     through a moving fractional delay. Left and right mirror their detuning
     and delay (d_L = d, d_R = -d; D_L = D0 + Dm*m_D, D_R = D0 - Dm*m_D) per
-    maths.md's stereo divergence, so the image moves because the branch
+    dsp-maths.md's stereo divergence, so the image moves because the branch
     relationship itself diverges, not from a final pan stage.
     """
     n, channels = x.shape
