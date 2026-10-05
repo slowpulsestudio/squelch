@@ -567,6 +567,6 @@ Glyphs and transfer functions are in [dsp-maths.md](dsp-maths.md).
 ### Gestures and output
 
 - (ι)  IONIZE — latched: scatters each event in stereo, spectrum and depth
-- (Ω)  MELTDOWN — latched: staged runaway, until switched off
+- (Ω)  MELTDOWN — momentary: staged runaway
 - (⌈⌉)  CLIP — hard ceiling instead of the limiter, latency padded to match
 
