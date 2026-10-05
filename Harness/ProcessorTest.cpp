@@ -17,6 +17,7 @@
 #include <juce_events/juce_events.h>
 
 #include "../Source/Parameters.h"
+#include "../Source/PluginEditor.h"
 #include "../Source/PluginProcessor.h"
 #include "../Source/Dsp/Meltdown.h"
 #include "../Source/Dsp/NoiseBed.h"
@@ -196,6 +197,110 @@ BedRun runBed (int reaction, double amount, double wetScale)
     }
 
     return { std::sqrt (diffSum / (2.0 * n)), std::sqrt (outSum / (2.0 * n)), worst };
+}
+
+/// The first block boundary at or after a time, which is when a press made then is seen.
+int blockAligned (double seconds, int block)
+{
+    return static_cast<int> (std::ceil (seconds * sampleRate / block)) * block;
+}
+
+juce::MouseEvent makeMouseEvent (juce::Component& component)
+{
+    const auto now = juce::Time::getCurrentTime();
+    const juce::Point<float> where { 4.0f, 4.0f };
+
+    return juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), where,
+                             juce::ModifierKeys(), juce::MouseInputSource::defaultPressure,
+                             juce::MouseInputSource::defaultOrientation,
+                             juce::MouseInputSource::defaultRotation,
+                             juce::MouseInputSource::defaultTiltX,
+                             juce::MouseInputSource::defaultTiltY, &component, &component, now,
+                             where, now, 1, false);
+}
+
+/** A render in which MELTDOWN is pressed and released by the editor's own button.
+
+    Not mouse automation: the button's press and release handlers are called
+    directly, which is the whole of what it does to the plugin, and they set the
+    parameter that processBlock reads. A host sees nothing else of it.
+*/
+struct Timeline
+{
+    int reaction { 0 };
+    double seconds { 2.0 };
+    int block { blockSize };
+
+    /// Sample at which each is made, which must be a block boundary. Negative never.
+    int pressAt { -1 };
+    int releaseAt { -1 };
+
+    std::vector<std::pair<const char*, float>> knobs;
+};
+
+std::vector<float> renderTimeline (const Timeline& t)
+{
+    SquelchAudioProcessor processor;
+
+    const auto* reaction = processor.apvts.getParameter (squelch::ids::reaction);
+    setParameter (processor, squelch::ids::reaction, reaction->convertTo0to1 (static_cast<float> (t.reaction)));
+
+    for (const auto& knob : t.knobs)
+        setParameter (processor, knob.first, knob.second);
+
+    processor.prepareToPlay (sampleRate, t.block);
+
+    MomentaryGesture button (*processor.apvts.getParameter (squelch::ids::meltdown), "Meltdown", "");
+    const auto event = makeMouseEvent (button);
+
+    const auto total = static_cast<int> (t.seconds * sampleRate);
+    std::vector<float> out;
+    juce::MidiBuffer midi;
+    std::uint32_t state = 12345u;
+    auto pressed = false, released = false;
+
+    for (int done = 0; done < total; done += t.block)
+    {
+        if (! pressed && t.pressAt >= 0 && done >= t.pressAt)
+        {
+            button.mouseDown (event);
+            pressed = true;
+        }
+
+        if (pressed && ! released && t.releaseAt >= 0 && done >= t.releaseAt)
+        {
+            button.mouseUp (event);
+            released = true;
+        }
+
+        juce::AudioBuffer<float> buffer (2, t.block);
+
+        for (int i = 0; i < t.block; ++i)
+        {
+            state = state * 1664525u + 1013904223u;
+            const auto v = 0.25f * (static_cast<float> (state >> 8) / 8388608.0f - 1.0f);
+            buffer.setSample (0, i, v);
+            buffer.setSample (1, i, v);
+        }
+
+        processor.processBlock (buffer, midi);
+        out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + t.block);
+    }
+
+    out.resize (static_cast<size_t> (total));
+    return out;
+}
+
+/// Index of the first sample two renders disagree at, or -1 if they never do.
+long long firstDifference (const std::vector<float>& a, const std::vector<float>& b)
+{
+    const auto n = std::min (a.size(), b.size());
+
+    for (size_t i = 0; i < n; ++i)
+        if (a[i] != b[i])
+            return static_cast<long long> (i);
+
+    return -1;
 }
 } // namespace
 
@@ -420,6 +525,39 @@ int main()
         const auto after = rmsBetween (heldBed, 6.8, 7.0);
         report (before > 0.0 && after / before < 0.15, "Processor MELTDOWN bed falls back on release",
                 after / before, "of the full bed 1.8 s after release (needs < 0.15)");
+
+        // Everything above sets the parameter directly. The editor's button is the only
+        // other thing that does, so make the same press and release with it and require
+        // the same render, sample for sample. The release is at a block boundary, which
+        // is the only place a host can see one.
+        const auto release = blockAligned (5.0, blockSize);
+        const auto pressedHeld = renderTimeline ({ fission, 7.0, blockSize, 0, release, atTargets });
+        const auto pressedTap = renderTimeline ({ fission, 7.0, blockSize, 0, blockAligned (0.3, blockSize), atTargets });
+
+        const auto heldDiffers = firstDifference (pressedHeld, held);
+        report (heldDiffers < 0 && pressedHeld.size() == held.size(),
+                "Processor MELTDOWN button press and release render as the parameter does",
+                static_cast<double> (heldDiffers), "first differing sample, held (-1 is none)");
+
+        const auto tapDiffers = firstDifference (pressedTap, tap);
+        report (tapDiffers < 0 && pressedTap.size() == tap.size(),
+                "Processor MELTDOWN button tap renders as the parameter does",
+                static_cast<double> (tapDiffers), "first differing sample, tap (-1 is none)");
+
+        // The staged state does not depend on the host's block size, so neither does the
+        // bed it drives, up to the one thing that does: the values are read once per
+        // block, so a ramp is followed in steps of the block's length.
+        const auto small = renderTimeline ({ fission, 7.0, 128, 0, release, atTargets });
+        const auto smallBed = difference (small, idle);
+        const auto w3Small = rmsBetween (smallBed, 2.0, 2.2);
+        const auto w1Small = rmsBetween (smallBed, 0.9, 1.1);
+        const auto stepError = db (rms (difference (smallBed, heldBed)) / rms (heldBed));
+        char detail[128];
+        std::snprintf (detail, sizeof detail,
+                       "dB between 128 and 512 sample blocks (needs < -20; full-bed ratio at 1.0 s %.2f against %.2f)",
+                       w1Small / w3Small, w1 / w3);
+        report (stepError < -20.0 && std::abs (w1Small / w3Small - w1 / w3) < 0.05,
+                "Processor MELTDOWN pressed bed does not depend on the block size", stepError, detail);
     }
 
     {
@@ -437,6 +575,212 @@ int main()
         const auto error = db (rms (difference (large, small)) / rms (large));
         report (error < -30.0, "Processor CONTAMINATION does not depend on the block size", error,
                 "dB between 512 and 128 sample blocks (needs < -30)");
+    }
+
+    // The button itself: pressing it turns MELTDOWN on and releasing it turns it off.
+    {
+        SquelchAudioProcessor processor;
+        MomentaryGesture button (*processor.apvts.getParameter (squelch::ids::meltdown), "Meltdown", "");
+        const auto event = makeMouseEvent (button);
+        const auto raw = [&] { return processor.apvts.getRawParameterValue (squelch::ids::meltdown)->load(); };
+
+        const auto idle = raw();
+        button.mouseDown (event);
+        const auto held = raw();
+        button.mouseUp (event);
+        const auto let = raw();
+
+        report (idle == 0.0f && held == 1.0f && let == 0.0f,
+                "Processor MELTDOWN button engages on press and lets go on release", held,
+                "while held (off, on, off needed)");
+    }
+
+    // A press leaves the render exactly as it was up to and including the block it was
+    // made in, so the staged values start from the knobs and nothing jumps, and then
+    // moves it within a fraction of a second.
+    {
+        constexpr int press = 100 * blockSize;
+
+        Timeline idleTimeline;
+        idleTimeline.seconds = 2.0;
+        auto pressedTimeline = idleTimeline;
+        pressedTimeline.pressAt = press;
+
+        const auto idle = renderTimeline (idleTimeline);
+        const auto pressed = renderTimeline (pressedTimeline);
+        const auto first = firstDifference (idle, pressed);
+        const auto after = first < 0 ? -1.0 : (first - press) / sampleRate;
+
+        report (first >= press + blockSize && after < 0.2,
+                "Processor MELTDOWN press starts from the knobs", after,
+                "s from the press to the first changed sample (needs a block to 0.2)");
+    }
+
+    // The staged envelopes themselves, through the state the processor runs.
+    {
+        using namespace squelch::dsp;
+        constexpr double sr = 44100.0;
+        constexpr double knob = 0.37;
+        constexpr auto count = static_cast<std::size_t> (Staged::count);
+
+        const auto progress = [] (const Meltdown& m, std::size_t i) { return m.progressOf (static_cast<Staged> (i)); };
+
+        // The instant of a press: every stage is exactly at its knob.
+        {
+            Meltdown m;
+            m.prepare (sr);
+            m.setGate (true);
+
+            auto atKnob = true;
+            for (std::size_t i = 0; i < count; ++i)
+                atKnob = atKnob && progress (m, i) == 0.0
+                         && m.value (static_cast<Staged> (i), knob) == knob;
+
+            report (atKnob && m.active(), "Processor MELTDOWN stages start at their knobs when pressed",
+                    atKnob ? 1.0 : 0.0, "(all eight exactly at the knob, and active)");
+        }
+
+        // Held, the stages arrive in order, each by its own schedule. Written out by hand
+        // from the prototype's table: at 0.3 s the rods are out, the fallout has not
+        // begun, and the rest are part way.
+        {
+            const double expected[count] { 1.0, 1.0, 0.54, 0.24 / 0.26, 0.2 / 0.3, 0.1 / 0.36, 0.0, 0.0 };
+
+            Meltdown m;
+            m.prepare (sr);
+            m.setGate (true);
+            m.advance (static_cast<int> (0.3 * sr));
+
+            auto worst = 0.0;
+            for (std::size_t i = 0; i < count; ++i)
+                worst = std::max (worst, std::abs (progress (m, i) - expected[i]));
+
+            Meltdown full;
+            full.prepare (sr);
+            full.setGate (true);
+            full.advance (static_cast<int> (2.0 * sr));
+
+            auto reached = true;
+            for (std::size_t i = 0; i < count; ++i)
+                reached = reached && progress (full, i) == 1.0;
+
+            report (worst < 1.0e-9 && reached, "Processor MELTDOWN held press reaches the stages in order",
+                    worst, "worst error against the hand figures at 0.3 s, and all eight at 1 by 2 s");
+        }
+
+        // Released, every stage falls back towards its knob by its own time constant,
+        // which is a third of its release time, and never rises on the way.
+        {
+            const double releaseSeconds[count] { 1.4, 0.9, 1.8, 1.2, 1.1, 1.6, 2.1, 3.4 };
+
+            Meltdown m;
+            m.prepare (sr);
+            m.setGate (true);
+            m.advance (static_cast<int> (2.0 * sr));
+            m.setGate (false);
+
+            std::array<double, count> previous {};
+            for (std::size_t i = 0; i < count; ++i)
+                previous[i] = progress (m, i);
+
+            auto never = true;
+            for (int step = 0; step < 10; ++step)
+            {
+                m.advance (static_cast<int> (0.1 * sr));
+                for (std::size_t i = 0; i < count; ++i)
+                {
+                    never = never && progress (m, i) <= previous[i];
+                    previous[i] = progress (m, i);
+                }
+            }
+
+            m.advance (static_cast<int> (sr));
+            auto worst = 0.0;
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                // Two seconds in all: the stage was at 1 at the release.
+                const auto tau = releaseSeconds[i] / 3.0;
+                worst = std::max (worst, std::abs (progress (m, i) - std::exp (-2.0 / tau)));
+            }
+
+            report (never && worst < 1.0e-12, "Processor MELTDOWN release returns every stage toward its knob",
+                    worst, "worst error against exp(-t / tau) two seconds after the release");
+        }
+
+        // Nothing is left behind once it has settled, and a second press is the first again.
+        {
+            const auto trace = [] (Meltdown& m)
+            {
+                std::array<double, 4 * count> seen {};
+                m.setGate (true);
+                for (int k = 0; k < 4; ++k)
+                {
+                    m.advance (static_cast<int> (0.25 * sr));
+                    for (std::size_t i = 0; i < count; ++i)
+                        seen[static_cast<std::size_t> (k) * count + i] = m.progressOf (static_cast<Staged> (i));
+                }
+                return seen;
+            };
+
+            Meltdown fresh;
+            fresh.prepare (sr);
+            const auto first = trace (fresh);
+
+            Meltdown used;
+            used.prepare (sr);
+            used.setGate (true);
+            used.advance (static_cast<int> (3.0 * sr));
+            used.setGate (false);
+            used.advance (static_cast<int> (20.0 * sr));
+
+            auto atKnob = ! used.active();
+            for (std::size_t i = 0; i < count; ++i)
+                atKnob = atKnob && progress (used, i) == 0.0
+                         && used.value (static_cast<Staged> (i), knob) == knob;
+
+            const auto again = trace (used);
+            report (atKnob && again == first, "Processor MELTDOWN leaves no state behind after release",
+                    atKnob ? 1.0 : 0.0, "(settled at the knobs, inactive, and the next press identical to the first)");
+        }
+
+        // Pressed again while still falling, it carries on from where it was.
+        {
+            Meltdown m;
+            m.prepare (sr);
+            m.setGate (true);
+            m.advance (static_cast<int> (2.0 * sr));
+            m.setGate (false);
+            m.advance (static_cast<int> (0.5 * sr));
+
+            std::array<double, count> before {};
+            for (std::size_t i = 0; i < count; ++i)
+                before[i] = progress (m, i);
+
+            m.setGate (true);
+
+            auto continuous = true;
+            for (std::size_t i = 0; i < count; ++i)
+                continuous = continuous && progress (m, i) == before[i];
+
+            auto rising = true;
+            for (int step = 0; step < 20; ++step)
+            {
+                m.advance (static_cast<int> (0.1 * sr));
+                for (std::size_t i = 0; i < count; ++i)
+                {
+                    rising = rising && progress (m, i) >= before[i];
+                    before[i] = progress (m, i);
+                }
+            }
+
+            auto full = true;
+            for (std::size_t i = 0; i < count; ++i)
+                full = full && progress (m, i) == 1.0;
+
+            report (continuous && rising && full,
+                    "Processor MELTDOWN pressed mid-release carries on from where it was",
+                    continuous ? 1.0 : 0.0, "(no jump at the press, never falling while held, all stages back at 1)");
+        }
     }
 
     // Gestures are provoked, not recalled: a saved session with them on must reopen with them off.

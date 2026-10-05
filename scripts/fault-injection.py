@@ -207,6 +207,46 @@ FAULTS = [
           "radiationHpL.setCoefficients (highpass (4000.0, 0.8, sr));")],
         ["noise_radiation"],
     ),
+    Fault(
+        "meltdown-button-latches",
+        "the MELTDOWN button writing on at release as well, so a press never lets go",
+        [("Source/PluginEditor.cpp",
+          "parameter.setValueNotifyingHost (0.0f);",
+          "parameter.setValueNotifyingHost (1.0f);")],
+        ["Processor MELTDOWN button engages on press and lets go on release"],
+    ),
+    Fault(
+        "meltdown-press-mid-schedule",
+        "a press starting its clock part-way through the schedule, so the stages are late in arriving",
+        [("Source/Dsp/Meltdown.h",
+          "                heldSamples = 0;",
+          "                heldSamples = 22050;")],
+        ["Processor MELTDOWN held press reaches the stages in order"],
+    ),
+    Fault(
+        "meltdown-never-returns",
+        "a release that does not bring the stages back towards their knobs",
+        [("Source/Dsp/Meltdown.h",
+          "progress[i] *= std::exp (-static_cast<double> (samples) / (tau * sr));",
+          "progress[i] *= 1.0;")],
+        ["Processor MELTDOWN release returns every stage toward its knob"],
+    ),
+    Fault(
+        "meltdown-never-settles",
+        "stages that never snap back to their knobs, so a released MELTDOWN stays active for ever",
+        [("Source/Dsp/Meltdown.h",
+          "static constexpr double kSettledBelow = 1.0e-6;",
+          "static constexpr double kSettledBelow = 0.0;")],
+        ["Processor MELTDOWN leaves no state behind after release"],
+    ),
+    Fault(
+        "meltdown-press-restarts",
+        "a press that throws away the stages' current level, so a re-press mid-release jumps",
+        [("Source/Dsp/Meltdown.h",
+          "            gate = open;",
+          "            if (open && ! gate)\n                progress.fill (0.0);\n\n            gate = open;")],
+        ["Processor MELTDOWN pressed mid-release carries on from where it was"],
+    ),
 ]
 
 
