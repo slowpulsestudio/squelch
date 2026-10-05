@@ -178,8 +178,46 @@ both states directly rather than arguing from spectra: CHEMICAL's register is
 constant for 0.999 of samples, RADIATION's state for 0.000.
 
 The whole signal path runs in `processBlock`: scheduler, engine, envelopes,
-placement, AFTERGLOW, drive, collimation, pan, stereo spread, mid wobble,
+placement, noise bed, drive, collimation, AFTERGLOW, pan, stereo spread, mid wobble,
 voicing, unity match, mix, limiter. The scheduler has all four modes.
+
+#### CONTAMINATION: the noise beds
+
+`Source/Dsp/NoiseBed.h` is `reactions.contaminate` and its five generators.
+Each bed is sidechained by the input, referenced to the engine's own level and
+scaled by CONTAMINATION squared, and added ahead of DRIVE. At zero it does not
+touch the signal at all. MELTDOWN's last stage is this control's amount, which
+is what that stage is for.
+
+**32/32 primitive agreement is not the same claim as "every bed is an exact
+port".** Four of the five are, and CHEMICAL is not:
+
+| bed | status | reference |
+|---|---|---|
+| RADIATION, FISSION, SLUDGE, ALIEN | exact ports | `compare.py` against `reactions.contaminate`, to 1e-9 relative (measured 2e-11 or better) |
+| CHEMICAL | deliberately different | its level against `noise-beds.md`'s -23 dB at full travel and 12 dB below at half, measured through `SquelchProcessorTest` |
+
+CHEMICAL cannot be exact because the prototype has the completed render. It
+drops its grains at random positions across the whole render and divides them
+by the render's own peak, and divides the bed by the whole render's level. A
+stream has neither. The C++ lays hashed Poisson grains at the same density,
+against a running level, and has its own unit level calibrated for that. It is
+accepted on the delivered level, not on sample agreement, and it is not in the
+comparison harness.
+
+**The beds lag the audio by one control block: 8 samples, 0.18 ms.** This is a
+consequence of the prototype's own look-ahead. It interpolates the smoothed
+event envelope between one control value and the next, and a stream can only
+have the next one by waiting for it. All five beds are delayed by the same
+amount, the delay is deterministic, and the block-size test shows it does not
+introduce any dependence on the host's buffer size.
+
+The MELTDOWN-to-bed test checks the shape of the bed's rise and not its
+exponent. DRIVE is parked at its target of 1 there, which saturates what the bed
+adds, and the output level match downstream is still settling, so the bed is not
+progress squared and is not steady after the stage completes. The squared law
+is covered by its own check: a bed whose level is linear in CONTAMINATION fails
+it, as the fault injection confirms.
 
 
 ## Validation
@@ -188,7 +226,7 @@ Three layers, each answering a question the others cannot.
 
 ```sh
 ./.venv/bin/python -m prototype.checks                            # 39 behavioural checks
-./build/SquelchHarness | ./.venv/bin/python -m prototype.compare  # 27 numerical primitives
+./build/SquelchHarness | ./.venv/bin/python -m prototype.compare  # 32 numerical primitives
 ./build/SquelchValidate                                           # dsp-testing.md, Tests 2-20
 ./scripts/test1.sh                                                # dsp-testing.md, Test 1
 ./.venv/bin/python -m prototype.diagnostics                       # dsp-testing.md, Test 19
@@ -199,7 +237,7 @@ The **prototype** in `prototype/` is the contract. It is NumPy, it is readable,
 and it is what the C++ has to agree with.
 
 The **comparison harness** proves the port computes the same numbers, to 1e-9
-relative, on 27 primitives from the oversampler up to the limiter. It cannot
+relative, on 32 primitives from the oversampler up to the limiter. It cannot
 see a coefficient hardcoded in samples, a state that does not survive a block
 boundary, or output that is not reproducible, because it only ever runs one
 configuration.
@@ -217,7 +255,7 @@ picture and identical in a table.
 
 ### What it currently says
 
-> 27/27 primitives and 39/39 behavioural checks pass, with fault-injection
+> 32/32 primitives and 39/39 behavioural checks pass, with fault-injection
 > validation demonstrating discriminatory regression coverage: all eight known
 > FISSION, TOXICITY, HALF-LIFE, SNAP, resonator and level-match regressions are
 > pinned at the appropriate behavioural or state level, and each has been

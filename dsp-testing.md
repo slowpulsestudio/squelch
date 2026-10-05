@@ -997,8 +997,10 @@ Does it demonstrate an actual oscillator, FM/AM and reaction-specific timing?
 The contract has four axes and they are different claims. State them
 separately; do not let one stand in for another.
 
-* **All 27 DSP primitives agree with the prototype.** The implementation
-  computes what the contract computes.
+* **All 32 DSP primitives agree with the prototype.** The implementation
+  computes what the contract computes. This is a claim about the primitives the
+  comparison harness runs, not about every stage: CHEMICAL's noise bed is a
+  streaming implementation that is not in it, accepted on its delivered level.
 * **All 39 behavioural checks pass.** Behavioural verification passes.
 * **`SquelchValidate` reports zero FAIL and zero WARN.** A warning is a
   deferred failure, and a warn-list outlives the fault it was written for.
