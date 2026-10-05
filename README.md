@@ -219,6 +219,31 @@ progress squared and is not steady after the stage completes. The squared law
 is covered by its own check: a bed whose level is linear in CONTAMINATION fails
 it, as the fault injection confirms.
 
+#### MELTDOWN: a held gate, and what is and is not block-size invariant
+
+The editor's button is momentary: the parameter is on while it is held and off
+at the instant it is released. `Source/Dsp/Meltdown.h` turns that gate into eight
+staged envelopes, a linear rise from the press and an exponential fall from
+wherever the rise had got to, so a press carried on from mid-release continues
+from the current level and a short tap never reaches the late stages. The tests
+make the press and release through the button's own handlers, which write the
+parameter `processBlock` reads, and a render made that way is sample-for-sample
+the render made by setting the parameter.
+
+**The staged state is invariant to the host's block size. The audible control
+trajectory is not guaranteed to be.** The state advances in closed form, so
+the same stretch of samples gives the same state however it is cut into blocks,
+and a test pins that. But `processBlock` reads the staged values once per host
+block, so what the engines hear is the state sampled at block starts, and a ramp
+is followed in steps of the block's length. This is the documented control-rate
+processing `dsp-testing.md` Test 4 permits, not a defect in the mechanism. A press
+is also seen at the next block boundary, which is the only place a host can see it.
+
+One measurement is recorded and is not a guarantee: the bed that MELTDOWN's last
+stage drives differs by -48 dB between 128 and 512 sample blocks on the test's own
+stimulus and settings. That figure describes that configuration. The structural
+statement above is the contract.
+
 
 ## Validation
 
