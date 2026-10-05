@@ -151,8 +151,8 @@ namespace squelch
     inline constexpr auto ionizeTooltip =
         u8"(\u03B9) \u2014 latched: scatters every event in stereo, spectrum and depth at once. \u03B9 for ionise.";
     inline constexpr auto meltdownTooltip =
-        u8"(\u03A9) \u2014 momentary: a staged runaway. Containment, drive, toxicity, exposure "
-        "and contamination arrive in sequence, then settle. \u03A9 is the end state.";
+        u8"(\u03A9) \u2014 latched: a staged runaway. Containment, drive, toxicity, exposure "
+        "and contamination arrive in sequence and stay there until it is switched off. \u03A9 is the end state.";
     inline constexpr auto clipTooltip =
         u8"(\u2308\u2309) \u2014 a hard ceiling instead of the lookahead limiter. Latency is "
         "padded to match, so switching never makes the host re-sync. The brackets are the ceiling function.";
@@ -164,7 +164,7 @@ namespace squelch
         rest. CLIP and the Input/Output strips are the exclusions, because they
         are gain staging and session settings rather than sound design.
 
-        MELTDOWN is momentary. Storing it would recall a plugin mid-gesture.
+        MELTDOWN is latched but never stored, so a plugin never reopens mid-runaway.
     */
     inline bool isExcludedFromPresets (const juce::String& id)
     {

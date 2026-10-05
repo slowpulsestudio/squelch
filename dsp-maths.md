@@ -2202,7 +2202,7 @@ The same control therefore does not necessarily appear as the same equation in e
 ## Gestures and output
 
 * \((\iota)\) IONIZE — latched: scatters each event in stereo, spectrum and depth
-* \((\Omega)\) MELTDOWN — momentary: staged runaway
+* \((\Omega)\) MELTDOWN — latched: staged runaway, until switched off
 * \((\lceil\rceil)\) CLIP — hard ceiling instead of the limiter, latency padded to match
 
 ---
@@ -2306,7 +2306,7 @@ The final shared output stage may apply the configured CLIP or limiter behaviour
 
 MELTDOWN is a gesture, not a sixth reaction.
 
-It temporarily pushes the currently selected reaction toward its instability boundary.
+It pushes the currently selected reaction toward its instability boundary for as long as it is switched on.
 
 The gesture modifies the reaction's existing internal mechanism rather than replacing it.
 

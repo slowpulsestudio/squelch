@@ -54,7 +54,7 @@ Canonical parameter names, as they stand:
 - Continuous: ENRICHMENT, FLUX, PROBABILITY, REACTIVITY, VOLATILITY, HALF-LIFE,
   DECAY, SPREAD, TOXICITY, CONTAINMENT, DRIVE, CONTAMINATION, EXPOSURE,
   COLLIMATOR, FALLOUT, AFTERGLOW, IONIZE AMOUNT
-- Gestures: IONIZE (latched), MELTDOWN (momentary)
+- Gestures: IONIZE (latched), MELTDOWN (latched)
 - Output: CLIP
 
 Renamed since README.md: RANGE became SPREAD, SQUELCH became TOXICITY, RODS became
