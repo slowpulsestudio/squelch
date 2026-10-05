@@ -26,15 +26,24 @@ private:
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
     };
 
-    /// A titled column and the controls stacked down it, in the order the cheatsheet lists them.
+    /// A titled panel and its controls, in the order the cheatsheet lists them: stacked down
+    /// a column, or laid along a row.
     struct Section
     {
         sps::BackgroundFrame frame;
         std::vector<juce::Component*> controls;
+        bool row = false;
+
+        /// Knobs per row in a column section.
+        int columns = 1;
     };
 
     enum SectionIndex { structure, voice, colour, gestures, numSections };
 
+    /// Widths of the outer and middle columns, and the height they all share.
+    struct Metrics { int outer, centre, tallest; };
+
+    Metrics measure() const;
     static void layOut (Section&, juce::Rectangle<int> frameArea);
 
     void addKnob (const char* id, Section& section);

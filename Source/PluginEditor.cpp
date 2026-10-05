@@ -46,30 +46,78 @@ namespace
         return size;
     }
 
-    int columnWidth (const std::vector<juce::Component*>& controls)
+    using Row = std::vector<juce::Component*>;
+
+    bool isKnob (juce::Component* c) { return dynamic_cast<sps::SimpleKnob*> (c) != nullptr; }
+
+    /** The rows a section is made of. A row section is one row; a column section is one
+        row per control, except that consecutive knobs share rows, `columns` to a row. */
+    template <typename Section>
+    std::vector<Row> rowsOf (const Section& section)
+    {
+        if (section.row)
+            return { section.controls };
+
+        std::vector<Row> rows;
+
+        for (auto* c : section.controls)
+        {
+            if (isKnob (c) && ! rows.empty() && isKnob (rows.back().front())
+                && (int) rows.back().size() < section.columns)
+                rows.back().push_back (c);
+            else
+                rows.push_back ({ c });
+        }
+
+        return rows;
+    }
+
+    int rowWidth (const Row& row)
     {
         auto width = 0;
-        for (auto* c : controls)
-            width = juce::jmax (width, cellSizeOf (*c).getWidth());
+        for (auto* c : row)
+            width += cellSizeOf (*c).getWidth();
+        return width;
+    }
+
+    int rowHeight (const Row& row)
+    {
+        auto height = 0;
+        for (auto* c : row)
+            height = juce::jmax (height, cellSizeOf (*c).getHeight());
+        return height;
+    }
+
+    template <typename Section>
+    int sectionWidth (const Section& section)
+    {
+        auto width = 0;
+        for (const auto& row : rowsOf (section))
+            width = juce::jmax (width, rowWidth (row));
+
         return width + padding * 2;
     }
 
-    int columnHeight (const std::vector<juce::Component*>& controls)
+    template <typename Section>
+    int sectionHeight (const Section& section)
     {
-        auto height = padding * 2;
-        for (auto* c : controls)
-            height += cellSizeOf (*c).getHeight();
-        return height + stackGap * juce::jmax (0, (int) controls.size() - 1);
+        const auto rows = rowsOf (section);
+        auto height = 0;
+
+        for (const auto& row : rows)
+            height += rowHeight (row);
+
+        return height + stackGap * juce::jmax (0, (int) rows.size() - 1) + padding * 2;
     }
 
-    /// Each column is as wide as its mirror image about the centre, so the centrepiece sits
-    /// exactly halfway across the plugin and not just between the two middle columns.
+    /// The outer sections are as wide as each other, so the middle column sits exactly
+    /// halfway across the plugin and not merely between them.
     template <typename Sections>
     int mirroredWidth (const Sections& sections, int index)
     {
         const auto mirror = (int) sections.size() - 1 - index;
-        return juce::jmax (columnWidth (sections[(size_t) index].controls),
-                           columnWidth (sections[(size_t) mirror].controls));
+        return juce::jmax (sectionWidth (sections[(size_t) index]),
+                           sectionWidth (sections[(size_t) mirror]));
     }
 
     /// JUCE only asks the component directly under the mouse, so every child needs the text.
@@ -196,17 +244,35 @@ SquelchAudioProcessorEditor::SquelchAudioProcessorEditor (SquelchAudioProcessor&
     addToggle (clip, squelch::ids::clip, "Clip", squelch::clipTooltip,
                sections[gestures], clipAttachment);
 
-    auto tallest = 0;
-    auto width = margin * 2 + gap * numSections + reaction.designBounds().getWidth();
-    for (auto i = 0; i < numSections; ++i)
-    {
-        tallest = juce::jmax (tallest, columnHeight (sections[i].controls));
-        width += mirroredWidth (sections, i);
-    }
+    // VOICE and COLOUR are the rows of the middle column, with REACTION between them.
+    sections[voice].row = true;
+    sections[colour].row = true;
 
-    setSize (juce::jmax (width, margin * 2 + sps::PresetToolbar::designWidth),
+    // STRUCTURE's knobs sit two across, under its selectors.
+    sections[structure].columns = 2;
+
+    const auto m = measure();
+
+    setSize (juce::jmax (margin * 2 + m.outer * 2 + m.centre + gap * 2,
+                         margin * 2 + sps::PresetToolbar::designWidth),
              margin * 2 + sps::PresetToolbar::designHeight + gap
-                 + sps::BackgroundFrame::titleOverhang + tallest);
+                 + sps::BackgroundFrame::titleOverhang + m.tallest);
+}
+
+SquelchAudioProcessorEditor::Metrics SquelchAudioProcessorEditor::measure() const
+{
+    Metrics m;
+    const auto size = reaction.designBounds();
+
+    m.outer = mirroredWidth (sections, structure);
+    m.centre = juce::jmax (mirroredWidth (sections, voice), size.getWidth());
+
+    const auto middle = sectionHeight (sections[voice]) + gap + size.getHeight() + gap
+                      + sectionHeight (sections[colour]);
+
+    m.tallest = juce::jmax (sectionHeight (sections[structure]),
+                            sectionHeight (sections[gestures]), middle);
+    return m;
 }
 
 void SquelchAudioProcessorEditor::addKnob (const char* id, Section& section)
@@ -215,7 +281,7 @@ void SquelchAudioProcessorEditor::addKnob (const char* id, Section& section)
 
     auto knob = std::make_unique<Knob>();
 
-    knob->control.setLabelText (spec.label);
+    knob->control.setLabelText (spec.shortLabel != nullptr ? spec.shortLabel : spec.label);
     applyTooltip (knob->control, spec.tooltip);
 
     knob->attachment
@@ -285,20 +351,37 @@ void SquelchAudioProcessorEditor::layOut (Section& section, juce::Rectangle<int>
 {
     section.frame.setBounds (frameArea);
 
-    // Controls stack down the column from the top, each centred across it.
-    auto y = frameArea.getY() + padding;
+    const auto rows = rowsOf (section);
     const auto centreX = frameArea.getCentreX();
 
-    for (auto* c : section.controls)
+    // A row section sits in the middle of its frame; a column section hangs from the top.
+    auto y = section.row ? frameArea.getCentreY() - (sectionHeight (section) - padding * 2) / 2
+                         : frameArea.getY() + padding;
+
+    for (const auto& row : rows)
     {
-        const auto cell = cellSizeOf (*c);
-        c->setBounds (designSizeOf (*c).withCentre ({ centreX, y + cell.getHeight() / 2 }));
-        y += cell.getHeight() + stackGap;
+        // Knobs keep to the section's grid, so a short last row stays under the first column
+        // and does not drift to the middle; everything else is centred.
+        const auto span = (isKnob (row.front()) && ! section.row)
+                            ? section.columns * knobCellWidth : rowWidth (row);
+        auto x = centreX - span / 2;
+        const auto height = rowHeight (row);
+
+        for (auto* c : row)
+        {
+            const auto cell = cellSizeOf (*c);
+            c->setBounds (designSizeOf (*c).withCentre ({ x + cell.getWidth() / 2,
+                                                          y + height / 2 }));
+            x += cell.getWidth();
+        }
+
+        y += height + stackGap;
     }
 }
 
 void SquelchAudioProcessorEditor::resized()
 {
+    const auto m = measure();
     auto area = getLocalBounds().reduced (margin);
 
     toolbar.setBounds (area.removeFromTop (sps::PresetToolbar::designHeight)
@@ -308,18 +391,18 @@ void SquelchAudioProcessorEditor::resized()
     // The title straddles the top edge, so the frames need room above them.
     area.removeFromTop (sps::BackgroundFrame::titleOverhang);
 
-    for (auto i = 0; i < numSections; ++i)
-    {
-        layOut (sections[i], area.removeFromLeft (mirroredWidth (sections, i)));
-        area.removeFromLeft (gap);
+    auto left = area.removeFromLeft (m.outer);
+    area.removeFromLeft (gap);
+    auto centre = area.removeFromLeft (m.centre);
+    area.removeFromLeft (gap);
+    auto right = area.removeFromLeft (m.outer);
 
-        // REACTION is the plugin's centrepiece: halfway through the sections, and
-        // vertically centred in the height they share.
-        if (i == voice)
-        {
-            const auto size = reaction.designBounds();
-            reaction.setBounds (size.withCentre (area.removeFromLeft (size.getWidth()).getCentre()));
-            area.removeFromLeft (gap);
-        }
-    }
+    layOut (sections[structure], left);
+    layOut (sections[gestures], right);
+
+    // VOICE at the top of the middle column, COLOUR at the bottom, and REACTION centred
+    // in whatever is left between them.
+    layOut (sections[voice], centre.removeFromTop (sectionHeight (sections[voice])));
+    layOut (sections[colour], centre.removeFromBottom (sectionHeight (sections[colour])));
+    reaction.setBounds (reaction.designBounds().withCentre (centre.getCentre()));
 }

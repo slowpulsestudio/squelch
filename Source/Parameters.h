@@ -71,6 +71,9 @@ namespace squelch
         const char* label;
         float defaultValue;
         const char* tooltip;
+
+        /// What the knob says when the full name will not fit; the host sees the full name.
+        const char* shortLabel = nullptr;
     };
 
     /** The knobs, in the order the prototype lists them.
@@ -124,8 +127,10 @@ namespace squelch
           u8"(\u03C7) \u2014 dispersal. Smears the reaction in pitch and stereo as it settles. \u03C7 denotes scattering." },
         { ids::afterglow, "Afterglow", 0.0f,
           u8"(T\u2086\u2080) \u2014 how long the reaction keeps glowing after it has happened. T60 is the acoustic term for decay time." },
-        { ids::ionizeAmount, "Ionize Amount", 0.7f,
-          u8"(\u03B9) \u2014 how far Ionize scatters each event in stereo, spectrum and depth. \u03B9 for ionise." },
+        { ids::ionizeAmount, "Ionization Degree", 0.7f,
+          u8"(\u03B9) \u2014 Charge: the degree of ionization, or how far Ionize scatters each event "
+          "in stereo, spectrum and depth. \u03B9 for ionise.",
+          "Charge" },
     };
 
     /// Tooltips for the controls that are choices rather than quantities.
