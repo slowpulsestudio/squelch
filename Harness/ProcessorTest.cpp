@@ -1,0 +1,128 @@
+/** Checks that run the whole processor rather than one engine.
+
+    Validate.cpp drives the engines directly, so it cannot see a parameter that
+    never reaches them: ENRICHMENT sat unwired in the plugin while every one of
+    those checks passed. These go through SquelchAudioProcessor::processBlock,
+    which is the only place a control's wiring can be observed.
+
+    Lines start [PASS] / [FAIL] so scripts/fault-injection.py reads them the way
+    it reads Validate's.
+*/
+
+#include <cmath>
+#include <cstdio>
+#include <vector>
+
+#include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_events/juce_events.h>
+
+#include "../Source/Parameters.h"
+#include "../Source/PluginProcessor.h"
+
+namespace
+{
+constexpr double sampleRate = 44100.0;
+constexpr int blockSize = 512;
+constexpr int numBlocks = 172; // about two seconds
+
+int failures = 0;
+
+void report (bool pass, const char* name, double measured, const char* detail)
+{
+    std::printf ("[%s] %s: %.2f %s\n", pass ? "PASS" : "FAIL", name, measured, detail);
+    failures += pass ? 0 : 1;
+}
+
+void setParameter (SquelchAudioProcessor& processor, const char* id, float normalised)
+{
+    processor.apvts.getParameter (id)->setValueNotifyingHost (normalised);
+}
+
+/** Two seconds of deterministic noise through a fresh processor, left channel. */
+std::vector<float> render (int reactionIndex, float enrichment, float mix)
+{
+    SquelchAudioProcessor processor;
+    processor.mix = mix;
+
+    const auto* reaction = processor.apvts.getParameter (squelch::ids::reaction);
+    setParameter (processor, squelch::ids::reaction, reaction->convertTo0to1 (static_cast<float> (reactionIndex)));
+    setParameter (processor, squelch::ids::enrichment, enrichment);
+
+    processor.prepareToPlay (sampleRate, blockSize);
+
+    std::vector<float> out;
+    juce::MidiBuffer midi;
+    std::uint32_t state = 12345u;
+
+    for (int b = 0; b < numBlocks; ++b)
+    {
+        juce::AudioBuffer<float> buffer (2, blockSize);
+
+        for (int i = 0; i < blockSize; ++i)
+        {
+            state = state * 1664525u + 1013904223u;
+            const auto v = 0.25f * (static_cast<float> (state >> 8) / 8388608.0f - 1.0f);
+            buffer.setSample (0, i, v);
+            buffer.setSample (1, i, v);
+        }
+
+        processor.processBlock (buffer, midi);
+        out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+    }
+
+    return out;
+}
+
+double rms (const std::vector<float>& x)
+{
+    double sum = 0.0;
+    for (auto v : x)
+        sum += static_cast<double> (v) * v;
+    return std::sqrt (sum / static_cast<double> (std::max<size_t> (x.size(), 1)));
+}
+
+double db (double ratio) { return 20.0 * std::log10 (std::max (ratio, 1.0e-12)); }
+
+std::vector<float> difference (const std::vector<float>& a, const std::vector<float>& b)
+{
+    std::vector<float> d (a.size());
+    for (size_t i = 0; i < a.size(); ++i)
+        d[i] = a[i] - b[i];
+    return d;
+}
+} // namespace
+
+int main()
+{
+    const juce::ScopedJuceInitialiser_GUI juceInitialiser;
+
+    // What the listener hears of ENRICHMENT: the processed output with the
+    // knob at either end of its travel, as a level relative to the output
+    // itself. By the scale in the notes, -20 dB is subtle and -26 is inaudible,
+    // so a control that does something must clear -20.
+    for (const auto* name : { "RADIATION", "FISSION", "SLUDGE", "CHEMICAL" })
+    {
+        const auto index = squelch::reactionNames.indexOf (name);
+
+        const auto low = render (index, 0.0f, 1.0f);
+        const auto high = render (index, 1.0f, 1.0f);
+        const auto relative = db (rms (difference (high, low)) / rms (high));
+
+        char label[96];
+        std::snprintf (label, sizeof label, "Processor ENRICHMENT changes the %s output", name);
+        report (relative > -20.0, label, relative, "dB (needs > -20)");
+    }
+
+    // ENRICHMENT drives the engines only. At mix 0 nothing but the dry path
+    // reaches the output, so the knob must not move a single sample.
+    {
+        const auto low = render (0, 0.0f, 0.0f);
+        const auto high = render (0, 1.0f, 0.0f);
+        const auto worst = rms (difference (high, low));
+        report (worst == 0.0, "Processor ENRICHMENT leaves the dry path alone", db (worst),
+                "dB (needs exactly 0 difference)");
+    }
+
+    std::printf ("%s\n", failures == 0 ? "PROCESSOR TESTS: PASS" : "PROCESSOR TESTS: FAIL");
+    return failures == 0 ? 0 : 1;
+}

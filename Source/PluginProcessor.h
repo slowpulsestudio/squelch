@@ -63,6 +63,10 @@ private:
 
     juce::SmoothedValue<float> inputGain, outputGain, wetMix;
 
+    /// ENRICHMENT as a linear gain into the engines. The dry path does not get it.
+    juce::SmoothedValue<float> enrichmentGain;
+    float currentEnrichmentGain() const;
+
     squelch::dsp::SludgeEngine sludge;
     squelch::dsp::AlienEngine alien;
     squelch::dsp::ChemicalEngine chemical;

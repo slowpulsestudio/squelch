@@ -116,6 +116,25 @@ FAULTS = [
          ("prototype/output_stage.py", "PEAK_ATTACK_S = 2.0", "PEAK_ATTACK_S = 0.6")],
         ["level control does not pump"],
     ),
+    Fault(
+        "enrichment-unwired",
+        "ENRICHMENT read from the parameter tree but never applied to the engines' input",
+        [("Source/PluginProcessor.cpp",
+          "const auto feedL = dryL * enrichment;",
+          "const auto feedL = dryL;"),
+         ("Source/PluginProcessor.cpp",
+          "const auto feedR = dryR * enrichment;",
+          "const auto feedR = dryR;")],
+        ["Processor ENRICHMENT changes the RADIATION output"],
+    ),
+    Fault(
+        "enrichment-on-dry",
+        "ENRICHMENT leaking into the dry path as well as the engines",
+        [("Source/PluginProcessor.cpp",
+          "dryDelay.setSample (0, dryDelayPos, dryL);",
+          "dryDelay.setSample (0, dryDelayPos, feedL);")],
+        ["Processor ENRICHMENT leaves the dry path alone"],
+    ),
 ]
 
 
@@ -174,7 +193,7 @@ def run_suite() -> list[str] | None:
     would report a working test as missing.
     """
     build = subprocess.run(["cmake", "--build", "build", "--target",
-                            "SquelchValidate", "SquelchHarness"],
+                            "SquelchValidate", "SquelchHarness", "SquelchProcessorTest"],
                            cwd=ROOT, capture_output=True, text=True)
     if "error:" in build.stdout + build.stderr:
         return None
@@ -183,6 +202,10 @@ def run_suite() -> list[str] | None:
 
     out = subprocess.run([str(ROOT / "build/SquelchValidate")], cwd=ROOT,
                          capture_output=True, text=True).stdout
+    failures += [line for line in out.splitlines() if line.startswith("[FAIL]")]
+
+    out = subprocess.run([str(ROOT / "build/SquelchProcessorTest_artefacts/Release/SquelchProcessorTest")],
+                         cwd=ROOT, capture_output=True, text=True).stdout
     failures += [line for line in out.splitlines() if line.startswith("[FAIL]")]
 
     out = subprocess.run(["./.venv/bin/python", "-W", "ignore", "-m", "prototype.checks"],

@@ -55,12 +55,13 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 {
     juce::ignoreUnused (samplesPerBlock);
 
-    for (auto* value : { &inputGain, &outputGain, &wetMix })
+    for (auto* value : { &inputGain, &outputGain, &wetMix, &enrichmentGain })
         value->reset (sampleRate, smoothingSeconds);
 
     inputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (inputTrimDb.load()));
     outputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (outputTrimDb.load()));
     wetMix.setCurrentAndTargetValue (mix.load());
+    enrichmentGain.setCurrentAndTargetValue (currentEnrichmentGain());
 
     sludge.prepare (sampleRate);
     alien.prepare (sampleRate);
@@ -104,6 +105,13 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // one figure that does not move with REACTION, or the host re-syncs every
     // time the reaction is switched.
     setLatencySamples (preMixLatency() + squelch::dsp::PeakLimiter::latencySamples (sampleRate));
+}
+
+float SquelchAudioProcessor::currentEnrichmentGain() const
+{
+    // Unity at half travel and enrichmentRangeDb either side, as prototype/params.py.
+    const auto value = apvts.getRawParameterValue (squelch::ids::enrichment)->load();
+    return juce::Decibels::decibelsToGain ((value - 0.5f) * 2.0f * squelch::enrichmentRangeDb);
 }
 
 int SquelchAudioProcessor::preMixLatency() const
@@ -213,6 +221,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     inputGain.setTargetValue (juce::Decibels::decibelsToGain (inputTrimDb.load()));
     outputGain.setTargetValue (juce::Decibels::decibelsToGain (outputTrimDb.load()));
     wetMix.setTargetValue (mix.load());
+    enrichmentGain.setTargetValue (currentEnrichmentGain());
 
     if (auto* playHead = getPlayHead())
         if (const auto position = playHead->getPosition())
@@ -278,9 +287,16 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const auto dryL = buffer.getSample (0, sample) * in;
         const auto dryR = channels > 1 ? buffer.getSample (1, sample) * in : dryL;
 
+        // ENRICHMENT decides how hard the engines are hit and nothing else: the dry path
+        // keeps the unscaled signal, and onsets are read off what the engines receive,
+        // as in prototype/engine.py.
+        const auto enrichment = enrichmentGain.getNextValue();
+        const auto feedL = dryL * enrichment;
+        const auto feedR = dryR * enrichment;
+
         // INPUT mode takes its events from onsets in the audio rather than
         // from the grid, so it fires inside the sample loop.
-        scheduler.detectOnsets (std::max (std::abs (dryL), std::abs (dryR)), position, fire);
+        scheduler.detectOnsets (std::max (std::abs (feedL), std::abs (feedR)), position, fire);
 
         // SLUDGE's oversampler lags by `latency`, so the dry path is delayed
         // by the same amount or the mix comb-filters the two against each
@@ -297,18 +313,18 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         double wetL = 0.0, wetR = 0.0;
 
         if (reaction == "SLUDGE")
-            sludge.process (dryL, dryR, wetL, wetR);
+            sludge.process (feedL, feedR, wetL, wetR);
         else if (reaction == "ALIEN")
             alien.process (wetL, wetR);
         else if (reaction == "CHEMICAL")
         {
-            wetL = chemical.process (dryL, env.cutoffHz, env.feedback, env.drive);
-            wetR = chemical.process (dryR, env.cutoffHz, env.feedback, env.drive);
+            wetL = chemical.process (feedL, env.cutoffHz, env.feedback, env.drive);
+            wetR = chemical.process (feedR, env.cutoffHz, env.feedback, env.drive);
         }
         else if (reaction == "RADIATION")
-            radiation.process (dryL, dryR, wetL, wetR);
+            radiation.process (feedL, feedR, wetL, wetR);
         else if (reaction == "FISSION")
-            fission.process (dryL, dryR, wetL, wetR);
+            fission.process (feedL, feedR, wetL, wetR);
 
         // Only SLUDGE lags on its own, so the rest are padded to match and the
         // reported latency stays put when REACTION changes.

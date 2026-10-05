@@ -103,3 +103,21 @@ target_link_libraries(SquelchSnapshot PRIVATE
     juce::juce_dsp
     juce::juce_recommended_config_flags
 )
+
+# Runs the whole processor, because the engine-level checks cannot see a
+# control that never reaches the engines.
+juce_add_console_app(SquelchProcessorTest PRODUCT_NAME "SquelchProcessorTest")
+target_sources(SquelchProcessorTest PRIVATE Harness/ProcessorTest.cpp)
+target_compile_features(SquelchProcessorTest PRIVATE cxx_std_17)
+target_compile_definitions(SquelchProcessorTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_STANDALONE_APPLICATION=1
+)
+target_link_libraries(SquelchProcessorTest PRIVATE
+    Squelch
+    sps::DesignSystem
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags
+)
