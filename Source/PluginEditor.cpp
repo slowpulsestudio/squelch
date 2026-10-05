@@ -27,6 +27,9 @@ namespace
         if (dynamic_cast<sps::Toggle*> (&c) != nullptr)
             return { sps::Toggle::designWidth, sps::Toggle::designHeight };
 
+        if (dynamic_cast<MomentaryGesture*> (&c) != nullptr)
+            return { 0, 0, MomentaryGesture::designWidth, MomentaryGesture::designHeight };
+
         if (auto* knob = dynamic_cast<sps::SimpleKnob*> (&c))
             return knob->designBounds();
 
@@ -141,8 +144,47 @@ namespace
     }
 }
 
+MomentaryGesture::MomentaryGesture (juce::RangedAudioParameter& p, const char* labelText,
+                                    const char* tooltip)
+    : parameter (p)
+{
+    label.setText (labelText);
+    label.setInterceptsMouseClicks (false, false);
+    setInterceptsMouseClicks (false, true);
+
+    // The button swallows its own clicks, so ask it to tell us about them.
+    button.addMouseListener (this, false);
+    applyTooltip (button, tooltip);
+
+    addAndMakeVisible (button);
+    addAndMakeVisible (label);
+}
+
+void MomentaryGesture::resized()
+{
+    // The label sits where the Toggle's does, so the gestures line up in the column.
+    button.setBounds (juce::Rectangle<int> (sps::InputButton::designWidth,
+                                            sps::InputButton::designHeight)
+                          .withCentre ({ designWidth / 2, 70 }));
+    label.setBounds (12, 110, 60, 28);
+}
+
+void MomentaryGesture::mouseDown (const juce::MouseEvent&)
+{
+    parameter.beginChangeGesture();
+    parameter.setValueNotifyingHost (1.0f);
+}
+
+void MomentaryGesture::mouseUp (const juce::MouseEvent&)
+{
+    parameter.setValueNotifyingHost (0.0f);
+    parameter.endChangeGesture();
+}
+
 SquelchAudioProcessorEditor::SquelchAudioProcessorEditor (SquelchAudioProcessor& p)
-    : juce::AudioProcessorEditor (&p), processor (p)
+    : juce::AudioProcessorEditor (&p), processor (p),
+      meltdown (*p.apvts.getParameter (squelch::ids::meltdown), "Meltdown",
+                squelch::meltdownTooltip)
 {
     addAndMakeVisible (toolbar);
 
@@ -239,8 +281,8 @@ SquelchAudioProcessorEditor::SquelchAudioProcessorEditor (SquelchAudioProcessor&
     addToggle (ionize, squelch::ids::ionize, "Ionize", squelch::ionizeTooltip,
                sections[gestures], ionizeAttachment);
     addKnob (squelch::ids::ionizeAmount, sections[gestures]);
-    addToggle (meltdown, squelch::ids::meltdown, "Meltdown", squelch::meltdownTooltip,
-               sections[gestures], meltdownAttachment);
+    addAndMakeVisible (meltdown);
+    sections[gestures].controls.push_back (&meltdown);
     addToggle (clip, squelch::ids::clip, "Clip", squelch::clipTooltip,
                sections[gestures], clipAttachment);
 

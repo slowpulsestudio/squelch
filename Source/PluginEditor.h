@@ -4,11 +4,34 @@
 
 #include "Components/Adjustor.h"
 #include "Components/BackgroundFrame.h"
+#include "Components/InputButton.h"
+#include "Components/Parameter.h"
 #include "Components/PresetToolbar.h"
 #include "Components/SimpleKnob.h"
 #include "Components/SwitchSelector.h"
 #include "Components/Toggle.h"
 #include "PluginProcessor.h"
+
+/// A held gesture: the design system's momentary InputButton, with the parameter on while
+/// it is down and off the instant it is released, wherever the pointer is.
+class MomentaryGesture : public juce::Component
+{
+public:
+    static constexpr int designWidth = sps::Toggle::designWidth;
+    static constexpr int designHeight = sps::Toggle::designHeight;
+
+    MomentaryGesture (juce::RangedAudioParameter&, const char* labelText, const char* tooltip);
+
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+
+private:
+    juce::RangedAudioParameter& parameter;
+    sps::InputButton button { sps::InputButton::Glyph::Alpha,
+                              sps::InputButton::Interaction::Momentary };
+    sps::Parameter label { sps::Parameter::Kind::Name };
+};
 
 class SquelchAudioProcessorEditor : public juce::AudioProcessorEditor
 {
@@ -67,12 +90,13 @@ private:
                                    sps::SwitchSelector::Knob::Primary };
     sps::SwitchSelector mode { sps::SwitchSelector::Type::Text, squelch::modeNames.size() };
     sps::Adjustor seed { sps::Adjustor::Usage::Seed };
-    sps::Toggle ionize, meltdown, clip;
+    sps::Toggle ionize, clip;
+    MomentaryGesture meltdown;
 
     std::unique_ptr<juce::ParameterAttachment> reactionAttachment, modeAttachment,
                                                gridAttachment, seedAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>
-        ionizeAttachment, meltdownAttachment, clipAttachment;
+        ionizeAttachment, clipAttachment;
 
     /// SwitchSelector::setPosition notifies synchronously, so a parameter-driven
     /// update would otherwise echo straight back out as a new gesture.
