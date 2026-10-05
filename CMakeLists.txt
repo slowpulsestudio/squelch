@@ -28,7 +28,7 @@ FetchContent_MakeAvailable(JUCE)
 FetchContent_Declare(
     SpsDesignSystem
     GIT_REPOSITORY https://github.com/slowpulsestudio/sps-juce-design-system.git
-    GIT_TAG v1.5.1
+    GIT_TAG v1.6.1
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(SpsDesignSystem)
@@ -39,7 +39,7 @@ juce_add_plugin(Squelch
     BUNDLE_ID "com.slowpulsestudio.squelch"
     PLUGIN_MANUFACTURER_CODE Slps
     PLUGIN_CODE Sqch
-    FORMATS VST3
+    FORMATS VST3 Standalone
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     COPY_PLUGIN_AFTER_BUILD TRUE
@@ -85,3 +85,21 @@ target_compile_features(SquelchHarness PRIVATE cxx_std_17)
 # in one block configuration, so it cannot see the faults a port introduces.
 add_executable(SquelchValidate Harness/Validate.cpp)
 target_compile_features(SquelchValidate PRIVATE cxx_std_17)
+
+# Renders the editor to a PNG offscreen. Checking a layout should not require
+# a host, a window, or someone willing to go and look at a screen.
+juce_add_console_app(SquelchSnapshot PRODUCT_NAME "SquelchSnapshot")
+target_sources(SquelchSnapshot PRIVATE Harness/Snapshot.cpp)
+target_compile_features(SquelchSnapshot PRIVATE cxx_std_17)
+target_compile_definitions(SquelchSnapshot PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_STANDALONE_APPLICATION=1
+)
+target_link_libraries(SquelchSnapshot PRIVATE
+    Squelch
+    sps::DesignSystem
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags
+)
