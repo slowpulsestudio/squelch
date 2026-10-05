@@ -26,6 +26,20 @@ half	full
 RADIATION ticks	-40 dB	-28 dB
 FISSION shimmer	-30 dB	-18 dB
 SLUDGE rumble	-26 dB	-14 dB
-CHEMICAL fizz	-32 dB	-20 dB
+CHEMICAL fizz	-35 dB	-23 dB
 ALIEN whirr	-28 dB	-16 dB
 RADIATION is pinned much lower than the rest so it stays barely legible even at maximum, per your note. The beds can sit higher and still feel subtle because continuous texture is far less attention-grabbing than transients.
+
+CHEMICAL was first proposed at -32 dB half and -20 dB full, and the prototype
+implemented that. Commit 85832de lowered it to -23 dB full, because dense
+continuous fizz in the most sensitive part of the ear's range reads louder than
+its level suggests. This table was not updated at the time, and the prototype
+and its checks are the authority: -23 dB at full travel and, with the control
+squared, 12 dB below that at half.
+
+CHEMICAL's bed in the plugin is a streaming-equivalent implementation and not an
+exact render-equivalent port. The prototype places its grains across the whole
+render and normalises them by the render's own peak and level, which a stream
+cannot do. Its contract is the delivered level above, measured through the
+processor, and it is not in the numerical comparison. The other four beds are
+exact ports.

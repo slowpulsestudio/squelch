@@ -195,7 +195,7 @@ port".** Four of the five are, and CHEMICAL is not:
 | bed | status | reference |
 |---|---|---|
 | RADIATION, FISSION, SLUDGE, ALIEN | exact ports | `compare.py` against `reactions.contaminate`, to 1e-9 relative (measured 2e-11 or better) |
-| CHEMICAL | deliberately different | its level against `noise-beds.md`'s -23 dB at full travel and 12 dB below at half, measured through `SquelchProcessorTest` |
+| CHEMICAL | streaming-equivalent, not an exact port | its delivered level: -23 dB at full travel and -35 dB at half (`noise-beds.md`, `check_contamination_scales`), measured through `SquelchProcessorTest` |
 
 CHEMICAL cannot be exact because the prototype has the completed render. It
 drops its grains at random positions across the whole render and divides them
