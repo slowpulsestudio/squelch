@@ -64,6 +64,7 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     enrichmentGain.setCurrentAndTargetValue (currentEnrichmentGain());
 
     meltdown.prepare (sampleRate);
+    noiseBed.prepare (sampleRate);
     sludge.prepare (sampleRate);
     alien.prepare (sampleRate);
     chemical.prepare (sampleRate);
@@ -195,6 +196,12 @@ void SquelchAudioProcessor::refreshReactionSettings()
     collimatorR.set (value (ids::collimator));
     stereoSpread.set (value (ids::fallout) * stereoWeights[index]);
 
+    // The beds read SPREAD, REACTIVITY and CONTAINMENT as the knobs sit; only the
+    // amount follows MELTDOWN, which is what its last stage is for.
+    noiseBed.configure (index, seed, value (ids::spread), value (ids::reactivity),
+                        value (ids::containment));
+    noiseBed.setAmount (staged (dsp::Staged::contamination, ids::contamination));
+
     afterglowAmount = value (ids::afterglow);
     afterglow.set (afterglowAmount, 0.45);
 
@@ -279,6 +286,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const auto step = static_cast<std::int64_t> (scheduler.stepSeconds() * getSampleRate());
         envelopes.trigger (e, std::max<std::int64_t> (step, 1));
         placement.trigger (e);
+        noiseBed.trigger (e);
         midWobble.trigger();
     };
 
@@ -352,6 +360,11 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             wetR = heldR;
         }
 
+        // The reaction's noise bed goes in ahead of DRIVE, at a level taken from the
+        // engine's own output. It is sidechained by what the engines were fed.
+        const auto place = placement.process();
+        noiseBed.process (position, wetL, wetR, feedL, feedR, place.env, wetL, wetR);
+
         // The output chain. Placement and AFTERGLOW are absent: pan_gain comes
         // from build_controls and the glow needs a reverb, neither of which is
         // ported, so they are left out rather than approximated.
@@ -362,8 +375,8 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         // Placement runs AFTER the saturation, not before it. A hard-panned
         // event has one loud channel and one quiet one, and tanh compresses
         // the loud one harder, so driving a placed signal squeezes most of
-        // the placement back out: 7.5 dB of balance swing down to 3.6.
-        const auto place = placement.process();
+        // the placement back out: 7.5 dB of balance swing down to 3.6. The envelope
+        // was read above, ahead of the noise bed, so only the pan is applied here.
         wetL *= place.panL;
         wetR *= place.panR;
 

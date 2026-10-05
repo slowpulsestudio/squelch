@@ -439,6 +439,46 @@ def _meltdown_reference() -> np.ndarray:
     return np.stack([md.ctrl(name)[::50] for name in STAGES], axis=1).reshape(-1)
 
 
+def _noise_bed_reference(reaction: str) -> np.ndarray:
+    """Source/Dsp/NoiseBed.h against reactions.contaminate, one bed at a time.
+
+    The bed alone: the output less the wet. The C++ lags the audio by one
+    control block, because the prototype interpolates the smoothed event
+    envelope between control values and a stream has to wait for the next one,
+    so the reference is the prototype's bed shifted by those eight samples.
+
+    The dry is silent for its first 4410 samples. The prototype's rolling peak
+    reflects at the start of the file, reading samples that have not played
+    yet; a stream has nothing there, and silence makes the two agree.
+    """
+    from .controls import Controls
+    from .reactions import contaminate
+
+    n = SR * 2
+    nb = filters.n_blocks(n)
+    t = np.arange(n) / SR
+    wet = np.stack([0.3 * np.sin(2.0 * np.pi * 200.0 * t),
+                    0.2 * np.sin(2.0 * np.pi * 330.0 * t + 0.3)], axis=1)
+    on = (np.arange(n) >= 4410) & (((np.arange(n) - 4410) % 11025) < 2205)
+    dry = np.stack([0.5 * np.sin(2.0 * np.pi * 150.0 * t) * on,
+                    0.4 * np.sin(2.0 * np.pi * 170.0 * t + 0.2) * on], axis=1)
+
+    controls = Controls(
+        env=0.5 + 0.5 * np.sin(0.01 * np.arange(nb)),
+        pan_gain=np.ones((nb, 2)), send=np.zeros(nb), cutoff=np.zeros(nb),
+        resonance=np.zeros(nb),
+        starts=np.array([1000 + 3731 * k for k in range(20)], dtype=int),
+        damping=0.3,
+    )
+    p = Params(reaction=reaction, spread=0.6, reactivity=0.4, contamination=0.8,
+               containment=0.3, seed=7)
+    bed = contaminate(wet, dry, controls, p, PROFILES[reaction], SR) - wet
+
+    delayed = np.zeros_like(bed)
+    delayed[8:] = bed[:-8]
+    return delayed[5::16].reshape(-1)
+
+
 def _reverb_reference() -> np.ndarray:
     """Source/Dsp/Reverb.h against reverb.reverb.
 
@@ -494,6 +534,10 @@ def expectations() -> dict:
         "envelopes": _envelopes_reference(),
         "placement": _placement_reference(),
         "meltdown": _meltdown_reference(),
+        "noise_radiation": _noise_bed_reference("RADIATION"),
+        "noise_fission": _noise_bed_reference("FISSION"),
+        "noise_sludge": _noise_bed_reference("SLUDGE"),
+        "noise_alien": _noise_bed_reference("ALIEN"),
         "reverb": _reverb_reference(),
     }
 

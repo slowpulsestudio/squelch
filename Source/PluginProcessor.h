@@ -11,6 +11,7 @@
 #include "Dsp/Fission.h"
 #include "Dsp/MidWobble.h"
 #include "Dsp/Meltdown.h"
+#include "Dsp/NoiseBed.h"
 #include "Dsp/Radiation.h"
 #include "Dsp/Reverb.h"
 #include "Dsp/Scheduler.h"
@@ -81,6 +82,7 @@ private:
     squelch::dsp::Scheduler scheduler;
     squelch::dsp::Envelopes envelopes;
     squelch::dsp::Placement placement;
+    squelch::dsp::NoiseBed noiseBed;
 
     squelch::dsp::Drive driveStage;
     squelch::dsp::Collimator collimatorL, collimatorR;

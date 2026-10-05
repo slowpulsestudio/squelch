@@ -19,6 +19,7 @@
 #include "../Source/Dsp/Filters.h"
 #include "../Source/Dsp/Fission.h"
 #include "../Source/Dsp/Meltdown.h"
+#include "../Source/Dsp/NoiseBed.h"
 #include "../Source/Dsp/Radiation.h"
 #include "../Source/Dsp/Reverb.h"
 #include "../Source/Dsp/Oversampler.h"
@@ -628,6 +629,59 @@ int main()
             meltdown.advance (1);
         }
         printArray ("meltdown", values);
+    }
+
+    // CONTAMINATION's four exact beds, wet plus bed less the wet, so it is the bed
+    // alone that is compared. The dry is silent for its first 4410 samples, which
+    // is what the prototype's rolling peak needs: it reflects at the start of the
+    // file, where a stream has nothing to reflect.
+    {
+        constexpr int n = 88200;
+        const char* names[] { "noise_radiation", "noise_fission", "noise_sludge", "", "noise_alien" };
+
+        for (const int reaction : { 0, 1, 2, 4 })
+        {
+            dsp::NoiseBed bed;
+            bed.prepare (sampleRate);
+            bed.configure (reaction, 7, 0.6, 0.4, 0.3);
+            bed.setAmount (0.8);
+
+            std::vector<double> values;
+            double env = 0.0;
+
+            for (int i = 0; i < n; ++i)
+            {
+                const auto t = i / sampleRate;
+                const auto wetL = 0.3 * std::sin (2.0 * M_PI * 200.0 * t);
+                const auto wetR = 0.2 * std::sin (2.0 * M_PI * 330.0 * t + 0.3);
+                const auto on = i >= 4410 && ((i - 4410) % 11025) < 2205;
+                const auto dryL = on ? 0.5 * std::sin (2.0 * M_PI * 150.0 * t) : 0.0;
+                const auto dryR = on ? 0.4 * std::sin (2.0 * M_PI * 170.0 * t + 0.2) : 0.0;
+
+                if (i % 8 == 0)
+                    env = 0.5 + 0.5 * std::sin (0.01 * (i / 8));
+
+                for (int k = 0; k < 20; ++k)
+                    if (1000 + 3731 * k == i)
+                    {
+                        dsp::ScheduledEvent e;
+                        e.start = i;
+                        e.index = static_cast<std::uint64_t> (k);
+                        bed.trigger (e);
+                    }
+
+                double outL = 0.0, outR = 0.0;
+                bed.process (i, wetL, wetR, dryL, dryR, env, outL, outR);
+
+                if (i % 16 == 5)
+                {
+                    values.push_back (outL - wetL);
+                    values.push_back (outR - wetR);
+                }
+            }
+
+            printArray (names[reaction], values);
+        }
     }
 
     // Reverb: an impulse excites every comb and allpass at once.

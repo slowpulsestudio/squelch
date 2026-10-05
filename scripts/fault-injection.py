@@ -167,6 +167,46 @@ FAULTS = [
           "heldSamples = samples;")],
         ["Processor MELTDOWN does not depend on the block size"],
     ),
+    Fault(
+        "contamination-unwired",
+        "CONTAMINATION read from the parameter tree but never reaching the noise bed",
+        [("Source/PluginProcessor.cpp",
+          "noiseBed.setAmount (staged (dsp::Staged::contamination, ids::contamination));",
+          "noiseBed.setAmount (0.0);")],
+        ["Processor CONTAMINATION grows with the control in RADIATION"],
+    ),
+    Fault(
+        "contamination-ignores-meltdown",
+        "the noise bed reading CONTAMINATION's knob, so MELTDOWN's last stage has nowhere to go",
+        [("Source/PluginProcessor.cpp",
+          "noiseBed.setAmount (staged (dsp::Staged::contamination, ids::contamination));",
+          "noiseBed.setAmount (value (ids::contamination));")],
+        ["Processor MELTDOWN bed follows the staged envelope"],
+    ),
+    Fault(
+        "contamination-not-squared",
+        "the bed's level linear in CONTAMINATION, so full travel is 6 dB above half and not 12",
+        [("Source/Dsp/NoiseBed.h",
+          "levels.fullLevel * amountNow * amountNow * (1.0 - 0.5 * damping)",
+          "levels.fullLevel * amountNow * (1.0 - 0.5 * damping)")],
+        ["Processor CONTAMINATION level of the FISSION bed"],
+    ),
+    Fault(
+        "contamination-fixed-reference",
+        "the bed referenced to a constant, so it ignores how loud the output is",
+        [("Source/Dsp/NoiseBed.h",
+          "* (wetLevel / levels.unitRms) * level;",
+          "* (0.1 / levels.unitRms) * level;")],
+        ["Processor CONTAMINATION follows the output's level"],
+    ),
+    Fault(
+        "noise-radiation-band",
+        "RADIATION's ticks filtered to the wrong band, which no behavioural check sees",
+        [("Source/Dsp/NoiseBed.h",
+          "radiationHpL.setCoefficients (highpass (2000.0, 0.8, sr));",
+          "radiationHpL.setCoefficients (highpass (4000.0, 0.8, sr));")],
+        ["noise_radiation"],
+    ),
 ]
 
 
@@ -243,6 +283,14 @@ def run_suite() -> list[str] | None:
     out = subprocess.run(["./.venv/bin/python", "-W", "ignore", "-m", "prototype.checks"],
                          cwd=ROOT, capture_output=True, text=True).stdout
     failures += [line for line in out.splitlines() if line.startswith("[FAIL]")]
+
+    # The numerical comparison too: a fault in a port that the behavioural checks
+    # cannot see, such as a noise bed's filter, is one it exists to catch.
+    harness = subprocess.run([str(ROOT / "build/SquelchHarness")], cwd=ROOT,
+                             capture_output=True, text=True).stdout
+    out = subprocess.run(["./.venv/bin/python", "-W", "ignore", "-m", "prototype.compare"],
+                         cwd=ROOT, input=harness, capture_output=True, text=True).stdout
+    failures += [line for line in out.splitlines() if line.startswith(("[FAIL]", "[MISS]"))]
 
     return failures
 
