@@ -415,6 +415,10 @@ void SquelchAudioProcessor::setStateInformation (const void* data, int size)
     auto state = juce::ValueTree::fromXml (*xml);
     apvts.replaceState (state);
 
+    // Gestures are provoked, not recalled: a session never reopens mid-meltdown.
+    for (const auto* id : { squelch::ids::ionize, squelch::ids::meltdown, squelch::ids::clip })
+        apvts.getParameter (id)->setValueNotifyingHost (0.0f);
+
     inputTrimDb = static_cast<float> (state.getProperty ("inputTrimDb", 0.0));
     outputTrimDb = static_cast<float> (state.getProperty ("outputTrimDb", 0.0));
     mix = static_cast<float> (state.getProperty ("mix", 1.0));

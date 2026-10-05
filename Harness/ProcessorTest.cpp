@@ -123,6 +123,26 @@ int main()
                 "dB (needs exactly 0 difference)");
     }
 
+    // Gestures are provoked, not recalled: a saved session with them on must reopen with them off.
+    {
+        SquelchAudioProcessor saved;
+        for (const auto* id : { squelch::ids::ionize, squelch::ids::meltdown, squelch::ids::clip })
+            setParameter (saved, id, 1.0f);
+
+        juce::MemoryBlock block;
+        saved.getStateInformation (block);
+
+        SquelchAudioProcessor restored;
+        restored.setStateInformation (block.getData(), static_cast<int> (block.getSize()));
+
+        double stillOn = 0.0;
+        for (const auto* id : { squelch::ids::ionize, squelch::ids::meltdown, squelch::ids::clip })
+            stillOn += restored.apvts.getRawParameterValue (id)->load() > 0.5f ? 1.0 : 0.0;
+
+        report (stillOn == 0.0, "Processor gestures come back off from a saved state", stillOn,
+                "of 3 still on (needs 0)");
+    }
+
     std::printf ("%s\n", failures == 0 ? "PROCESSOR TESTS: PASS" : "PROCESSOR TESTS: FAIL");
     return failures == 0 ? 0 : 1;
 }

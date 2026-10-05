@@ -135,6 +135,14 @@ FAULTS = [
           "dryDelay.setSample (0, dryDelayPos, feedL);")],
         ["Processor ENRICHMENT leaves the dry path alone"],
     ),
+    Fault(
+        "gestures-recalled",
+        "a saved state reopening with Ionize, Meltdown and Clip still on",
+        [("Source/PluginProcessor.cpp",
+          "for (const auto* id : { squelch::ids::ionize, squelch::ids::meltdown, squelch::ids::clip })",
+          "for (const auto* id : std::initializer_list<const char*> {})")],
+        ["Processor gestures come back off from a saved state"],
+    ),
 ]
 
 
