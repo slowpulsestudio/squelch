@@ -63,6 +63,7 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     wetMix.setCurrentAndTargetValue (mix.load());
     enrichmentGain.setCurrentAndTargetValue (currentEnrichmentGain());
 
+    meltdown.prepare (sampleRate);
     sludge.prepare (sampleRate);
     alien.prepare (sampleRate);
     chemical.prepare (sampleRate);
@@ -132,11 +133,21 @@ void SquelchAudioProcessor::refreshReactionSettings()
 
     currentReaction = static_cast<int> (apvts.getRawParameterValue (ids::reaction)->load());
 
-    const auto spread = value (ids::spread);
+    meltdown.setGate (apvts.getRawParameterValue (ids::meltdown)->load() > 0.5f);
+
+    // What MELTDOWN is doing to a parameter right now, which is the knob itself
+    // unless the gesture is in progress.
+    const auto staged = [this, &value] (dsp::Staged s, const char* id)
+    {
+        return meltdown.value (s, value (id));
+    };
+
+    const auto spread = staged (dsp::Staged::spread, ids::spread);
     const auto decay = value (ids::decay);
-    const auto exposure = value (ids::exposure);
-    const auto toxicity = value (ids::toxicity);
-    const auto reactivity = value (ids::reactivity);
+    const auto exposure = staged (dsp::Staged::exposure, ids::exposure);
+    const auto toxicity = staged (dsp::Staged::toxicity, ids::toxicity);
+    const auto reactivity = staged (dsp::Staged::reactivity, ids::reactivity);
+    const auto containment = staged (dsp::Staged::containment, ids::containment);
     const auto volatility = value (ids::volatility);
     const auto seed = static_cast<std::uint64_t> (value (ids::seed));
 
@@ -146,10 +157,10 @@ void SquelchAudioProcessor::refreshReactionSettings()
                         static_cast<int> (apvts.getRawParameterValue (ids::mode)->load())));
     schedule.bpm = hostBpm;
     schedule.flux = value (ids::flux);
-    schedule.probability = value (ids::probability);
+    schedule.probability = staged (dsp::Staged::probability, ids::probability);
     schedule.reactivity = reactivity;
     schedule.volatility = volatility;
-    schedule.containment = value (ids::containment);
+    schedule.containment = containment;
     schedule.seed = seed;
     scheduler.configure (schedule);
 
@@ -164,7 +175,7 @@ void SquelchAudioProcessor::refreshReactionSettings()
     envelope.decay = decay;
     envelope.exposure = exposure;
     envelope.toxicity = toxicity;
-    envelope.containment = value (ids::containment);
+    envelope.containment = containment;
     envelope.halfLife = value (ids::halfLife);
     envelope.ionizeAmount = apvts.getRawParameterValue (ids::ionize)->load() > 0.5f
                           ? value (ids::ionizeAmount) : 0.0;
@@ -178,7 +189,9 @@ void SquelchAudioProcessor::refreshReactionSettings()
     static constexpr double stereoWeights[] { 0.30, 1.00, 0.20, 0.35, 0.50 };
     const auto index = juce::jlimit (0, 4, currentReaction);
 
-    driveStage.set (value (ids::drive), driveWeights[index]);    collimatorL.set (value (ids::collimator));
+    driveStage.set (staged (dsp::Staged::drive, ids::drive), driveWeights[index],
+                    value (ids::drive));
+    collimatorL.set (value (ids::collimator));
     collimatorR.set (value (ids::collimator));
     stereoSpread.set (value (ids::fallout) * stereoWeights[index]);
 
@@ -385,6 +398,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     }
 
     timelinePosition += numSamples;
+    meltdown.advance (numSamples);
 }
 
 juce::AudioProcessorEditor* SquelchAudioProcessor::createEditor()

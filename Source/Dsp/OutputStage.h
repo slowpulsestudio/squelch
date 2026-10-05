@@ -230,8 +230,16 @@ namespace squelch::dsp
 
         void set (double driveAmount, double weight) noexcept
         {
+            set (driveAmount, weight, driveAmount);
+        }
+
+        /// `knobAmount` is where DRIVE's knob sits, which the makeup is measured
+        /// against; `driveAmount` is what is applied. They differ during a MELTDOWN.
+        void set (double driveAmount, double weight, double knobAmount) noexcept
+        {
             amount = driveAmount;
             gain = 1.0 + 11.0 * (std::pow (amount, 0.6) * weight);
+            referenceGain = 1.0 + 11.0 * (std::pow (knobAmount, 0.6) * weight);
         }
 
         void process (double xL, double xR, double& outL, double& outR) noexcept
@@ -245,8 +253,8 @@ namespace squelch::dsp
 
             // running_rms averages POWER across channels.
             const auto meanSquare = 0.5 * (xL * xL + xR * xR);
-            const auto plainL = softClip (xL, gain);
-            const auto plainR = softClip (xR, gain);
+            const auto plainL = softClip (xL, referenceGain);
+            const auto plainR = softClip (xR, referenceGain);
 
             const auto levelBefore = before.process (std::sqrt (meanSquare));
             const auto levelAfter = after.process (std::sqrt (0.5 * (plainL * plainL + plainR * plainR)));
@@ -265,7 +273,7 @@ namespace squelch::dsp
         }
 
     private:
-        double sr { 44100.0 }, amount { 0.0 }, gain { 1.0 };
+        double sr { 44100.0 }, amount { 0.0 }, gain { 1.0 }, referenceGain { 1.0 };
         RunningRms before, after;
         MatchingGain makeup;
         Oversampler oversamplerL, oversamplerR;

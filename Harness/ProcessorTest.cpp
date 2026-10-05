@@ -18,6 +18,7 @@
 
 #include "../Source/Parameters.h"
 #include "../Source/PluginProcessor.h"
+#include "../Source/Dsp/Meltdown.h"
 
 namespace
 {
@@ -39,7 +40,7 @@ void setParameter (SquelchAudioProcessor& processor, const char* id, float norma
 }
 
 /** Two seconds of deterministic noise through a fresh processor, left channel. */
-std::vector<float> render (int reactionIndex, float enrichment, float mix)
+std::vector<float> render (int reactionIndex, float enrichment, float mix, bool meltdownHeld = false)
 {
     SquelchAudioProcessor processor;
     processor.mix = mix;
@@ -47,6 +48,7 @@ std::vector<float> render (int reactionIndex, float enrichment, float mix)
     const auto* reaction = processor.apvts.getParameter (squelch::ids::reaction);
     setParameter (processor, squelch::ids::reaction, reaction->convertTo0to1 (static_cast<float> (reactionIndex)));
     setParameter (processor, squelch::ids::enrichment, enrichment);
+    setParameter (processor, squelch::ids::meltdown, meltdownHeld ? 1.0f : 0.0f);
 
     processor.prepareToPlay (sampleRate, blockSize);
 
@@ -121,6 +123,72 @@ int main()
         const auto worst = rms (difference (high, low));
         report (worst == 0.0, "Processor ENRICHMENT leaves the dry path alone", db (worst),
                 "dB (needs exactly 0 difference)");
+    }
+
+    // MELTDOWN held from the first sample must move every reaction, measured the
+    // way ENRICHMENT is: the held render against the idle one, relative to itself.
+    for (const auto* name : { "RADIATION", "FISSION", "SLUDGE", "CHEMICAL", "ALIEN" })
+    {
+        const auto index = squelch::reactionNames.indexOf (name);
+        const auto idle = render (index, 0.5f, 1.0f);
+        const auto held = render (index, 0.5f, 1.0f, true);
+        const auto relative = db (rms (difference (held, idle)) / rms (held));
+
+        char label[96];
+        std::snprintf (label, sizeof label, "Processor MELTDOWN changes the %s output", name);
+        report (relative > -20.0, label, relative, "dB (needs > -20)");
+    }
+
+    // The stages arrive in order, and a short tap does not reach the late ones.
+    {
+        using namespace squelch::dsp;
+        constexpr double sr = 44100.0;
+
+        Meltdown tap;
+        tap.prepare (sr);
+        tap.setGate (true);
+        tap.advance (static_cast<int> (0.3 * sr));
+        tap.setGate (false);
+
+        const auto contamination = tap.progressOf (Staged::contamination);
+        const auto exposure = tap.progressOf (Staged::exposure);
+        const auto containment = tap.progressOf (Staged::containment);
+
+        report (containment > 0.99 && exposure < 0.1 && contamination == 0.0,
+                "Processor MELTDOWN stages in, and a tap stops short", exposure,
+                "exposure progress after 0.3 s (containment 1, contamination 0)");
+    }
+
+    // The state after a stretch of samples must not depend on how the host cut it up.
+    {
+        using namespace squelch::dsp;
+        constexpr double sr = 44100.0;
+
+        const auto runWith = [] (int chunk)
+        {
+            Meltdown m;
+            m.prepare (sr);
+            m.setGate (true);
+            for (int done = 0; done < 66150; done += chunk)
+                m.advance (chunk);
+            m.setGate (false);
+            for (int done = 0; done < 44100; done += chunk)
+                m.advance (chunk);
+            return m;
+        };
+
+        const auto whole = runWith (1);
+        double worst = 0.0;
+        for (const auto chunk : { 7, 49, 441, 2205 })
+        {
+            const auto other = runWith (chunk);
+            for (std::size_t s = 0; s < static_cast<std::size_t> (Staged::count); ++s)
+                worst = std::max (worst, std::abs (whole.progressOf (static_cast<Staged> (s))
+                                                   - other.progressOf (static_cast<Staged> (s))));
+        }
+
+        report (worst < 1.0e-9, "Processor MELTDOWN does not depend on the block size", worst,
+                "worst progress difference (needs < 1e-9)");
     }
 
     // Gestures are provoked, not recalled: a saved session with them on must reopen with them off.

@@ -10,6 +10,7 @@
 #include "Dsp/Placement.h"
 #include "Dsp/Fission.h"
 #include "Dsp/MidWobble.h"
+#include "Dsp/Meltdown.h"
 #include "Dsp/Radiation.h"
 #include "Dsp/Reverb.h"
 #include "Dsp/Scheduler.h"
@@ -66,6 +67,10 @@ private:
     /// ENRICHMENT as a linear gain into the engines. The dry path does not get it.
     juce::SmoothedValue<float> enrichmentGain;
     float currentEnrichmentGain() const;
+
+    /// Staged values for the eight parameters MELTDOWN pushes. Sampled once per
+    /// block and advanced by the block's length at the end of it.
+    squelch::dsp::Meltdown meltdown;
 
     squelch::dsp::SludgeEngine sludge;
     squelch::dsp::AlienEngine alien;

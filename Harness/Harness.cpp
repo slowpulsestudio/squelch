@@ -18,6 +18,7 @@
 #include "../Source/Dsp/Envelopes.h"
 #include "../Source/Dsp/Filters.h"
 #include "../Source/Dsp/Fission.h"
+#include "../Source/Dsp/Meltdown.h"
 #include "../Source/Dsp/Radiation.h"
 #include "../Source/Dsp/Reverb.h"
 #include "../Source/Dsp/Oversampler.h"
@@ -603,6 +604,30 @@ int main()
             }
         }
         printArray ("placement", values);
+    }
+
+    // MELTDOWN: the gate opens at 0.5 s and shuts at 1.5 s, which is a sample
+    // boundary at this rate, so the prototype's continuous-time curves and the
+    // streaming state are being asked the same question. One row of eight
+    // staged values every 400 samples, stepped a sample at a time.
+    {
+        const std::array<double, 8> knobs { 0.2, 0.4, 0.3, 0.5, 0.2, 0.45, 0.6, 0.1 };
+
+        dsp::Meltdown meltdown;
+        meltdown.prepare (sampleRate);
+
+        std::vector<double> values;
+        for (int i = 0; i < 176400; ++i)
+        {
+            meltdown.setGate (i >= 22050 && i < 66150);
+
+            if (i % 400 == 0)
+                for (size_t s = 0; s < knobs.size(); ++s)
+                    values.push_back (meltdown.value (static_cast<dsp::Staged> (s), knobs[s]));
+
+            meltdown.advance (1);
+        }
+        printArray ("meltdown", values);
     }
 
     // Reverb: an impulse excites every comb and allpass at once.

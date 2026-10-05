@@ -422,6 +422,23 @@ def _placement_reference() -> np.ndarray:
     return rows[::40].reshape(-1)
 
 
+def _meltdown_reference() -> np.ndarray:
+    """Source/Dsp/Meltdown.h against meltdown.Meltdown.
+
+    Held from 0.5 s to 1.5 s, which is a whole number of samples, over four
+    seconds so the longest release is still falling when it ends. Eight staged
+    values every 400 samples, which is every 50 control blocks.
+    """
+    from .meltdown import STAGES, Meltdown
+
+    n = SR * 4
+    p = Params(containment=0.2, probability=0.4, spread=0.3, drive=0.5,
+               reactivity=0.2, toxicity=0.45, exposure=0.6, contamination=0.1,
+               meltdown_at=0.5, meltdown_hold=1.0)
+    md = Meltdown(p, n, SR)
+    return np.stack([md.ctrl(name)[::50] for name in STAGES], axis=1).reshape(-1)
+
+
 def _reverb_reference() -> np.ndarray:
     """Source/Dsp/Reverb.h against reverb.reverb.
 
@@ -476,6 +493,7 @@ def expectations() -> dict:
         "scheduler": _scheduler_reference(),
         "envelopes": _envelopes_reference(),
         "placement": _placement_reference(),
+        "meltdown": _meltdown_reference(),
         "reverb": _reverb_reference(),
     }
 

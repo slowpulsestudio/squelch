@@ -143,6 +143,30 @@ FAULTS = [
           "for (const auto* id : std::initializer_list<const char*> {})")],
         ["Processor gestures come back off from a saved state"],
     ),
+    Fault(
+        "meltdown-unwired",
+        "MELTDOWN read from the parameter tree but never opening the gate",
+        [("Source/PluginProcessor.cpp",
+          "meltdown.setGate (apvts.getRawParameterValue (ids::meltdown)->load() > 0.5f);",
+          "meltdown.setGate (false);")],
+        ["Processor MELTDOWN changes the RADIATION output"],
+    ),
+    Fault(
+        "meltdown-snaps",
+        "the last stage arriving with the first, so a tap reaches everything",
+        [("Source/Dsp/Meltdown.h",
+          "{ 0.66, 0.75, 3.40, 1.00 },  // contamination",
+          "{ 0.00, 0.75, 3.40, 1.00 },  // contamination")],
+        ["Processor MELTDOWN stages in, and a tap stops short"],
+    ),
+    Fault(
+        "meltdown-block-size",
+        "MELTDOWN's clock restarting every block, so the stages depend on the host's buffer size",
+        [("Source/Dsp/Meltdown.h",
+          "heldSamples += samples;",
+          "heldSamples = samples;")],
+        ["Processor MELTDOWN does not depend on the block size"],
+    ),
 ]
 
 
