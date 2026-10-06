@@ -46,7 +46,7 @@ juce_add_plugin(Squelch
     BUNDLE_ID "com.slowpulsestudio.squelch"
     PLUGIN_MANUFACTURER_CODE Slps
     PLUGIN_CODE Sqch
-    FORMATS VST3 Standalone
+    FORMATS VST3
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     COPY_PLUGIN_AFTER_BUILD TRUE
