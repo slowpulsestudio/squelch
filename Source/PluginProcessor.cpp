@@ -53,6 +53,7 @@ SquelchAudioProcessor::createParameterLayout()
 
 void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+    preparedSampleRate = sampleRate;
     juce::ignoreUnused (samplesPerBlock);
 
     for (auto* value : { &inputGain, &outputGain, &wetMix, &enrichmentGain })
@@ -84,12 +85,14 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     unityMatch.prepare (sampleRate);
     afterglow.prepare (sampleRate);
     limiter.prepare (sampleRate);
+    hardClip.prepare (sampleRate);
 
     // Worst case is one block of the shortest grid step, each fanning out to
     // the full sub-event count. Reserved once so processBlock never allocates.
     const auto shortestStep = squelch::gridBeats[std::size (squelch::gridBeats) - 1] * 60.0 / 20.0;
     const auto maxSteps = static_cast<int> (samplesPerBlock / (shortestStep * sampleRate)) + 4;
     pendingEvents.reserve (static_cast<size_t> (maxSteps * squelch::dsp::kMaxSubEvents));
+    pendingWrapEvents.reserve (static_cast<size_t> (maxSteps * squelch::dsp::kMaxSubEvents));
 
     dryDelay.setSize (2, preMixLatency());
     dryDelay.clear();
@@ -134,6 +137,7 @@ void SquelchAudioProcessor::refreshReactionSettings()
 
     currentReaction = static_cast<int> (apvts.getRawParameterValue (ids::reaction)->load());
 
+    clipOn = apvts.getRawParameterValue (ids::clip)->load() > 0.5f;
     meltdown.setGate (apvts.getRawParameterValue (ids::meltdown)->load() > 0.5f);
 
     // What MELTDOWN is doing to a parameter right now, which is the knob itself
@@ -217,6 +221,62 @@ void SquelchAudioProcessor::refreshReactionSettings()
                          decayHi[index], decay, persistence[index], value (ids::halfLife));
 }
 
+void SquelchAudioProcessor::followTransport (int numSamples, int& wrapAt, std::int64_t& wrapTo)
+{
+    wrapAt = -1;
+    wrapTo = 0;
+
+    auto* playHead = getPlayHead();
+    if (playHead == nullptr)
+        return;
+
+    const auto position = playHead->getPosition();
+    if (! position.hasValue())
+        return;
+
+    if (const auto bpm = position->getBpm(); bpm.hasValue() && *bpm > 0.0)
+        hostBpm = *bpm;
+
+    // Only a host that says it is playing is followed. Stopped, or a host that
+    // reports no transport, the sequencer carries on from where it was on its
+    // own clock: a position that is not advancing must never be read as a new
+    // one every block, which fires the same events at the block rate.
+    if (! position->getIsPlaying())
+        return;
+
+    // Musical time first. The grid is in quarter notes, so the host's PPQ is
+    // converted at the current tempo and a tempo change moves nothing on the grid.
+    const auto samplesPerQuarter = 60.0 / hostBpm * preparedSampleRate;
+    const auto toSamples = [samplesPerQuarter] (double quarters)
+    {
+        return static_cast<std::int64_t> (std::llround (quarters * samplesPerQuarter));
+    };
+
+    const auto ppq = position->getPpqPosition();
+    const auto samples = position->getTimeInSamples();
+    const auto havePpq = ppq.hasValue() && *ppq >= 0.0;
+
+    if (havePpq)
+        timelinePosition = toSamples (*ppq);
+    else if (samples.hasValue() && *samples >= 0)
+        timelinePosition = *samples;
+    else
+        return;
+
+    // A block that runs past the end of the host's loop continues from its start.
+    if (havePpq && position->getIsLooping())
+        if (const auto loop = position->getLoopPoints(); loop.hasValue() && loop->ppqEnd > loop->ppqStart)
+        {
+            const auto end = toSamples (loop->ppqEnd);
+
+            if (timelinePosition < end && timelinePosition + numSamples > end)
+            {
+                wrapAt = static_cast<int> (end - timelinePosition);
+                wrapTo = toSamples (loop->ppqStart);
+            }
+        }
+}
+
 double SquelchAudioProcessor::getTailLengthSeconds() const
 {
     // Afterglow's longest measured RT60 is just over three seconds.
@@ -225,8 +285,15 @@ double SquelchAudioProcessor::getTailLengthSeconds() const
 
 bool SquelchAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    return layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo()
-        && layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
+    const auto in = layouts.getMainInputChannelSet();
+    const auto out = layouts.getMainOutputChannelSet();
+
+    // A mono source feeds both legs of the stereo path. Stereo into mono would need a
+    // fold-down the design does not specify, so it is not offered.
+    const auto isMono = [] (const juce::AudioChannelSet& set) { return set == juce::AudioChannelSet::mono(); };
+    const auto isStereo = [] (const juce::AudioChannelSet& set) { return set == juce::AudioChannelSet::stereo(); };
+
+    return (isStereo (in) && isStereo (out)) || (isMono (in) && (isMono (out) || isStereo (out)));
 }
 
 void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
@@ -243,30 +310,38 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     wetMix.setTargetValue (mix.load());
     enrichmentGain.setTargetValue (currentEnrichmentGain());
 
-    if (auto* playHead = getPlayHead())
-        if (const auto position = playHead->getPosition())
-        {
-            if (const auto samples = position->getTimeInSamples())
-                timelinePosition = *samples;
-            if (const auto bpm = position->getBpm())
-                hostBpm = *bpm;
-        }
+    int wrapAt = -1;
+    std::int64_t wrapTo = 0;
+    followTransport (buffer.getNumSamples(), wrapAt, wrapTo);
 
     refreshReactionSettings();
 
-    const auto channels = buffer.getNumChannels();
+    const auto inputChannels = getTotalNumInputChannels();
+    const auto outputChannels = getTotalNumOutputChannels();
     const auto latency = preMixLatency();
     const auto numSamples = buffer.getNumSamples();
 
-    pendingEvents.clear();
-    scheduler.forRange (timelinePosition, numSamples,
-                        [this] (const squelch::dsp::ScheduledEvent& e)
-                        {
-                            // Dropped rather than grown: allocating here would
-                            // be worse than losing an event at absurd density.
-                            if (pendingEvents.size() < pendingEvents.capacity())
-                                pendingEvents.push_back (e);
-                        });
+    // A block that crosses the end of the host's loop is two stretches of the
+    // timeline, and events are collected for each so none fire from the wrong one.
+    const auto collect = [this] (std::vector<squelch::dsp::ScheduledEvent>& into,
+                                 std::int64_t from, int length)
+    {
+        into.clear();
+        scheduler.forRange (from, length,
+                            [&into] (const squelch::dsp::ScheduledEvent& e)
+                            {
+                                // Dropped rather than grown: allocating here would
+                                // be worse than losing an event at absurd density.
+                                if (into.size() < into.capacity())
+                                    into.push_back (e);
+                            });
+    };
+
+    collect (pendingEvents, timelinePosition, wrapAt > 0 ? wrapAt : numSamples);
+    pendingWrapEvents.clear();
+
+    if (wrapAt > 0)
+        collect (pendingWrapEvents, wrapTo, numSamples - wrapAt);
 
     const auto reaction = squelch::reactionNames[currentReaction];
 
@@ -283,7 +358,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         // step k from k alone, so the next one is computable rather than
         // needing audio lookahead. A step ahead is close enough: events
         // inside a step are what MAX_SUB_EVENTS fans out.
-        const auto step = static_cast<std::int64_t> (scheduler.stepSeconds() * getSampleRate());
+        const auto step = static_cast<std::int64_t> (scheduler.stepSeconds() * preparedSampleRate);
         envelopes.trigger (e, std::max<std::int64_t> (step, 1));
         placement.trigger (e);
         noiseBed.trigger (e);
@@ -292,12 +367,13 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
-        const auto position = timelinePosition + sample;
+        const auto wrapped = wrapAt > 0 && sample >= wrapAt;
+        const auto position = wrapped ? wrapTo + (sample - wrapAt) : timelinePosition + sample;
 
         // Each event fires at its own sample, not at the edge of whatever
         // block it landed in. Firing at the block start makes the output
         // depend on the host's buffer size.
-        for (const auto& e : pendingEvents)
+        for (const auto& e : (wrapped ? pendingWrapEvents : pendingEvents))
             if (e.start == position)
                 fire (e);
 
@@ -306,7 +382,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const auto wet = wetMix.getNextValue();
 
         const auto dryL = buffer.getSample (0, sample) * in;
-        const auto dryR = channels > 1 ? buffer.getSample (1, sample) * in : dryL;
+        const auto dryR = inputChannels > 1 ? buffer.getSample (1, sample) * in : dryL;
 
         // ENRICHMENT decides how hard the engines are hit and nothing else: the dry path
         // keeps the unscaled signal, and onsets are read off what the engines receive,
@@ -405,12 +481,23 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         double safeL = 0.0, safeR = 0.0;
         limiter.process (mixedL, mixedR, safeL, safeR);
 
+        // Both run all the time so their delays stay aligned and switching CLIP
+        // is seamless; CLIP only chooses which ceiling the host hears.
+        double clippedL = 0.0, clippedR = 0.0;
+        hardClip.process (mixedL, mixedR, clippedL, clippedR);
+
+        if (clipOn)
+        {
+            safeL = clippedL;
+            safeR = clippedR;
+        }
+
         buffer.setSample (0, sample, static_cast<float> (safeL) * out);
-        if (channels > 1)
+        if (outputChannels > 1)
             buffer.setSample (1, sample, static_cast<float> (safeR) * out);
     }
 
-    timelinePosition += numSamples;
+    timelinePosition = wrapAt > 0 ? wrapTo + (numSamples - wrapAt) : timelinePosition + numSamples;
     meltdown.advance (numSamples);
 }
 
@@ -428,6 +515,7 @@ void SquelchAudioProcessor::getStateInformation (juce::MemoryBlock& destination)
     state.setProperty ("inputTrimDb", inputTrimDb.load(), nullptr);
     state.setProperty ("outputTrimDb", outputTrimDb.load(), nullptr);
     state.setProperty ("mix", mix.load(), nullptr);
+    state.setProperty ("preset", presetIndex.load(), nullptr);
 
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destination);
@@ -442,13 +530,16 @@ void SquelchAudioProcessor::setStateInformation (const void* data, int size)
     auto state = juce::ValueTree::fromXml (*xml);
     apvts.replaceState (state);
 
-    // Gestures are provoked, not recalled: a session never reopens mid-meltdown.
-    for (const auto* id : { squelch::ids::ionize, squelch::ids::meltdown, squelch::ids::clip })
-        apvts.getParameter (id)->setValueNotifyingHost (0.0f);
+    // MELTDOWN is held, so a session never reopens mid-meltdown. IONIZE and CLIP are
+    // performances and settings that come back as they were saved; only presets leave them out.
+    apvts.getParameter (squelch::ids::meltdown)->setValueNotifyingHost (0.0f);
 
     inputTrimDb = static_cast<float> (state.getProperty ("inputTrimDb", 0.0));
     outputTrimDb = static_cast<float> (state.getProperty ("outputTrimDb", 0.0));
     mix = static_cast<float> (state.getProperty ("mix", 1.0));
+    // A restored session is never fresh, even if it was saved before an editor opened.
+    const auto savedPreset = static_cast<int> (state.getProperty ("preset", 0));
+    presetIndex = savedPreset == squelch::presets::notChosen ? 0 : savedPreset;
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

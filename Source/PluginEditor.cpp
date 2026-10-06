@@ -293,12 +293,66 @@ SquelchAudioProcessorEditor::SquelchAudioProcessorEditor (SquelchAudioProcessor&
     // STRUCTURE's knobs sit two across, under its selectors.
     sections[structure].columns = 2;
 
+    toolbar.setPresetNames (squelch::presets::names);
+    toolbar.onPresetSelected = [this] (int index) { selectPreset (index); };
+    toolbar.onRandomise = [this] { randomise(); };
+    toolbar.isDirty = [this]
+    {
+        const auto chosen = processor.presetIndex.load();
+        return chosen >= 0 && ! squelch::presets::matches (processor.apvts, chosen);
+    };
+
+    // A fresh instance opens on the first preset, through the path the toolbar uses.
+    // A restored one, or a reopened editor, shows what was chosen.
+    switch (const auto chosen = processor.presetIndex.load())
+    {
+        case squelch::presets::notChosen:
+            selectPreset (0);
+            toolbar.setSelectedPreset (0);
+            break;
+        case squelch::presets::randomised:
+            toolbar.showUnsavedLabel ("RANDOM");
+            break;
+        default:
+            toolbar.setSelectedPreset (chosen);
+            break;
+    }
+
+    squelch::presets::forEachParameter (processor.apvts, [this] (juce::RangedAudioParameter& p)
+                                        { processor.apvts.addParameterListener (p.paramID, this); });
+
     const auto m = measure();
 
     setSize (juce::jmax (margin * 2 + m.outer * 2 + m.centre + gap * 2,
                          margin * 2 + sps::PresetToolbar::designWidth),
              margin * 2 + sps::PresetToolbar::designHeight + gap
                  + sps::BackgroundFrame::titleOverhang + m.tallest);
+}
+
+SquelchAudioProcessorEditor::~SquelchAudioProcessorEditor()
+{
+    squelch::presets::forEachParameter (processor.apvts, [this] (juce::RangedAudioParameter& p)
+                                        { processor.apvts.removeParameterListener (p.paramID, this); });
+}
+
+void SquelchAudioProcessorEditor::selectPreset (int index)
+{
+    processor.presetIndex = index;
+    squelch::presets::apply (processor.apvts, index);
+    toolbar.refreshDisplay();
+}
+
+void SquelchAudioProcessorEditor::randomise()
+{
+    processor.presetIndex = squelch::presets::randomised;
+    squelch::presets::randomise (processor.apvts);
+}
+
+void SquelchAudioProcessorEditor::parameterChanged (const juce::String&, float)
+{
+    // Can arrive from the audio thread, as host automation does.
+    juce::Component::SafePointer<SquelchAudioProcessorEditor> self (this);
+    juce::MessageManager::callAsync ([self] { if (self != nullptr) self->toolbar.refreshDisplay(); });
 }
 
 SquelchAudioProcessorEditor::Metrics SquelchAudioProcessorEditor::measure() const

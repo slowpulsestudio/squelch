@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "Parameters.h"
+#include "Presets.h"
 #include "Dsp/Alien.h"
 #include "Dsp/Chemical.h"
 #include "Dsp/Envelopes.h"
@@ -54,8 +55,17 @@ public:
     std::atomic<float> outputTrimDb { 0.0f };
     std::atomic<float> mix { 1.0f };
 
+    /// Which preset the toolbar has selected, so a closed and reopened editor shows the same
+    /// one. Saved with the session; a session saved before presets existed reads as Default.
+    std::atomic<int> presetIndex { squelch::presets::notChosen };
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+    /// Reads the host's transport at the start of a block and sets `timelinePosition`.
+    /// `wrapAt` is the sample at which a host loop ends inside this block, or -1, and
+    /// `wrapTo` where the timeline then continues from.
+    void followTransport (int numSamples, int& wrapAt, std::int64_t& wrapTo);
 
     /// Reads the APVTS once per block, off the audio thread's hot loop.
     void refreshReactionSettings();
@@ -93,6 +103,8 @@ private:
     squelch::dsp::Reverb afterglow;
     double afterglowAmount { 0.0 };
     squelch::dsp::PeakLimiter limiter;
+    squelch::dsp::HardClip hardClip;
+    bool clipOn { false };
 
     /// Only SLUDGE carries its own oversampler lag. The others are delayed by
     /// the same amount so the reported latency does not move with REACTION.
@@ -103,7 +115,7 @@ private:
     /// own sample positions. Reserved in prepareToPlay: push_back on the
     /// audio thread must never allocate, and events past the reservation are
     /// dropped rather than grow it.
-    std::vector<squelch::dsp::ScheduledEvent> pendingEvents;
+    std::vector<squelch::dsp::ScheduledEvent> pendingEvents, pendingWrapEvents;
 
     /// Where the host is on its timeline. Taken from the playhead rather than
     /// counted locally, or events detach from the timeline on a locate and
@@ -113,6 +125,7 @@ private:
     /// Host tempo, so the grid follows the session. 120 is JUCE's own fallback
     /// for a host that reports none.
     double hostBpm { 120.0 };
+    double preparedSampleRate { 44100.0 };
 
     /// SLUDGE runs its saturation through a causal oversampler, which lags by
     /// kOversamplerLatencySamples. The dry path is delayed to match so the mix

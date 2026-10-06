@@ -62,8 +62,9 @@ CONTINUOUS = [
 ]
 
 #: Momentary or latched performance gestures. Excluded from Randomise by
-#: default. MELTDOWN is momentary so it is not stored either; IONIZE is latched,
-#: so it is a state a preset can recall.
+#: default. MELTDOWN is momentary and IONIZE latched: both are performed, so
+#: neither is stored in a preset or randomised (a session may save IONIZE engaged).
+#: These are reference defaults; the shipping plugin's defaults are the contract.
 PERFORMATIVE = [
     "meltdown",
     "ionize",

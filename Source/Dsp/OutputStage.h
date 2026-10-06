@@ -471,4 +471,52 @@ namespace squelch::dsp
         double held { 1.0 }, release { 0.0 };
         std::vector<double> magnitude, delayL, delayR;
     };
+
+    /** CLIP: a hard ceiling in place of the limiter, from `output_stage.clip`.
+
+        Clipped at four times the rate so it does not alias, then clamped once
+        more at the base rate, because the filter coming back down rings on a
+        signal already sitting on the ceiling and overshoots it.
+
+        It is delayed to the limiter's own latency, so switching CLIP never
+        changes what the host was told and the two ceilings stay sample-aligned.
+        The oversampler's 20 samples are part of that figure, so the padding is
+        what is left of the limiter's: the prototype pads to one lookahead window
+        because its limiter is acausal, and this limiter's causal equivalent is
+        twice that.
+    */
+    class HardClip
+    {
+    public:
+        void prepare (double sampleRate)
+        {
+            const auto total = PeakLimiter::latencySamples (sampleRate);
+            padding = std::max (total - kOversamplerLatencySamples, 1);
+
+            oversamplerL.reset();
+            oversamplerR.reset();
+            delayL.assign (static_cast<size_t> (padding), 0.0);
+            delayR.assign (static_cast<size_t> (padding), 0.0);
+            pos = 0;
+        }
+
+        void process (double xL, double xR, double& outL, double& outR) noexcept
+        {
+            const auto curve = [] (double u) noexcept { return hardClip (u, kLimiterCeiling); };
+
+            const auto clippedL = hardClip (oversamplerL.process (xL, curve), kLimiterCeiling);
+            const auto clippedR = hardClip (oversamplerR.process (xR, curve), kLimiterCeiling);
+
+            outL = delayL[static_cast<size_t> (pos)];
+            outR = delayR[static_cast<size_t> (pos)];
+            delayL[static_cast<size_t> (pos)] = clippedL;
+            delayR[static_cast<size_t> (pos)] = clippedR;
+            pos = (pos + 1 == padding) ? 0 : (pos + 1);
+        }
+
+    private:
+        Oversampler oversamplerL, oversamplerR;
+        int padding { 420 }, pos { 0 };
+        std::vector<double> delayL, delayR;
+    };
 }

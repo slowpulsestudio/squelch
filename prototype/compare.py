@@ -479,6 +479,28 @@ def _noise_bed_reference(reaction: str) -> np.ndarray:
     return delayed[5::16].reshape(-1)
 
 
+def _hard_clip_reference() -> np.ndarray:
+    """Source/Dsp/OutputStage.h's HardClip against output_stage.clip.
+
+    The prototype pads the clipper to one lookahead window, w, because its
+    limiter is acausal. The C++ limiter is its causal equivalent and delays by
+    2w, so the C++ clipper does too and its output i is the prototype's i - w.
+    The oversampler's cold start is 41 samples and the first outputs are the
+    delay line filling, so the comparison starts well clear of both.
+    """
+    from . import output_stage
+
+    n = 8000
+    first = 700
+    t = np.arange(n) / SR
+    left = 1.4 * np.sin(2.0 * np.pi * 170.0 * t)
+    right = 0.9 * np.sin(2.0 * np.pi * 311.0 * t + 0.2) + 0.5 * np.sin(2.0 * np.pi * 2900.0 * t)
+    ref = output_stage.clip(np.stack([left, right], axis=1), SR)
+    window = output_stage.lookahead_samples(SR)
+    indices = np.arange(first, n, 17)
+    return ref[indices - window].reshape(-1)
+
+
 def _reverb_reference() -> np.ndarray:
     """Source/Dsp/Reverb.h against reverb.reverb.
 
@@ -534,6 +556,7 @@ def expectations() -> dict:
         "envelopes": _envelopes_reference(),
         "placement": _placement_reference(),
         "meltdown": _meltdown_reference(),
+        "hard_clip": _hard_clip_reference(),
         "noise_radiation": _noise_bed_reference("RADIATION"),
         "noise_fission": _noise_bed_reference("FISSION"),
         "noise_sludge": _noise_bed_reference("SLUDGE"),

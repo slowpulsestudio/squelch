@@ -164,10 +164,13 @@ namespace squelch
         rest. CLIP and the Input/Output strips are the exclusions, because they
         are gain staging and session settings rather than sound design.
 
-        MELTDOWN is momentary. Storing it would recall a plugin mid-gesture.
+        MELTDOWN is momentary and IONIZE latched: both are performed, not recalled
+        by a preset (a session may still save IONIZE engaged). IONIZEAMOUNT is
+        part of the performance and stays out with them.
     */
     inline bool isExcludedFromPresets (const juce::String& id)
     {
-        return id == ids::clip || id == ids::meltdown;
+        return id == ids::clip || id == ids::meltdown || id == ids::ionize
+            || id == ids::ionizeAmount;
     }
 }

@@ -33,16 +33,22 @@ private:
     sps::Parameter label { sps::Parameter::Kind::Name };
 };
 
-class SquelchAudioProcessorEditor : public juce::AudioProcessorEditor
+class SquelchAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                    private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     explicit SquelchAudioProcessorEditor (SquelchAudioProcessor&);
-    ~SquelchAudioProcessorEditor() override = default;
+    ~SquelchAudioProcessorEditor() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
 
+    sps::PresetToolbar& getToolbar() { return toolbar; }
+
 private:
+    void parameterChanged (const juce::String&, float) override;
+    void selectPreset (int index);
+    void randomise();
     struct Knob
     {
         sps::SimpleKnob control { sps::SimpleKnob::Style::Minimal };

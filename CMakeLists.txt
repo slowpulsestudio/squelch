@@ -1,10 +1,17 @@
 cmake_minimum_required(VERSION 3.22)
 
+# The studio's macOS floor. It has to be in place before project(), which is where
+# CMake reads it to choose the compiler and linker flags; set afterwards it only
+# changes a cache entry that nothing reads again, and the binary is built for
+# whatever SDK is installed. An explicit -DCMAKE_OSX_DEPLOYMENT_TARGET still wins.
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment target" FORCE)
+endif()
+
 project(Squelch VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment target")
 
 # Hidden by default, set before JUCE is made available. Two plugins in one host
 # process with default visibility can end up sharing JUCE's statics, which

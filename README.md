@@ -244,6 +244,137 @@ stage drives differs by -48 dB between 128 and 512 sample blocks on the test's o
 stimulus and settings. That figure describes that configuration. The structural
 statement above is the contract.
 
+#### Transport: what the sequencer follows, and when
+
+The event grid is in quarter notes, so the sequencer is on the host's musical
+time, and the host's block size has no say in when an event fires. The contract,
+read once at the start of each block in `followTransport`:
+
+- **Playing.** The host's position is the timeline. The PPQ position is
+  converted to samples at the host's current tempo, so a grid division lands on
+  the same beat whatever the tempo; a host without a PPQ position is followed
+  by its sample counter. A position that is not usable (negative or absent) is
+  treated as no transport.
+- **Stopped, or no transport.** The host's position is ignored and the
+  sequencer carries on from where it was, on its own clock, from sample zero at
+  120 bpm until a tempo is given. A stopped host's position does not advance,
+  and reading it as new every block fires the same events at the block rate:
+  that was the defect, and it is why the position is only adopted while playing.
+  The tempo is still taken from a stopped host, so the free-running grid is at
+  its tempo.
+- **Start.** The sequencer takes the host's position at the sample the host
+  starts at. Stopping and starting again is deterministic: the same session,
+  at any block size, is the same render.
+- **Seek.** A jump of the host's position repositions the sequencer to it, to
+  the sample. Events already firing finish as they would; what is scheduled
+  from then on is the new place's.
+- **Loop.** When a block crosses the end of the host's loop, the events up to
+  the end come from the end's side and the rest from the loop's start, at the
+  sample, so a loop does not repeat or drift at the block rate whether or not
+  the host cuts its blocks at the loop point.
+- **Grid semantics** (the divisions, FLUX, PROBABILITY, the seed) are the
+  prototype's and are untouched: only where the timeline is read from changed.
+
+Known limits: a tempo change mid-playback moves the sample position of the
+beats ahead of it (the position is re-derived from the PPQ at the new tempo),
+which a host with tempo automation will hear as the grid following the tempo
+and not a step; and RANDOM mode accumulates its step lengths, so a rewind (a
+backward seek, or the wrap of a loop) walks them again from zero to the new
+place. That is one hash per step, bounded by the position, and it runs inside
+the block that needs it.
+
+The output after a seek, a restart or a loop wrap is the host's position for the
+sequencer and for every event placed from it, but it is not a pure function of that
+position. `MidWobble` rolls whether an event opens a burst from the running count of
+events fired since the instance was prepared, as the prototype does (`urand(1, 70, i)`
+with `i` the event's ordinal), so two hosts that arrive at the same position having
+fired different numbers of events differ afterwards, for ever and not only until the
+tails die. This is why the stop/start test compares against a host that only jumps at
+the restart, which has fired exactly the same events, and why it holds to the sample.
+An earlier reference, a host whose position simply started later than the free-running
+clock, fired a different number of events and measured -3 to -10 dB from the render
+under test for as long as it was followed. It was replaced because it contradicted the
+position contract that the loop, seek and stopped-position tests verify independently,
+and its renders are not acceptance evidence. The cause was found by setting FALLOUT, which
+scales the wobble, to 0: the same two hosts then converged, to -92 dB in the second after 8 s
+(the restart is at 4.6 s) and -128 dB at 20 s, which is the tails dying away. By counting steps, the seek test's reference fires the same
+number of events (24) by the seek as the host under test, which would explain why it
+compares at -90 dB; that count was worked out, not measured, and holds for those numbers
+only. Keying the roll by position
+rather than by count would remove the dependence but departs from the prototype, so it
+is a product decision and has not been made.
+
+#### Channels, presets and sessions
+
+- **Layouts.** Stereo in and out, mono in and out, and mono in with stereo out. A mono
+  source feeds both legs of the stereo path, so mono-in stereo-out is bit-identical to a
+  stereo track carrying the same signal in both channels, and mono-in mono-out is that
+  render's left leg. Stereo in with mono out is not offered: it needs a fold-down the
+  design does not specify.
+- **Presets.** "Default" is the layout's own defaults. Twelve more were drawn at random
+  from a fixed seed and stored as a table in `Source/Presets.h`; the names are placeholders.
+  Presets and Randomise act on the parameters left after `isExcludedFromPresets`: CLIP,
+  MELTDOWN, IONIZE and IONIZEAMOUNT are out, because they are performed or are output
+  settings, and the Input and Output strips are not parameters at all.
+- **Sessions.** CLIP and IONIZE come back as saved. MELTDOWN is held, so it always comes
+  back released. The selected preset is saved with the session.
+
+#### Product decisions
+
+Settled; each is the behaviour already implemented and validated, and none changed the DSP.
+
+- **Mono in, mono out** is the left leg of the stereo render. There is no summed mono
+  and no additional gain law. Mono in with stereo out keeps both legs.
+- **Presets** are Default and twelve random ones with placeholder element names. They
+  are required to load, stay valid, make sound and differ; their names and musical
+  usefulness are content work, not validated.
+- **MELTDOWN** always reopens released. It is not made to persist because it is momentary.
+- **IONIZE** rests off by default, a session may save it engaged, and presets and
+  Randomise never touch it. **IONIZEAMOUNT** defaults to 0.7 and is excluded from
+  presets and Randomise with it. Nothing about where IONIZE should rest is inferred
+  from validation.
+- **MidWobble** rolls from the running event count, as the prototype does. It is not
+  keyed to position, and the loop, seek and restart tests are built around that.
+- **Defaults.** The shipping plugin defaults are authoritative. `prototype/params.py`
+  holds reference defaults, not the product contract, and differs from the plugin on
+  four controls: REACTIVITY 0.3 (prototype 0.0), HALF-LIFE 0.0 (0.4), DRIVE 0.3 (0.0)
+  and TOXICITY 0.45 (0.5). The editor opens on the Default preset, which is those
+  values, and a test pins them.
+
+#### UI contract
+
+This covers only controls that exist on the editor. Input trim, output trim and mix are
+internal state: not host parameters, no strips, no readouts, no automation.
+
+No control shows a numeric value. A knob is the design system's minimal style, a knob
+and its name, with a tooltip. The host sees each continuous control as a normalised
+0 to 1 value. Nothing below adds a readout, a unit or an inferred range.
+
+| control | type | range and display |
+|---|---|---|
+| REACTION | selector, five icons | RADIATION, FISSION, SLUDGE, CHEMICAL, ALIEN |
+| MODE | selector | GRID, RANDOM, FREE, INPUT |
+| GRID | adjustor under MODE | fifteen named divisions, 1/1 down to 1/64 |
+| SEED | adjustor | whole numbers 0 to 999 |
+| ENRICHMENT | knob | plus and minus 18 dB, unity at 0.5; no readout |
+| DECAY, EXPOSURE, TOXICITY, SPREAD | knobs | sweep a different range per reaction, so there is no single unit; knob only |
+| PROBABILITY, FLUX, REACTIVITY, VOLATILITY, HALF-LIFE, CONTAINMENT, DRIVE, CONTAMINATION, COLLIMATOR, FALLOUT, AFTERGLOW | knobs | normalised 0 to 1; no unit, no readout |
+| IONIZEAMOUNT (labelled Charge) | knob | normalised 0 to 1 |
+| IONIZE, CLIP | toggles | off or on |
+| MELTDOWN | momentary button | held is on, released is off |
+
+#### Open release items
+
+- **192 kHz CPU** was measured at about 37-49% of one core across the five reactions.
+  Configuration: Apple M5 Pro, macOS 26.5.2, Release VST3 loaded in pedalboard 0.9.17,
+  192 kHz stereo, 512-sample blocks, 10 s of noise at 0.25 (seed 3), the maximum-cost
+  combination (every continuous knob at 1.0, INPUT mode, 1/64 grid, IONIZE on, MELTDOWN
+  held), median of 2 fresh instances after a 2 s untimed warm-up, as a percentage of
+  one core's real time. The per-reaction figures are not stored in the repository; they
+  should be re-measured on an idle machine if the figure is used for a release gate.
+  The acceptance limit needs an explicit CPU target; no DSP was changed for it.
+- **Release engineering** is not done: Developer ID signing, notarisation, an installer,
+  versioning and reproducible artefacts. The validated binary is unchanged meanwhile.
 
 ## Validation
 
@@ -280,7 +411,7 @@ picture and identical in a table.
 
 ### What it currently says
 
-> 32/32 primitives and 39/39 behavioural checks pass, with fault-injection
+> 33/33 primitives and 39/39 behavioural checks pass, with fault-injection
 > validation demonstrating discriminatory regression coverage: all eight known
 > FISSION, TOXICITY, HALF-LIFE, SNAP, resonator and level-match regressions are
 > pinned at the appropriate behavioural or state level, and each has been

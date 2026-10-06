@@ -136,12 +136,12 @@ FAULTS = [
         ["Processor ENRICHMENT leaves the dry path alone"],
     ),
     Fault(
-        "gestures-recalled",
-        "a saved state reopening with Ionize, Meltdown and Clip still on",
+        "meltdown-recalled",
+        "a saved state reopening with Meltdown still held",
         [("Source/PluginProcessor.cpp",
-          "for (const auto* id : { squelch::ids::ionize, squelch::ids::meltdown, squelch::ids::clip })",
-          "for (const auto* id : std::initializer_list<const char*> {})")],
-        ["Processor gestures come back off from a saved state"],
+          "apvts.getParameter (squelch::ids::meltdown)->setValueNotifyingHost (0.0f);",
+          "")],
+        ["Processor MELTDOWN comes back released from a saved state"],
     ),
     Fault(
         "meltdown-unwired",
@@ -247,6 +247,173 @@ FAULTS = [
           "            if (open && ! gate)\n                progress.fill (0.0);\n\n            gate = open;")],
         ["Processor MELTDOWN pressed mid-release carries on from where it was"],
     ),
+    Fault(
+        "clip-disconnected",
+        "the CLIP control read by nothing, so the output stays on the limiter whatever it says",
+        [("Source/PluginProcessor.cpp",
+          "clipOn = apvts.getRawParameterValue (ids::clip)->load() > 0.5f;",
+          "clipOn = false;")],
+        ["Processor CLIP on clips it hard at the ceiling",
+         "Processor CLIP clips more as the signal rises over the ceiling"],
+    ),
+    Fault(
+        "clip-misaligned",
+        "the clipper's delay one sample off the limiter's, so switching CLIP moves the signal",
+        [("Source/Dsp/OutputStage.h",
+          "padding = std::max (total - kOversamplerLatencySamples, 1);",
+          "padding = std::max (total - kOversamplerLatencySamples + 1, 1);")],
+        ["Processor CLIP and the limiter are aligned and transparent below the ceiling"],
+    ),
+    Fault(
+        "clip-wrong-ceiling",
+        "the clipper's ceiling above the limiter's, so CLIP lets peaks through",
+        [("Source/Dsp/OutputStage.h",
+          "const auto clippedL = hardClip (oversamplerL.process (xL, curve), kLimiterCeiling);",
+          "const auto clippedL = hardClip (oversamplerL.process (xL, curve), 1.0);")],
+        ["Processor CLIP on clips it hard at the ceiling"],
+    ),
+    Fault(
+        "transport-stopped-position",
+        "a stopped host's frozen position read as a new one every block, as the first pass did",
+        [("Source/PluginProcessor.cpp",
+          "    if (! position->getIsPlaying())\n        return;\n",
+          "")],
+        ["Processor sequencer ignores a stopped host's position",
+         "Processor sequencer ignores a stopped host wherever it is parked",
+         "Processor RADIATION ticks sound under a stopped host"],
+    ),
+    Fault(
+        "transport-samples-before-ppq",
+        "the host's sample counter taken ahead of its PPQ, so tempo and seeks go by samples",
+        [("Source/PluginProcessor.cpp",
+          "const auto havePpq = ppq.hasValue() && *ppq >= 0.0;",
+          "const auto havePpq = false;")],
+        ["Processor sequencer follows the host's PPQ before its sample counter",
+         "Processor sequencer converts the host's PPQ at the host's tempo"],
+    ),
+    Fault(
+        "transport-tempo-ignored",
+        "PPQ converted to samples at a fixed 120 bpm whatever the host's tempo",
+        [("Source/PluginProcessor.cpp",
+          "const auto samplesPerQuarter = 60.0 / hostBpm * preparedSampleRate;",
+          "const auto samplesPerQuarter = 60.0 / 120.0 * preparedSampleRate;")],
+        ["Processor sequencer converts the host's PPQ at the host's tempo"],
+    ),
+    Fault(
+        "transport-loop-block-edge",
+        "a loop wrapped only at the next block, so a block that crosses the end runs past it",
+        [("Source/PluginProcessor.cpp",
+          "if (timelinePosition < end && timelinePosition + numSamples > end)",
+          "if (false && timelinePosition < end && timelinePosition + numSamples > end)")],
+        ["Processor sequencer loop wraps at the sample, whatever the block size"],
+    ),
+    Fault(
+        "transport-seek-ignored",
+        "a seek that the sequencer does not follow, carrying on from its own clock",
+        [("Source/PluginProcessor.cpp",
+          "    if (havePpq)\n        timelinePosition = toSamples (*ppq);",
+          "    if (havePpq)\n        timelinePosition += 0 * toSamples (*ppq);")],
+        ["Processor sequencer seek changes what plays",
+         "Processor sequencer start moves the sequencer to the host's position"],
+    ),
+    Fault(
+        "randomise-unwired",
+        "the Randomise button wired to nothing",
+        [("Source/PluginEditor.cpp",
+          "    squelch::presets::randomise (processor.apvts);\n", "")],
+        ["Processor Randomise moves the parameters"],
+    ),
+    Fault(
+        "randomise-touches-clip",
+        "CLIP left out of the exclusion list, so Randomise flips an output setting",
+        [("Source/Parameters.h",
+          "return id == ids::clip || id == ids::meltdown",
+          "return id == ids::meltdown")],
+        ["Processor Randomise leaves the gestures and CLIP alone",
+         "Processor the toolbar's next and previous buttons load presets and leave the gestures and CLIP alone"],
+    ),
+    Fault(
+        "randomise-touches-ionize",
+        "IONIZE left out of the exclusion list, so presets and Randomise perform a gesture",
+        [("Source/Parameters.h",
+          " || id == ids::ionize\n",
+          "\n")],
+        ["Processor Randomise leaves the gestures and CLIP alone",
+         "Processor the toolbar's next and previous buttons load presets and leave the gestures and CLIP alone"],
+    ),
+    Fault(
+        "clip-forgotten-on-reload",
+        "CLIP forced off when a session loads, as MELTDOWN is",
+        [("Source/PluginProcessor.cpp",
+          "apvts.getParameter (squelch::ids::meltdown)->setValueNotifyingHost (0.0f);",
+          "for (const auto* id : { squelch::ids::meltdown, squelch::ids::clip })\n        apvts.getParameter (id)->setValueNotifyingHost (0.0f);")],
+        ["Processor CLIP survives a reload"],
+    ),
+    Fault(
+        "ionize-forgotten-on-reload",
+        "IONIZE forced off when a session loads, as MELTDOWN is",
+        [("Source/PluginProcessor.cpp",
+          "apvts.getParameter (squelch::ids::meltdown)->setValueNotifyingHost (0.0f);",
+          "for (const auto* id : { squelch::ids::meltdown, squelch::ids::ionize })\n        apvts.getParameter (id)->setValueNotifyingHost (0.0f);")],
+        ["Processor IONIZE survives a reload engaged"],
+    ),
+    Fault(
+        "mono-right-leg-silent",
+        "a mono source feeding only the left leg, the right reading an empty channel",
+        [("Source/PluginProcessor.cpp",
+          "const auto dryR = inputChannels > 1 ? buffer.getSample (1, sample) * in : dryL;",
+          "const auto dryR = buffer.getSample (1, sample) * in;")],
+        ["Processor mono in, stereo out is the stereo path fed the same signal twice"],
+    ),
+    Fault(
+        "mono-layout-rejected",
+        "mono input refused, as it was before",
+        [("Source/PluginProcessor.cpp",
+          "|| (isMono (in) && (isMono (out) || isStereo (out)));",
+          "|| false;")],
+        ["Processor accepts mono in, mono or stereo out, and stereo in and out"],
+    ),
+    Fault(
+        "preset-values-ignored",
+        "every preset loading the defaults whatever its row says",
+        [("Source/Presets.h",
+          "return rows[static_cast<size_t> (preset - 1)][i];",
+          "return parameter.getDefaultValue();")],
+        ["Processor every preset loads and leaves the performance controls alone"],
+    ),
+    Fault(
+        "randomise-touches-ionize-amount",
+        "IONIZEAMOUNT left out of the exclusion list, so presets and Randomise set it",
+        [("Source/Parameters.h",
+          "            || id == ids::ionizeAmount;",
+          "            ;")],
+        ["Processor Randomise leaves the gestures and CLIP alone",
+         "Processor every preset loads and leaves the performance controls alone"],
+    ),
+    Fault(
+        "default-drifts-to-prototype",
+        "REACTIVITY's default taken from prototype/params.py instead of the shipping value",
+        [("Source/Parameters.h",
+          '{ ids::reactivity, "Reactivity", 0.3f,',
+          '{ ids::reactivity, "Reactivity", 0.0f,')],
+        ["Processor the parameter layout holds the shipping defaults",
+         "Processor the editor opens on the shipping defaults"],
+    ),
+    Fault(
+        "preset-select-unwired",
+        "picking a preset that selects it without loading its values",
+        [("Source/PluginEditor.cpp",
+          "    squelch::presets::apply (processor.apvts, index);\n", "")],
+        ["Processor the toolbar's next and previous buttons load presets and leave the gestures and CLIP alone"],
+    ),
+    Fault(
+        "fresh-editor-clobbers-session",
+        "a restored session taken for a fresh instance, so opening the editor loads Default over it",
+        [("Source/PluginProcessor.cpp",
+          "presetIndex = savedPreset == squelch::presets::notChosen ? 0 : savedPreset;",
+          "presetIndex = savedPreset;")],
+        ["Processor opening the editor on a restored session keeps its values"],
+    ),
 ]
 
 
@@ -316,9 +483,13 @@ def run_suite() -> list[str] | None:
                          capture_output=True, text=True).stdout
     failures += [line for line in out.splitlines() if line.startswith("[FAIL]")]
 
-    out = subprocess.run([str(ROOT / "build/SquelchProcessorTest_artefacts/Release/SquelchProcessorTest")],
-                         cwd=ROOT, capture_output=True, text=True).stdout
-    failures += [line for line in out.splitlines() if line.startswith("[FAIL]")]
+    ran = subprocess.run([str(ROOT / "build/SquelchProcessorTest_artefacts/Release/SquelchProcessorTest")],
+                         cwd=ROOT, capture_output=True, text=True)
+    failures += [line for line in ran.stdout.splitlines() if line.startswith("[FAIL]")]
+
+    # A test run that dies is a failure in its own right, not a run with nothing to report.
+    if ran.returncode < 0:
+        failures.append(f"[FAIL] SquelchProcessorTest crashed (signal {-ran.returncode})")
 
     out = subprocess.run(["./.venv/bin/python", "-W", "ignore", "-m", "prototype.checks"],
                          cwd=ROOT, capture_output=True, text=True).stdout
@@ -337,7 +508,7 @@ def run_suite() -> list[str] | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--only", help="run one fault by key")
+    parser.add_argument("--only", help="run only these faults, by key (comma-separated)")
     args = parser.parse_args()
 
     if git_dirty():
@@ -345,7 +516,8 @@ def main() -> int:
               "git checkout, which would discard your changes. Commit or stash first.")
         return 1
 
-    faults = [f for f in FAULTS if args.only in (None, f.key)]
+    wanted = None if args.only is None else args.only.split(",")
+    faults = [f for f in FAULTS if wanted is None or f.key in wanted]
     if not faults:
         print(f"No fault matching {args.only!r}. Known: " + ", ".join(f.key for f in FAULTS))
         return 1

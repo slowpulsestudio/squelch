@@ -631,6 +631,34 @@ int main()
         printArray ("meltdown", values);
     }
 
+    // CLIP: a hard ceiling at four times the rate, then a final clamp. The input
+    // overshoots the 0.97 ceiling by a wide margin on both channels.
+    {
+        dsp::HardClip clipper;
+        clipper.prepare (sampleRate);
+
+        constexpr int n = 8000;
+        constexpr int first = 700;
+
+        std::vector<double> values;
+        for (int i = 0; i < n; ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto l = 1.4 * std::sin (2.0 * M_PI * 170.0 * t);
+            const auto r = 0.9 * std::sin (2.0 * M_PI * 311.0 * t + 0.2) + 0.5 * std::sin (2.0 * M_PI * 2900.0 * t);
+
+            double outL = 0.0, outR = 0.0;
+            clipper.process (l, r, outL, outR);
+
+            if (i >= first && (i - first) % 17 == 0)
+            {
+                values.push_back (outL);
+                values.push_back (outR);
+            }
+        }
+        printArray ("hard_clip", values);
+    }
+
     // CONTAMINATION's four exact beds, wet plus bed less the wet, so it is the bed
     // alone that is compared. The dry is silent for its first 4410 samples, which
     // is what the prototype's rolling peak needs: it reflects at the start of the
