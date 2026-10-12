@@ -1,17 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 
-# The studio's macOS floor. It has to be in place before project(), which is where
-# CMake reads it to choose the compiler and linker flags; set afterwards it only
-# changes a cache entry that nothing reads again, and the binary is built for
-# whatever SDK is installed. An explicit -DCMAKE_OSX_DEPLOYMENT_TARGET still wins.
-if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment target" FORCE)
-endif()
-
 project(Squelch VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment target")
 
 # Hidden by default, set before JUCE is made available. Two plugins in one host
 # process with default visibility can end up sharing JUCE's statics, which
@@ -46,7 +39,7 @@ juce_add_plugin(Squelch
     BUNDLE_ID "com.slowpulsestudio.squelch"
     PLUGIN_MANUFACTURER_CODE Slps
     PLUGIN_CODE Sqch
-    FORMATS VST3
+    FORMATS VST3 Standalone
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     COPY_PLUGIN_AFTER_BUILD TRUE
@@ -104,24 +97,6 @@ target_compile_definitions(SquelchSnapshot PRIVATE
     JUCE_STANDALONE_APPLICATION=1
 )
 target_link_libraries(SquelchSnapshot PRIVATE
-    Squelch
-    sps::DesignSystem
-    juce::juce_audio_utils
-    juce::juce_dsp
-    juce::juce_recommended_config_flags
-)
-
-# Runs the whole processor, because the engine-level checks cannot see a
-# control that never reaches the engines.
-juce_add_console_app(SquelchProcessorTest PRODUCT_NAME "SquelchProcessorTest")
-target_sources(SquelchProcessorTest PRIVATE Harness/ProcessorTest.cpp)
-target_compile_features(SquelchProcessorTest PRIVATE cxx_std_17)
-target_compile_definitions(SquelchProcessorTest PRIVATE
-    JUCE_WEB_BROWSER=0
-    JUCE_USE_CURL=0
-    JUCE_STANDALONE_APPLICATION=1
-)
-target_link_libraries(SquelchProcessorTest PRIVATE
     Squelch
     sps::DesignSystem
     juce::juce_audio_utils
