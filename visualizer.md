@@ -1,80 +1,72 @@
 # Squelch: Visualizer
 
-Inherits the SPS visualizer language (style, tokens, floor mesh, persistence, isometric
-stage, time axis and the traceability principle) from the design system's
-[Visualizers](https://github.com/slowpulsestudio/sps-juce-design-system#visualizers)
-section. This file records only what is specific to Squelch. The model's quantities are
-defined in [dsp-maths.md](dsp-maths.md).
+Inherits only the **design language** from the design system — the one green on `surface/display`,
+1 px wireframe, no fills or gradients, phosphor persistence, and the rule that every drawn
+quantity traces to a real DSP value. See
+[Visualizers](https://github.com/slowpulsestudio/sps-juce-design-system#visualizers).
+
+**The layout is this plugin's own.** It is not the shared isometric box, and it must not be.
 
 ## 1. Idea
 
-Squelch is a scheduler firing events at a ladder filter, and every event is a cutoff sweep.
-SPREAD sets how many octaves it covers, DECAY how long it takes, REACTIVITY how hard it
-leaps, EXPOSURE how close to self-oscillation it gets. All of that is one curve per event,
-and the plugin currently shows none of them.
+A cloud chamber. Squelch fires radiation events through a resonant filter, so the display is the
+instrument physicists used to actually see particles: a chamber in which each particle leaves a
+visible track, and the track's shape tells you what the particle was.
 
-So the display is the sweeps. **Cutoff runs up on a log axis, time runs along the beam,
-and depth is the stereo placement each voice was given.** Each event is a curve starting at
-its peak and falling to the held cutoff, as bright as its intensity. The grid the scheduler
-is running on is ticked along the floor, so a step that did not fire — PROBABILITY below
-100% — is a visible gap rather than something you have to count.
+Every event is a **bullet fired into the chamber** from the left. Its track curves as it travels,
+and the curve is the filter's cutoff sweep: a steep fall is a fast decay, a long shallow arc is a
+slow one. The track fades as the vapour disperses, so the chamber always shows the last few
+seconds of fire without a scrolling axis.
 
-Self-oscillation is a labelled frame on the feedback: above it the filter rings on its own.
-That line is the difference between SQUELCH as a filter and SQUELCH as a synthesiser, and
-it is currently something you find by ear.
+What makes each reaction different is what the track does:
 
-## 2. Axes
+| Reaction | Track |
+| --- | --- |
+| RADIATION | A straight track that forks as it goes, each fork fainter |
+| FISSION | The track splits in two at a point and both halves carry on |
+| SLUDGE | A heavy, slow track that spirals inward as it loses energy |
+| CHEMICAL | A track that scatters off invisible obstacles, changing direction at each |
+| ALIEN | A track that does not behave: it loops, reverses, and crosses itself |
 
-| Axis | Meaning | Numbered as |
-| --- | --- | --- |
-| Time | The last few seconds, newest at the front | Seconds back, 0 to -4s |
-| Cutoff | The ladder's cutoff, log | Hz, at 20, 100, 1k and 10k |
-| Depth | Stereo placement, which FALLOUT spreads | L and R |
+That is the plugin's character drawn as five genuinely different pictures, rather than five
+identical curves at different heights.
 
-## 3. DSP state to visual state
+## 2. What is drawn
 
 | DSP source | Drawn as |
 | --- | --- |
-| `Envelopes` per-sample `cutoffHz` | The strong trace: the sweep, one curve per event |
-| `Envelopes::held` | A level frame at the cutoff the sweeps fall back to |
-| `Envelopes::glide` | The curvature of the fall, which is the trace itself |
-| `ScheduledEvent::start` | Where on the time axis each curve begins |
-| `ScheduledEvent::intensity` and `accent` | Brightness of the curve; an accented step is brighter |
-| `ScheduledEvent::tone` | How high the curve starts, which is the pitch variation |
-| `ScheduledEvent::slide` | Curves joined rather than separate, so a slid step is one continuous line |
-| `ScheduledEvent::pan` | Its depth |
-| `Placement::voices[i].env` | The brightness of each of the up-to-16 live voices as it decays |
-| `Placement::voices[i].panL` / `panR` | Where each voice sits across the depth axis |
-| `Placement::voices[i].send` | Hatching behind the curve: what is going to the reverb |
-| `Envelopes` per-sample `feedback`, against the self-oscillation point | A labelled frame; the part of a curve drawn above it is where the filter is ringing on its own |
-| GRID with the host tempo, in GRID mode | Ticks on the floor at the step positions |
-| MODE | Which ticks appear: the grid in GRID, none in FREE, the detected onsets in INPUT, scattered in RANDOM |
-| PROBABILITY | A step tick that fired is filled; one that did not is hollow |
-| SPREAD | The height each curve starts at above the held cutoff, in octaves |
-| REACTION | The curve's shape per engine, and the readout. Each reaction's own state — SLUDGE's subharmonic phases, CHEMICAL's event register — adds its own fainter marks under the curve |
-| `Envelopes` per-sample `drive` with DRIVE and TOXICITY | Thickness of the curve where it is being saturated |
-| `meltdown` staged values | While MELTDOWN is held, the frame edge is lit and the affected frames move to where the meltdown put them |
-| IONIZE | The frame edge is lit while it is latched |
-| `voiceL` / `voiceR` enclosure filters | The box's two side walls dim with each channel's enclosure |
-| Readouts | The reaction, the grid division, the held cutoff in Hz, and the live voice count |
+| Each fired event | One bullet entering the chamber |
+| The envelope's cutoff sweep for that event | The curve of its track: the sweep is the trajectory |
+| The event's intensity and accent | How bright and how long the track is |
+| Its pan | Where in the chamber it is fired, left to right |
+| SPREAD | How far the track travels before it settles |
+| DECAY | How long the track takes to fade |
+| The feedback against the self-oscillation point | Tracks above it ionise: they thicken and leave a halo, because the filter is ringing on its own |
+| REACTION | The track behaviour above |
+| The grid the scheduler runs on | Tick marks along the chamber's entry edge |
+| PROBABILITY | A step that did not fire leaves its tick dark and no bullet |
+| MELTDOWN | The whole chamber saturates: every track thickens at once |
+| IONIZE | A standing haze in the chamber while it is latched |
+| The held cutoff | The chamber's resting floor line, where tracks come to rest |
+| Readouts | The reaction, the grid division, the held cutoff, and the live voice count |
+
+## 3. Why the current one does not work
+
+The present display plots every event as the same exponential curve on a shared grid, so all five
+reactions look identical and the picture is a smear of overlapping lines. It also depends on
+events being visible against an empty grid, which on a dense grid setting they are not. The
+chamber gives each reaction its own shape and gives the display a resting state.
 
 ## 4. Implementation
 
-**Built.** `Source/SquelchDisplay.*` subclasses `sps::VisualizerPanel` and sits above the
-three columns. The audio thread publishes a `DisplayState` once per block through a
-seqlock (`Source/DisplayState.h`): the events that fired with the curve constants the
-envelope built for them, the grid steps with whether each passed the probability gate,
-the 16 placement voices, and the held and current cutoff. Each sweep is plotted from the
-closed form `rest + (peak - rest) e^(-u/tau)` the envelope itself plays, not sampled at
-frame rate. The display's clock is a monotonic sample count the audio thread keeps, so a
-host locate does not drag it.
+**Not built.** `Source/SquelchDisplay.*` draws the generic version and should be replaced.
 
-Not drawn yet: the per-reaction marks (SLUDGE subharmonics, CHEMICAL register), the
-enclosure walls, the saturation thickness and the MELTDOWN frame move. MELTDOWN and the
-voice count are readouts only.
+The data path is right and can stay: `Source/DisplayState.h` publishes, through a seqlock, the
+events that fired with the curve constants the envelope built for them, the grid steps with
+whether each passed the probability gate, the 16 placement voices, the held and current cutoff,
+the reachable feedback, and the meltdown and ionize flags.
+
+What is missing is the per-reaction track behaviour, which the display should derive from the
+published reaction and the event's own constants — not invent.
 
 **Paint cost.** Not measured.
-
-## 5. Reference images
-
-None yet.
