@@ -488,7 +488,7 @@ void SquelchAudioProcessorEditor::resized()
     area.removeFromTop (gap);
 
     display.setBounds (area.removeFromTop (squelch::SquelchDisplay::designHeight)
-                           .withSizeKeepingCentre (juce::jmin (area.getWidth(), sps::VisualizerPanel::designWidth * 2),
+                           .withSizeKeepingCentre (juce::jmin (area.getWidth(), squelch::SquelchDisplay::designWidth),
                                                    squelch::SquelchDisplay::designHeight));
     area.removeFromTop (gap);
 

@@ -2,45 +2,40 @@
 
 #include <functional>
 
-#include "Components/VisualizerPanel.h"
+#include <juce_gui_basics/juce_gui_basics.h>
+
 #include "DisplayState.h"
 
 namespace squelch
 {
-/** The sweeps as the shared 4D isometric display: cutoff up on a log axis, the last few
-    seconds along the beam, and each event's stereo placement as depth. Each event is the
-    closed-form curve the envelope built for it, plotted from the same constants the audio
-    thread is playing, so the display and the sound cannot disagree about a sweep.
+/** A cloud chamber. Every event is a bullet fired into the chamber from the left, and its track
+    is the filter's cutoff sweep drawn in the chamber's own coordinates: height is the cutoff in
+    Hz, so a steep fall is a fast decay and a long shallow arc is a slow one. What the track does
+    on the way is the reaction: RADIATION forks, FISSION splits, SLUDGE coils, CHEMICAL scatters,
+    ALIEN loops back on itself. Tracks fade as the vapour disperses.
 
-    Everything on it is a value the audio thread published. See visualizer.md.
-*/
-class SquelchDisplay final : public sps::VisualizerPanel
+    Everything drawn is a value the audio thread published. See visualizer.md. */
+class SquelchDisplay final : public juce::Component,
+                             private juce::Timer
 {
 public:
+    static constexpr int designWidth = 880;
     static constexpr int designHeight = 340;
 
-    /** `source` is polled by the panel's clock; pass an empty function to drive it by hand. */
+    /** `source` is polled on the message thread at 60 Hz. */
     explicit SquelchDisplay (std::function<DisplayState()> source);
+    ~SquelchDisplay() override;
 
-    /** Feeds a state and draws one frame without a message loop, for a bench. */
-    void step (const DisplayState& newState, double deltaSeconds);
-
-protected:
-    void tick (double deltaSeconds) override;
-    void drawFrame (juce::Graphics& g, const sps::visualizer::Iso& iso, double deltaSeconds) override;
-    void drawStage (juce::Graphics& g, const sps::visualizer::Iso& iso) override;
+    void paint (juce::Graphics& g) override;
 
 private:
-    void update (const DisplayState& newState);
-    float valueFor (float hz) const;
-    float timeFor (std::int64_t sample) const;
+    void timerCallback() override;
 
     std::function<DisplayState()> source;
     DisplayState state;
-
     unsigned lastEvents = 0;
+    float flashAmount = 0.0f;
     bool seen = false;
-    juce::StringArray lastLeft, lastRight;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SquelchDisplay)
 };
