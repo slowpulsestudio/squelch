@@ -4,6 +4,7 @@
 
 #include "Parameters.h"
 #include "Presets.h"
+#include "DisplayState.h"
 #include "Dsp/Alien.h"
 #include "Dsp/Chemical.h"
 #include "Dsp/Envelopes.h"
@@ -58,6 +59,9 @@ public:
     /// Which preset the toolbar has selected, so a closed and reopened editor shows the same
     /// one. Saved with the session; a session saved before presets existed reads as Default.
     std::atomic<int> presetIndex { squelch::presets::notChosen };
+
+    /// The last block's state, for the display. Published once per block.
+    squelch::DisplayState displayState() const { return published.read(); }
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
@@ -134,6 +138,15 @@ private:
     int dryDelayPos { 0 };
 
     int currentReaction { 0 };
+
+    /// The snapshot the audio thread builds up across the block, and the slot it
+    /// is published into at the end of it.
+    squelch::DisplayState display;
+    squelch::Published<squelch::DisplayState> published;
+
+    /// The display's own clock: a monotonic sample count that a host locate does
+    /// not move, unlike `timelinePosition`.
+    std::int64_t displayClock { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SquelchAudioProcessor)
 };

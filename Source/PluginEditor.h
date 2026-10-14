@@ -11,6 +11,7 @@
 #include "Components/SwitchSelector.h"
 #include "Components/Toggle.h"
 #include "PluginProcessor.h"
+#include "SquelchDisplay.h"
 
 /// A held gesture: the design system's momentary InputButton, with the parameter on while
 /// it is down and off the instant it is released, wherever the pointer is.
@@ -86,6 +87,7 @@ private:
     SquelchAudioProcessor& processor;
 
     sps::PresetToolbar toolbar;
+    squelch::SquelchDisplay display;
     juce::TooltipWindow tooltips { this, 500 };
 
     std::array<Section, numSections> sections;

@@ -183,9 +183,11 @@ void MomentaryGesture::mouseUp (const juce::MouseEvent&)
 
 SquelchAudioProcessorEditor::SquelchAudioProcessorEditor (SquelchAudioProcessor& p)
     : juce::AudioProcessorEditor (&p), processor (p),
+      display ([&p] { return p.displayState(); }),
       meltdown (*p.apvts.getParameter (squelch::ids::meltdown), "Meltdown",
                 squelch::meltdownTooltip)
 {
+    addAndMakeVisible (display);
     addAndMakeVisible (toolbar);
 
     // The frames go in first so the controls sit in front of them.
@@ -326,6 +328,7 @@ SquelchAudioProcessorEditor::SquelchAudioProcessorEditor (SquelchAudioProcessor&
     setSize (juce::jmax (margin * 2 + m.outer * 2 + m.centre + gap * 2,
                          margin * 2 + sps::PresetToolbar::designWidth),
              margin * 2 + sps::PresetToolbar::designHeight + gap
+                 + squelch::SquelchDisplay::designHeight + gap
                  + sps::BackgroundFrame::titleOverhang + m.tallest);
 }
 
@@ -482,6 +485,11 @@ void SquelchAudioProcessorEditor::resized()
 
     toolbar.setBounds (area.removeFromTop (sps::PresetToolbar::designHeight)
                            .withWidth (sps::PresetToolbar::designWidth));
+    area.removeFromTop (gap);
+
+    display.setBounds (area.removeFromTop (squelch::SquelchDisplay::designHeight)
+                           .withSizeKeepingCentre (juce::jmin (area.getWidth(), sps::VisualizerPanel::designWidth * 2),
+                                                   squelch::SquelchDisplay::designHeight));
     area.removeFromTop (gap);
 
     // The title straddles the top edge, so the frames need room above them.

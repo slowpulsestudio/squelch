@@ -60,17 +60,18 @@ it is currently something you find by ear.
 
 ## 4. Implementation
 
-**Not built yet.** Squelch has no display; the editor is a three-column control layout.
+**Built.** `Source/SquelchDisplay.*` subclasses `sps::VisualizerPanel` and sits above the
+three columns. The audio thread publishes a `DisplayState` once per block through a
+seqlock (`Source/DisplayState.h`): the events that fired with the curve constants the
+envelope built for them, the grid steps with whether each passed the probability gate,
+the 16 placement voices, and the held and current cutoff. Each sweep is plotted from the
+closed form `rest + (peak - rest) e^(-u/tau)` the envelope itself plays, not sampled at
+frame rate. The display's clock is a monotonic sample count the audio thread keeps, so a
+host locate does not drag it.
 
-**What has to change.** The scheduler, envelopes and placement all hold what is needed and
-none of it is published. It needs a snapshot once per block carrying: the events that fired
-this block with their fields, the envelope's current cutoff, held cutoff and feedback, the
-16 placement voices, and the grid position with whether the last step fired. All fixed size —
-the event list is already bounded and the voice pool is 16 — so it can go in a preallocated
-lock-free slot.
-
-The display keeps its own ring of the last few seconds of cutoff, since the engine only
-publishes the present.
+Not drawn yet: the per-reaction marks (SLUDGE subharmonics, CHEMICAL register), the
+enclosure walls, the saturation thickness and the MELTDOWN frame move. MELTDOWN and the
+voice count are readouts only.
 
 **Paint cost.** Not measured.
 

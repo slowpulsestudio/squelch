@@ -37,6 +37,9 @@ namespace squelch::dsp
     inline constexpr double kGlideS = 0.002;
     inline constexpr int kEnvelopeStream = 22;
 
+    /// Where the ladder rings on its own, from Ladder.h's loop.
+    inline constexpr double kSelfOscillation = 4.0;
+
     struct EnvelopeProfile
     {
         double baseHz { 180.0 };
@@ -63,6 +66,22 @@ namespace squelch::dsp
     };
 
     struct EnvelopeValues { double cutoffHz, feedback, drive; };
+
+    /** The curve the last `trigger` built, in octaves:
+
+            oct(u) = rest + (peak - rest) e^(-u/tau)
+
+        glided in from `slideFromOct` over `slideSeconds` when the step slides.
+        Published so a display plots the sweep the audio thread is playing rather
+        than sampling the per-sample value at frame rate. */
+    struct EnvelopeCurve
+    {
+        double restOct, peakOct, tauSeconds, slideFromOct, slideSeconds;
+
+        /// The cutoff the curve is passing through when its feedback reaches
+        /// kSelfOscillation, or negative when this event never gets there.
+        double ringOct;
+    };
 
     class Envelopes
     {
@@ -178,6 +197,37 @@ namespace squelch::dsp
             return { std::max (glidedCutoff, 20.0),
                      std::clamp (glidedFeedback, 0.0, 3.95),
                      driveAmount };
+        }
+
+        /// The cutoff the curve settles back to between events.
+        double heldOctave() const noexcept { return baseOct; }
+
+        /// The saturation inside the ladder's loop, which TOXICITY sets.
+        double loopDrive() const noexcept { return driveAmount; }
+
+        /// The most feedback this EXPOSURE can reach, for an accented event.
+        double reachableFeedback() const noexcept
+        {
+            return peak + kAccentFeedback * params.exposure;
+        }
+
+        EnvelopeCurve lastTriggered() const noexcept
+        {
+            EnvelopeCurve c;
+            c.restOct = registerOct;
+            c.peakOct = registerOct + depth;
+            c.tauSeconds = tauEvent;
+            c.slideFromOct = slideFrom;
+            c.slideSeconds = double (slideLength) / sr;
+
+            // feedback(s) = floor + (peak - floor) s w + accent, and the curve is
+            // rest + depth s, so the two meet at exactly one cutoff.
+            const auto span = (peak - floor) * weight;
+            const auto accentTerm = kAccentFeedback * accent * params.exposure * weight;
+            const auto s = span > 0.0 ? (kSelfOscillation - floor - accentTerm) / span : 2.0;
+            c.ringOct = (s >= 0.0 && s <= 1.0) ? registerOct + depth * s : -1.0;
+
+            return c;
         }
 
     private:

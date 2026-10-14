@@ -34,6 +34,9 @@ namespace squelch::dsp
 
     struct PlacementValues { double env, panL, panR, send; };
 
+    /// One live voice as the display reads it.
+    struct VoiceState { double env, panL, panR, send; };
+
     class Placement
     {
     public:
@@ -105,12 +108,29 @@ namespace squelch::dsp
             return { envelope, panLeft, panRight, sendLevel };
         }
 
+        /// Copies the live voices into `out`, which must hold kMaxVoices, and
+        /// returns how many there were.
+        int liveVoices (VoiceState* out) const noexcept
+        {
+            auto live = 0;
+
+            for (const auto& v : voices)
+                if (v.active)
+                    out[live++] = { v.level, v.panL, v.panR, v.level * v.distance };
+
+            return live;
+        }
+
     private:
         struct Voice
         {
             bool active { false };
             double curve { 1.0 }, tauBlocks { 1.0 }, panL { 1.0 }, panR { 1.0 }, distance { 1.0 };
             int attackBlocks { 1 }, lengthBlocks { 1 }, elapsed { 0 };
+
+            /// This voice's own envelope at the last control step, which the pool
+            /// otherwise only ever folds into the maximum.
+            double level { 0.0 };
         };
 
         Voice* findFree() noexcept
@@ -140,13 +160,17 @@ namespace squelch::dsp
             for (auto& v : voices)
             {
                 if (! v.active)
+                {
+                    v.level = 0.0;
                     continue;
+                }
 
                 const auto t = double (v.elapsed);
                 auto e = std::pow (std::exp (-t / std::max (v.tauBlocks, 1e-6)), v.curve);
                 if (v.elapsed < v.attackBlocks)
                     e *= std::min (t / v.attackBlocks, 1.0);
 
+                v.level = e;
                 rawEnv = std::max (rawEnv, e);
                 rawSend = std::max (rawSend, e * v.distance);
                 // The loudest event present owns the placement.

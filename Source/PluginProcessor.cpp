@@ -103,6 +103,10 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     engineAlignPos = 0;
     timelinePosition = 0;
 
+    display = {};
+    display.sampleRate = sampleRate;
+    displayClock = 0;
+
     refreshReactionSettings();
 
     // Everything before the mix (the engine's own oversampler plus drive's)
@@ -316,6 +320,9 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     refreshReactionSettings();
 
+    // Fixed for the block, so an event can carry the drive it is being saturated by.
+    display.drive = static_cast<float> (envelopes.loopDrive());
+
     const auto inputChannels = getTotalNumInputChannels();
     const auto outputChannels = getTotalNumOutputChannels();
     const auto latency = preMixLatency();
@@ -343,9 +350,26 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     if (wrapAt > 0)
         collect (pendingWrapEvents, wrapTo, numSamples - wrapAt);
 
+    // The grid the scheduler is running on, so a step that did not fire reads as a
+    // gap rather than as nothing. Positions are moved onto the display's own clock.
+    scheduler.forSteps (timelinePosition, wrapAt > 0 ? wrapAt : numSamples,
+                        [this] (std::int64_t start, bool fired)
+                        {
+                            auto& slot = display.steps[display.stepCount
+                                                       % squelch::DisplayState::maxSteps];
+                            slot.start = displayClock + (start - timelinePosition);
+                            slot.fired = fired;
+                            ++display.stepCount;
+                        });
+
     const auto reaction = squelch::reactionNames[currentReaction];
 
-    const auto fire = [this, reaction] (const squelch::dsp::ScheduledEvent& e)
+    // Where in the block the event being fired sits, so the display can place it on
+    // its own clock. INPUT fires from inside the sample loop, GRID from the top of it.
+    int blockOffset = 0;
+    double lastCutoffHz = display.cutoffHz, lastFeedback = 0.0;
+
+    const auto fire = [this, reaction, &blockOffset] (const squelch::dsp::ScheduledEvent& e)
     {
         if (reaction == "ALIEN")
             alien.trigger (e.index, e.accent, e.pan, 0.0);
@@ -363,10 +387,31 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         placement.trigger (e);
         noiseBed.trigger (e);
         midWobble.trigger();
+
+        // The curve the envelope has just built, so the display draws the sweep
+        // being played rather than a frame-rate sampling of it.
+        const auto curve = envelopes.lastTriggered();
+        auto& slot = display.events[display.eventCount % squelch::DisplayState::maxEvents];
+
+        slot.start = displayClock + blockOffset;
+        slot.restOct = static_cast<float> (curve.restOct);
+        slot.peakOct = static_cast<float> (curve.peakOct);
+        slot.tauSeconds = static_cast<float> (curve.tauSeconds);
+        slot.slideFromOct = static_cast<float> (curve.slideFromOct);
+        slot.slideSeconds = static_cast<float> (curve.slideSeconds);
+        slot.ringOct = static_cast<float> (curve.ringOct);
+        slot.intensity = static_cast<float> (e.intensity);
+        slot.pan = static_cast<float> (e.pan);
+        slot.drive = display.drive;
+        slot.accent = e.accent;
+        slot.slide = e.slide;
+
+        ++display.eventCount;
     };
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
+        blockOffset = sample;
         const auto wrapped = wrapAt > 0 && sample >= wrapAt;
         const auto position = wrapped ? wrapTo + (sample - wrapAt) : timelinePosition + sample;
 
@@ -406,6 +451,8 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         dryDelayPos = (dryDelayPos + 1 == latency) ? 0 : (dryDelayPos + 1);
 
         const auto env = envelopes.process();
+        lastCutoffHz = env.cutoffHz;
+        lastFeedback = env.feedback;
 
         double wetL = 0.0, wetR = 0.0;
 
@@ -499,6 +546,29 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     timelinePosition = wrapAt > 0 ? wrapTo + (numSamples - wrapAt) : timelinePosition + numSamples;
     meltdown.advance (numSamples);
+
+    displayClock += numSamples;
+    display.nowSample = displayClock;
+    display.cutoffHz = static_cast<float> (lastCutoffHz);
+    display.feedback = static_cast<float> (lastFeedback);
+    display.heldHz = static_cast<float> (std::pow (2.0, envelopes.heldOctave()));
+    display.peakFeedback = static_cast<float> (envelopes.reachableFeedback());
+    display.stepSeconds = static_cast<float> (scheduler.stepSeconds());
+    display.reaction = currentReaction;
+    display.mode = static_cast<int> (apvts.getRawParameterValue (squelch::ids::mode)->load());
+    display.gridIndex = static_cast<int> (apvts.getRawParameterValue (squelch::ids::grid)->load());
+    display.meltdown = meltdown.active();
+    display.ionize = apvts.getRawParameterValue (squelch::ids::ionize)->load() > 0.5f;
+
+    squelch::dsp::VoiceState live[squelch::dsp::Placement::kMaxVoices];
+    const auto liveCount = placement.liveVoices (live);
+
+    for (int i = 0; i < liveCount; ++i)
+        display.voices[(size_t) i] = { static_cast<float> (live[i].env), static_cast<float> (live[i].panL),
+                                       static_cast<float> (live[i].panR), static_cast<float> (live[i].send) };
+
+    display.liveVoices = liveCount;
+    published.write (display);
 }
 
 juce::AudioProcessorEditor* SquelchAudioProcessor::createEditor()

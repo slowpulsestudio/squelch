@@ -28,7 +28,7 @@ FetchContent_MakeAvailable(JUCE)
 FetchContent_Declare(
     SpsDesignSystem
     GIT_REPOSITORY https://github.com/slowpulsestudio/sps-juce-design-system.git
-    GIT_TAG v1.8.0
+    GIT_TAG v1.9.0
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(SpsDesignSystem)
@@ -49,6 +49,7 @@ juce_add_plugin(Squelch
 target_sources(Squelch PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
+    Source/SquelchDisplay.cpp
 )
 
 target_compile_definitions(Squelch PUBLIC
@@ -95,6 +96,7 @@ target_compile_definitions(SquelchSnapshot PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_STANDALONE_APPLICATION=1
+    JUCE_MODAL_LOOPS_PERMITTED=1
 )
 target_link_libraries(SquelchSnapshot PRIVATE
     Squelch

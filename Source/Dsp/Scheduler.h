@@ -137,6 +137,40 @@ namespace squelch::dsp
                 stepEvents (static_cast<std::uint64_t> (k), from, from + length, emit);
         }
 
+        /** Every GRID step landing in [from, from + length), with whether it passed
+            the probability gate, so a step that did not fire is a visible gap rather
+            than something to count. Only GRID: RANDOM carries its walk forward and
+            INPUT reads its positions out of the audio, so neither is indexable.
+        */
+        template <typename Emit>
+        void forSteps (std::int64_t from, int length, Emit&& emit) const
+        {
+            if (settings.mode != Mode::grid)
+                return;
+
+            const auto step = stepSeconds();
+            if (step <= 0.0 || length <= 0)
+                return;
+
+            const auto stepSamples = step * sr;
+            const auto first = static_cast<std::int64_t> (std::floor (from / stepSamples)) - 2;
+            const auto last = static_cast<std::int64_t> (std::floor ((from + length) / stepSamples)) + 2;
+
+            const auto density = 1.0 - kDensitySuppression * settings.containment;
+            const auto probability = settings.probability * density;
+
+            for (auto k = std::max<std::int64_t> (first, 0); k <= last; ++k)
+            {
+                const auto index = static_cast<std::uint64_t> (k);
+                const auto start = static_cast<std::int64_t> (timeOfStep (index) * sr);
+
+                if (start < from || start >= from + length)
+                    continue;
+
+                emit (start, rng::urand ({ settings.seed, 1, index }) < probability);
+            }
+        }
+
         /** INPUT mode: onsets from a half-wave-rectified flux envelope.
 
             Call once per sample with the input's magnitude. The prototype
