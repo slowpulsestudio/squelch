@@ -28,7 +28,7 @@ FetchContent_MakeAvailable(JUCE)
 FetchContent_Declare(
     SpsDesignSystem
     GIT_REPOSITORY https://github.com/slowpulsestudio/sps-juce-design-system.git
-    GIT_TAG v1.9.0
+    GIT_TAG v1.10.0
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(SpsDesignSystem)
