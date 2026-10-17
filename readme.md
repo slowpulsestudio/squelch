@@ -343,8 +343,18 @@ Settled; each is the behaviour already implemented and validated, and none chang
 
 #### UI contract
 
-This covers only controls that exist on the editor. Input trim, output trim and mix are
-internal state: not host parameters, no strips, no readouts, no automation.
+Input trim and output trim remain internal state: not host parameters, no strips,
+no readouts, no automation. MIX is an exposed, automatable host parameter in the
+OUTPUT section. It defaults to fully wet, recalls with the session, and is excluded
+from presets and Randomise. Older sessions retain their saved internal mix value;
+sessions without one open fully wet.
+
+The editor is 1027 by 668 logical pixels and uses two compact control rows:
+STRUCTURE, GESTURES and OUTPUT above
+VOICE and COLOUR. REACTION sits beside the shallower cloud-chamber display.
+STRUCTURE puts its timing selector beside a two-row grid of Seed and its knobs,
+rather than stacking everything vertically. The full layout scales down together
+when needed to fit the available screen, preserving control proportions.
 
 No control shows a numeric value. A knob is the design system's minimal style, a knob
 and its name, with a tooltip. The host sees each continuous control as a normalised
@@ -360,6 +370,7 @@ and its name, with a tooltip. The host sees each continuous control as a normali
 | DECAY, EXPOSURE, TOXICITY, SPREAD | knobs | sweep a different range per reaction, so there is no single unit; knob only |
 | PROBABILITY, FLUX, REACTIVITY, VOLATILITY, HALF-LIFE, CONTAINMENT, DRIVE, CONTAMINATION, COLLIMATOR, FALLOUT, AFTERGLOW | knobs | normalised 0 to 1; no unit, no readout |
 | IONIZEAMOUNT (labelled Charge) | knob | normalised 0 to 1 |
+| MIX | knob in OUTPUT | 0 is dry, 1 is fully wet; linear blend before peak safety, with latency-aligned dry audio and 20 ms smoothing; no readout |
 | IONIZE, CLIP | toggles | off or on |
 | MELTDOWN | momentary button | held is on, released is off |
 
@@ -763,4 +774,3 @@ Glyphs and transfer functions are in [dsp-maths.md](dsp-maths.md).
 - (ι)  IONIZE — latched: scatters each event in stereo, spectrum and depth
 - (Ω)  MELTDOWN — momentary: staged runaway
 - (⌈⌉)  CLIP — hard ceiling instead of the limiter, latency padded to match
-

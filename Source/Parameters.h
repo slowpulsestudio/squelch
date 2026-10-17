@@ -44,6 +44,7 @@ namespace squelch
 
         inline constexpr auto seed          = "SEED";
         inline constexpr auto clip          = "CLIP";
+        inline constexpr auto mix           = "MIX";
     }
 
     inline const juce::StringArray reactionNames { "RADIATION", "FISSION", "SLUDGE",
@@ -156,6 +157,9 @@ namespace squelch
     inline constexpr auto clipTooltip =
         u8"(\u2308\u2309) \u2014 a hard ceiling instead of the lookahead limiter. Latency is "
         "padded to match, so switching never makes the host re-sync. The brackets are the ceiling function.";
+    inline constexpr auto mixTooltip =
+        "Dry/wet mix. Fully left is the latency-aligned dry input; fully right is "
+        "the processed reaction. Defaults to fully wet. Presets and Randomise leave it alone.";
 
     /** Parameters Randomise and the presets leave alone.
 
@@ -171,6 +175,6 @@ namespace squelch
     inline bool isExcludedFromPresets (const juce::String& id)
     {
         return id == ids::clip || id == ids::meltdown || id == ids::ionize
-            || id == ids::ionizeAmount;
+            || id == ids::ionizeAmount || id == ids::mix;
     }
 }

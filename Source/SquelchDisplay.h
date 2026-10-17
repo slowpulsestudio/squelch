@@ -20,7 +20,7 @@ class SquelchDisplay final : public juce::Component,
 {
 public:
     static constexpr int designWidth = 880;
-    static constexpr int designHeight = 340;
+    static constexpr int designHeight = 180;
 
     /** `source` is polled on the message thread at 60 Hz. */
     explicit SquelchDisplay (std::function<DisplayState()> source);

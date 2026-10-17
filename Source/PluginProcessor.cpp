@@ -47,6 +47,10 @@ SquelchAudioProcessor::createParameterLayout()
     layout.add (std::make_unique<juce::AudioParameterInt> (
         juce::ParameterID { ids::seed, 1 }, "Seed", 0, 999, 0));
 
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ids::mix, 1 }, "Mix",
+        juce::NormalisableRange<float> { 0.0f, 1.0f }, 1.0f));
+
     juce::ignoreUnused (version);
     return layout;
 }
@@ -61,7 +65,7 @@ void SquelchAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
     inputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (inputTrimDb.load()));
     outputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (outputTrimDb.load()));
-    wetMix.setCurrentAndTargetValue (mix.load());
+    wetMix.setCurrentAndTargetValue (apvts.getRawParameterValue (squelch::ids::mix)->load());
     enrichmentGain.setCurrentAndTargetValue (currentEnrichmentGain());
 
     meltdown.prepare (sampleRate);
@@ -311,7 +315,7 @@ void SquelchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     inputGain.setTargetValue (juce::Decibels::decibelsToGain (inputTrimDb.load()));
     outputGain.setTargetValue (juce::Decibels::decibelsToGain (outputTrimDb.load()));
-    wetMix.setTargetValue (mix.load());
+    wetMix.setTargetValue (apvts.getRawParameterValue (squelch::ids::mix)->load());
     enrichmentGain.setTargetValue (currentEnrichmentGain());
 
     int wrapAt = -1;
@@ -584,7 +588,6 @@ void SquelchAudioProcessor::getStateInformation (juce::MemoryBlock& destination)
     // rather than with a preset.
     state.setProperty ("inputTrimDb", inputTrimDb.load(), nullptr);
     state.setProperty ("outputTrimDb", outputTrimDb.load(), nullptr);
-    state.setProperty ("mix", mix.load(), nullptr);
     state.setProperty ("preset", presetIndex.load(), nullptr);
 
     if (auto xml = state.createXml())
@@ -598,6 +601,15 @@ void SquelchAudioProcessor::setStateInformation (const void* data, int size)
         return;
 
     auto state = juce::ValueTree::fromXml (*xml);
+    if (! state.getChildWithProperty ("id", squelch::ids::mix).isValid())
+    {
+        juce::ValueTree mixState ("PARAM");
+        mixState.setProperty ("id", squelch::ids::mix, nullptr);
+        mixState.setProperty ("value", juce::jlimit (0.0f, 1.0f,
+                                static_cast<float> (state.getProperty ("mix", 1.0f))), nullptr);
+        state.addChild (mixState, -1, nullptr);
+    }
+    state.removeProperty ("mix", nullptr);
     apvts.replaceState (state);
 
     // MELTDOWN is held, so a session never reopens mid-meltdown. IONIZE and CLIP are
@@ -606,7 +618,6 @@ void SquelchAudioProcessor::setStateInformation (const void* data, int size)
 
     inputTrimDb = static_cast<float> (state.getProperty ("inputTrimDb", 0.0));
     outputTrimDb = static_cast<float> (state.getProperty ("outputTrimDb", 0.0));
-    mix = static_cast<float> (state.getProperty ("mix", 1.0));
     // A restored session is never fresh, even if it was saved before an editor opened.
     const auto savedPreset = static_cast<int> (state.getProperty ("preset", 0));
     presetIndex = savedPreset == squelch::presets::notChosen ? 0 : savedPreset;

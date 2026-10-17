@@ -49,10 +49,11 @@ void setParameter (SquelchAudioProcessor& processor, const char* id, float norma
 }
 
 /** Two seconds of deterministic noise through a fresh processor, left channel. */
-std::vector<float> render (int reactionIndex, float enrichment, float mix, bool meltdownHeld = false)
+std::vector<float> render (int reactionIndex, float enrichment, float mix, bool meltdownHeld = false,
+                           float inputLevel = 1.0f)
 {
     SquelchAudioProcessor processor;
-    processor.mix = mix;
+    setParameter (processor, squelch::ids::mix, mix);
 
     const auto* reaction = processor.apvts.getParameter (squelch::ids::reaction);
     setParameter (processor, squelch::ids::reaction, reaction->convertTo0to1 (static_cast<float> (reactionIndex)));
@@ -72,7 +73,7 @@ std::vector<float> render (int reactionIndex, float enrichment, float mix, bool 
         for (int i = 0; i < blockSize; ++i)
         {
             state = state * 1664525u + 1013904223u;
-            const auto v = 0.25f * (static_cast<float> (state >> 8) / 8388608.0f - 1.0f);
+            const auto v = inputLevel * 0.25f * (static_cast<float> (state >> 8) / 8388608.0f - 1.0f);
             buffer.setSample (0, i, v);
             buffer.setSample (1, i, v);
         }
@@ -380,7 +381,7 @@ long long firstDifference (const std::vector<float>& a, const std::vector<float>
 std::vector<float> renderCeiling (double amplitude, bool clip, int block = blockSize, double seconds = 1.0)
 {
     SquelchAudioProcessor processor;
-    processor.mix = 0.0f;
+    setParameter (processor, squelch::ids::mix, 0.0f);
     setParameter (processor, squelch::ids::clip, clip ? 1.0f : 0.0f);
     processor.prepareToPlay (sampleRate, block);
 
@@ -472,9 +473,108 @@ std::vector<float> renderEvents (const std::function<TransportState (std::int64_
 
 } // namespace
 
-int main()
+int main (int argc, char** argv)
 {
     const juce::ScopedJuceInitialiser_GUI juceInitialiser;
+
+    if (argc > 1 && juce::String (argv[1]) == "--mix-layout")
+    {
+        SquelchAudioProcessor processor;
+        SquelchAudioProcessorEditor editor (processor);
+        auto* parameter = processor.apvts.getParameter (squelch::ids::mix);
+        auto* content = editor.getChildComponent (0);
+        if (parameter == nullptr || content == nullptr)
+        {
+            report (false, "Mix parameter and editor content exist", 0, "needs 1");
+            return 1;
+        }
+        auto* knob = dynamic_cast<sps::SimpleKnob*> (content->findChildWithID (squelch::ids::mix));
+        report (parameter != nullptr && parameter->isAutomatable() && parameter->getValue() == 1.0f,
+                "Mix is automatable and defaults fully wet", parameter->getValue(), "needs 1");
+        report (knob != nullptr, "Mix has an editor knob", knob != nullptr, "needs 1");
+        if (knob != nullptr)
+        {
+            knob->control()->setValue (0.35, juce::sendNotificationSync);
+            report (std::abs (parameter->getValue() - 0.35f) < 1.0e-6f,
+                    "Mix knob updates the host parameter", parameter->getValue(), "needs 0.35");
+            setParameter (processor, squelch::ids::mix, 0.6f);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+            report (std::abs (knob->control()->getValue() - 0.6) < 1.0e-6,
+                    "Mix automation updates the knob", knob->control()->getValue(), "needs 0.6");
+        }
+        for (int preset = 0; preset < squelch::presets::names.size(); ++preset)
+            squelch::presets::apply (processor.apvts, preset);
+        squelch::presets::randomise (processor.apvts);
+        report (std::abs (parameter->getValue() - 0.6f) < 1.0e-6f, "Presets and Randomise preserve Mix",
+                parameter->getValue(), "needs 0.6");
+
+        juce::MemoryBlock saved;
+        processor.getStateInformation (saved);
+        SquelchAudioProcessor restored;
+        restored.setStateInformation (saved.getData(), (int) saved.getSize());
+        report (std::abs (restored.apvts.getRawParameterValue (squelch::ids::mix)->load() - 0.6f) < 1.0e-6f,
+                "Session recalls Mix", restored.apvts.getRawParameterValue (squelch::ids::mix)->load(), "needs 0.6");
+
+        for (const auto legacyValue : { 0.0f, 0.4f, 1.0f })
+        {
+            auto legacy = processor.apvts.copyState();
+            legacy.removeChild (legacy.getChildWithProperty ("id", squelch::ids::mix), nullptr);
+            legacy.setProperty ("mix", legacyValue, nullptr);
+            juce::MemoryBlock data;
+            juce::AudioProcessor::copyXmlToBinary (*legacy.createXml(), data);
+            restored.setStateInformation (data.getData(), (int) data.getSize());
+            report (std::abs (restored.apvts.getRawParameterValue (squelch::ids::mix)->load() - legacyValue) < 1.0e-6f,
+                    "Legacy session migrates Mix", restored.apvts.getRawParameterValue (squelch::ids::mix)->load(),
+                    juce::String (legacyValue).toRawUTF8());
+            legacy.removeProperty ("mix", nullptr);
+            juce::AudioProcessor::copyXmlToBinary (*legacy.createXml(), data);
+            restored.setStateInformation (data.getData(), (int) data.getSize());
+            report (restored.apvts.getRawParameterValue (squelch::ids::mix)->load() == 1.0f,
+                    "Session without Mix defaults fully wet",
+                    restored.apvts.getRawParameterValue (squelch::ids::mix)->load(), "needs 1");
+        }
+
+        const auto native = content->getLocalBounds();
+        report (native.getWidth() <= 1100 && native.getHeight() <= 700,
+                "Compact editor fits the screen budget", native.getHeight(), "height <= 700, width <= 1100");
+        for (const auto scale : { 1.0f, 0.8f, 0.65f })
+        {
+            editor.setSize (juce::roundToInt ((float) native.getWidth() * scale),
+                            juce::roundToInt ((float) native.getHeight() * scale));
+            auto contained = true, separated = true;
+            std::vector<juce::Component*> controls;
+            for (auto* child : content->getChildren())
+            {
+                contained = contained && editor.getLocalBounds().contains (editor.getLocalArea (child, child->getLocalBounds()));
+                if (dynamic_cast<sps::BackgroundFrame*> (child) == nullptr)
+                    controls.push_back (child);
+            }
+            for (size_t i = 0; i < controls.size(); ++i)
+                for (size_t j = i + 1; j < controls.size(); ++j)
+                    separated = separated && ! controls[i]->getBounds().intersects (controls[j]->getBounds());
+            report (contained && separated, "Editor controls fit without overlap",
+                    scale, "scale (all controls inside editor, no intersecting footprints)");
+        }
+
+        for (int reaction = 0; reaction < squelch::reactionNames.size(); ++reaction)
+        {
+            const auto dry = render (reaction, 0.5f, 0.0f, false, 0.001f);
+            const auto wet = render (reaction, 0.5f, 1.0f, false, 0.001f);
+            const auto blend = render (reaction, 0.5f, 0.5f, false, 0.001f);
+            report (rms (difference (blend, dry)) > 1.0e-7 && rms (difference (blend, wet)) > 1.0e-7,
+                    "Mix reaches the audio blend", reaction, "reaction (half wet differs from both endpoints)");
+            // Synthesised reactions can limit even on quiet input. Low wet levels let us
+            // measure the blend's linear slope without the post-blend safety changing it.
+            const auto low = render (reaction, 0.5f, 0.001f, false, 0.001f);
+            const auto twice = render (reaction, 0.5f, 0.002f, false, 0.001f);
+            auto error = 0.0f;
+            for (size_t i = 0; i < low.size(); ++i)
+                error = std::max (error, std::abs (twice[i] - (2.0f * low[i] - dry[i])));
+            report (error < 1.0e-6f, "Doubling Mix doubles the wet contribution before limiting",
+                    error, "maximum sample error < 0.000001");
+        }
+        return failures == 0 ? 0 : 1;
+    }
 
     // What the listener hears of ENRICHMENT: the processed output with the
     // knob at either end of its travel, as a level relative to the output
@@ -1302,10 +1402,10 @@ int main()
             {
                 processor.inputTrimDb = -3.0f;
                 processor.outputTrimDb = 2.0f;
-                processor.mix = 0.4f;
+                setParameter (processor, squelch::ids::mix, 0.4f);
                 editor.getToolbar().onRandomise();
                 strips = strips && processor.inputTrimDb.load() == -3.0f && processor.outputTrimDb.load() == 2.0f
-                                && processor.mix.load() == 0.4f;
+                                && std::abs (normalised (processor, squelch::ids::mix) - 0.4f) < 1.0e-6f;
             }
             report (strips, "Processor Randomise leaves the input and output strips alone", strips ? 1.0 : 0.0, "held (needs 1)");
         }

@@ -105,3 +105,23 @@ target_link_libraries(SquelchSnapshot PRIVATE
     juce::juce_dsp
     juce::juce_recommended_config_flags
 )
+
+juce_add_console_app(SquelchProcessorTest PRODUCT_NAME "SquelchProcessorTest")
+target_sources(SquelchProcessorTest PRIVATE Harness/ProcessorTest.cpp)
+target_compile_features(SquelchProcessorTest PRIVATE cxx_std_17)
+target_compile_definitions(SquelchProcessorTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_STANDALONE_APPLICATION=1
+    JUCE_MODAL_LOOPS_PERMITTED=1
+)
+target_link_libraries(SquelchProcessorTest PRIVATE
+    Squelch
+    sps::DesignSystem
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags
+)
+
+enable_testing()
+add_test(NAME SquelchMixLayout COMMAND SquelchProcessorTest --mix-layout)

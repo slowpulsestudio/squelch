@@ -10,8 +10,8 @@
 /** The presets, and Randomise.
 
     Both act on the same set of parameters, taken from the APVTS and filtered by
-    isExcludedFromPresets, so neither can disagree with the layout. The Input and
-    Output strips are not parameters and are never reached.
+    isExcludedFromPresets, so neither can disagree with the layout. MIX is a
+    session-level output parameter and is excluded; trims remain internal state.
 */
 namespace squelch::presets
 {

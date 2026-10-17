@@ -54,7 +54,6 @@ public:
     /// here rather than in the APVTS: never in a preset, never randomised.
     std::atomic<float> inputTrimDb { 0.0f };
     std::atomic<float> outputTrimDb { 0.0f };
-    std::atomic<float> mix { 1.0f };
 
     /// Which preset the toolbar has selected, so a closed and reopened editor shows the same
     /// one. Saved with the session; a session saved before presets existed reads as Default.

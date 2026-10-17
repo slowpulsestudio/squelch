@@ -56,22 +56,21 @@ private:
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
     };
 
-    /// A titled panel and its controls, in the order the cheatsheet lists them: stacked down
-    /// a column, or laid along a row.
+    /// A titled panel with a horizontal row or a wrapping grid and optional leading selector.
     struct Section
     {
         sps::BackgroundFrame frame;
         std::vector<juce::Component*> controls;
         bool row = false;
 
-        /// Knobs per row in a column section.
+        /// Controls per row in a grid section.
         int columns = 1;
+        juce::Component* leadingControl = nullptr;
     };
 
-    enum SectionIndex { structure, voice, colour, gestures, numSections };
+    enum SectionIndex { structure, voice, colour, gestures, output, numSections };
 
-    /// Widths of the outer and middle columns, and the height they all share.
-    struct Metrics { int outer, centre, tallest; };
+    struct Metrics { int width, height, topRow, bottomRow; };
 
     Metrics measure() const;
     static void layOut (Section&, juce::Rectangle<int> frameArea);
@@ -86,13 +85,14 @@ private:
 
     SquelchAudioProcessor& processor;
 
+    juce::Component content;
     sps::PresetToolbar toolbar;
     squelch::SquelchDisplay display;
     juce::TooltipWindow tooltips { this, 500 };
 
     std::array<Section, numSections> sections;
 
-    /// The one control that is not in a section: it sits between VOICE and COLOUR.
+    /// The reaction selector sits beside the display.
     sps::SwitchSelector reaction { sps::SwitchSelector::Type::Symbol,
                                    squelch::reactionNames.size(),
                                    sps::SwitchSelector::Knob::Primary };
@@ -100,6 +100,8 @@ private:
     sps::Adjustor seed { sps::Adjustor::Usage::Seed };
     sps::Toggle ionize, clip;
     MomentaryGesture meltdown;
+    sps::SimpleKnob mix { sps::SimpleKnob::Style::Minimal };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mixAttachment;
 
     std::unique_ptr<juce::ParameterAttachment> reactionAttachment, modeAttachment,
                                                gridAttachment, seedAttachment;
