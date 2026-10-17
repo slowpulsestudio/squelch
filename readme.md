@@ -739,7 +739,7 @@ Measured, not opinions. Every one of these was a defect in the first prototype.
 
 # Cheatsheet
 
-Glyphs and transfer functions are in [dsp-maths.md](dsp-maths.md).
+Glyphs and transfer functions are in [dsp-maths.md](dsp-maths.md). Parameter names are in [nomenclature.md](nomenclature.md), factory values in [presets.md](presets.md), and the display mapping in [visualizer.md](visualizer.md).
 
 ### Structure — what fires, and when
 

@@ -135,11 +135,7 @@ The ladder covers the resonance, the short envelopes and the high Q. Reaction-le
 
 ## Why a ladder and not a biquad
 
-A TB-303 is a synth. It feeds its filter a sawtooth containing every harmonic, so a resonant peak always has something to amplify. SQUELCH is an effect, and arbitrary input has holes in its spectrum. Sweeping a resonant peak through a hole produces nothing.
-
-So the filter cannot be a peak that merely shapes what arrives. It has to be a resonator that rings on its own, excited by whatever comes in.
-
-That means a feedback ladder running near self-oscillation, not a biquad with a high Q.
+The feedback ladder is used as a self-ringing resonator rather than a biquad peak. The input-signal rationale is described once in [readme.md](readme.md).
 
 ## The ladder
 
